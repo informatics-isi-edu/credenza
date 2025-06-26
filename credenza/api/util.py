@@ -18,6 +18,7 @@ import time
 import base64
 import logging
 import ipaddress
+from typing import Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from tzlocal import get_localzone_name
@@ -57,7 +58,7 @@ class AESGCMCodec:
             logger.error(f"Encryption failed: {e}")
             raise
 
-    def decrypt(self, ciphertext: str) -> str | None:
+    def decrypt(self, ciphertext: str) -> Optional[str]:
         try:
             data_json = base64.urlsafe_b64decode(ciphertext.encode()).decode()
             data = json.loads(data_json)

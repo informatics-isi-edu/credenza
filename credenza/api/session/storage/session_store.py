@@ -18,7 +18,7 @@ import uuid
 import json
 import logging
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from credenza.api.session.storage.backends.base import StorageBackend
 from credenza.api.session.storage.backends.memory import MemoryBackend
 
@@ -100,13 +100,13 @@ class SessionStore:
         self.backend.delete(f"{self.prefix}{self.key_prefix}skey:{session_key}")
         self.backend.delete(f"{self.prefix}{self.key_prefix}sid:{session_id}")
 
-    def get_session_id_for_session_key(self, session_key: str) -> str | None:
+    def get_session_id_for_session_key(self, session_key: str) -> Optional[str]:
         val = self.backend.get(f"{self.prefix}{self.key_prefix}skey:{session_key}")
         if not val:
             return None
         return val.decode() if isinstance(val, bytes) else val
 
-    def get_session_key_for_session_id(self, session_id: str) -> str | None:
+    def get_session_key_for_session_id(self, session_id: str) -> Optional[str]:
         val = self.backend.get(f"{self.prefix}{self.key_prefix}sid:{session_id}")
         if not val:
             return None
@@ -151,7 +151,7 @@ class SessionStore:
         logger.debug(f"Created session {session_id} (realm={realm})")
         return session_key, session_data
 
-    def get_session_data(self, session_id) -> SessionData | None:
+    def get_session_data(self, session_id) -> Optional[str]:
         data = self.backend.get(self._key(session_id))
         if not data:
             return None
@@ -251,7 +251,7 @@ class SessionStore:
     def store_pkce_verifier(self, state: str, code_verifier: str, ttl: int = 600):
         self.backend.setex(f"{self.prefix}{self.oidc_prefix}pkce:{state}", code_verifier, ttl)
 
-    def get_pkce_verifier(self, state: str) -> str | None:
+    def get_pkce_verifier(self, state: str) -> Optional[str]:
         v = self.backend.get(f"{self.prefix}{self.oidc_prefix}pkce:{state}")
         if not v:
             return None
