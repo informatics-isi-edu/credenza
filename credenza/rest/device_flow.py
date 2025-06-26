@@ -17,12 +17,11 @@ import uuid
 import time
 import logging
 from datetime import datetime
-from distutils.util import strtobool
 from zoneinfo import ZoneInfo
 from tzlocal import get_localzone_name
 from flask import Blueprint, request, jsonify, redirect, abort, current_app
 from credenza.api.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, \
-    get_augmentation_provider, get_tokens_by_scope
+    get_augmentation_provider, get_tokens_by_scope, strtobool
 from credenza.telemetry import audit_event
 
 logger = logging.getLogger(__name__)
