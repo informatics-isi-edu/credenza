@@ -15,6 +15,7 @@
 #
 import time
 import logging
+from typing import Optional
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ class SessionAugmentationProvider(ABC):
         self,
         access_token: str,
         userinfo: dict,
-        scopes: list[str] | None = None,
+        scopes: Optional[list[str]] = None,
         access_type: str = "online"
     ) -> dict:
         """Fetch downstream or dependent tokens."""
