@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "credenza"
+version = "0.1"
+description = "OIDC Relying Party/Session Broker Web Service"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "USC Information Sciences Institute ISR Division", email = "isrd-support@isi.edu" }
+]
+urls = { Homepage = "https://github.com/informatics-isi-edu/credenza" }
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Internet :: Security"
+]
+dependencies = [
+  "flask",
+  "requests",
+  "authlib",
+  "pyjwt",
+  "pycryptodomex",
+  "tzlocal",
+  "redis",
+  "valkey",
+  "python-dotenv"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+  "requests-mock",
+  "fakeredis"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["credenza"]
+
+[tool.setuptools.package-data]
+credenza = ["credenza-wsgi.py"]
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.pytest.ini_options]
+minversion = "6.2"
+addopts = "-vv -r w --tb=short --disable-warnings --cov=credenza --cov-report=term-missing --cov-config=.coveragerc"
+filterwarnings = [
+  "always"
+]
+testpaths = [
+  "test"
+]
+
+[tool.tox]
+env_list = ["py"]
+
+[tool.tox.env.py]
+deps = [".[dev]"]
+commands = [
+  ["pytest", "{posargs}"]
+]

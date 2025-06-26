@@ -1,0 +1,28 @@
+# Redis configuration for Redis 6+ (also should be compatible with valkey)
+
+# ------------------- Networking -------------------
+bind 0.0.0.0
+protected-mode yes
+port 6379
+
+# ------------------- Persistence -------------------
+# Disable AOF, snapshotting if not needed
+appendonly no
+
+# ------------------- Security (ACL) -------------------
+# Disable the built-in default user entirely
+user default off
+
+# Create an administrative user with full privileges
+user credenza on >{{PASSWORD}} ~* +@all
+
+# ------------------- Logging -------------------
+# logfile /var/log/redis/redis-server.log
+
+# ------------------- Other recommended lock-downs -------------------
+# Rename dangerous commands to deny abuse (example)
+rename-command FLUSHDB ""
+rename-command FLUSHALL ""
+rename-command DEBUG ""
+
+# ------------------- End of configuration -------------------

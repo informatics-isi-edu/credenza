@@ -1,0 +1,6 @@
+[
+  "https://localhost/auth/realms/deriva",
+  "https://auth.globus.org",
+  "https://auth.nih.gov",
+  "https://oidc.okta.com"
+]

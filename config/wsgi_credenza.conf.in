@@ -1,0 +1,18 @@
+# this file must be loaded (alphabetically) after wsgi.conf
+AllowEncodedSlashes On
+
+WSGIPythonOptimize 1
+WSGIDaemonProcess @DAEMONUSER@ processes=1 threads=4 user=@DAEMONUSER@ maximum-requests=2000
+WSGIScriptAlias /authn @PYLIBDIR@/credenza/credenza-wsgi.py process-group=@DAEMONUSER@
+WSGIPassAuthorization On
+
+WSGISocketPrefix @WSGISOCKETPREFIX@
+
+<Location "/authn" >
+   AuthType None
+   Require all granted
+   WSGIProcessGroup @DAEMONUSER@
+
+   # site can disable redundant service logging by adding env=!dontlog to their CustomLog or similar directives
+   SetEnv dontlog
+</Location>

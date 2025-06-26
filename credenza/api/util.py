@@ -1,0 +1,254 @@
+#
+# Copyright 2025 University of Southern California
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+import json
+import time
+import base64
+import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from tzlocal import get_localzone_name
+from Cryptodome.Cipher import AES
+from Cryptodome.Random import get_random_bytes
+from flask import current_app, request, Response, abort
+from credenza.api.session.storage.session_store import SessionData
+from credenza.telemetry import audit_event
+
+
+logger = logging.getLogger(__name__)
+
+
+class AESGCMCodec:
+    def __init__(self, key: str):
+        if key is None:
+            raise ValueError("Key is required")
+        key_bytes = key.encode()
+        if len(key_bytes) not in (16, 24, 32):
+            raise ValueError(f"Key must be a 16, 24, or 32-byte UTF-8 string. Key length: {len(key_bytes)}")
+        self.key = key_bytes
+
+    def encrypt(self, plaintext: str) -> str:
+        try:
+            nonce = get_random_bytes(12)
+            cipher = AES.new(self.key, AES.MODE_GCM, nonce=nonce)
+            ciphertext, tag = cipher.encrypt_and_digest(plaintext.encode())
+
+            data = {
+                "nonce": base64.urlsafe_b64encode(nonce).decode(),
+                "ciphertext": base64.urlsafe_b64encode(ciphertext).decode(),
+                "tag": base64.urlsafe_b64encode(tag).decode()
+            }
+            return base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
+        except Exception as e:
+            logger.error(f"Encryption failed: {e}")
+            raise
+
+    def decrypt(self, ciphertext: str) -> str | None:
+        try:
+            data_json = base64.urlsafe_b64decode(ciphertext.encode()).decode()
+            data = json.loads(data_json)
+
+            nonce = base64.urlsafe_b64decode(data["nonce"])
+            ciphertext = base64.urlsafe_b64decode(data["ciphertext"])
+            tag = base64.urlsafe_b64decode(data["tag"])
+
+            cipher = AES.new(self.key, AES.MODE_GCM, nonce=nonce)
+            plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+            return plaintext.decode()
+        except Exception as e:
+            logger.error(f"Decryption failed: {e}")
+            return None
+
+
+def extract_session_key() -> (str, bool):
+    auth = request.headers.get("Authorization")
+    if auth and auth.startswith("Bearer "):
+        return auth.split(" ", 1)[1], True
+    cookie_val = request.cookies.get(current_app.config["COOKIE_NAME"])
+    return cookie_val, False
+
+
+def has_current_session() -> str or None:
+    skey,_ = extract_session_key()
+    if not skey:
+        return None
+
+    store = current_app.config["SESSION_STORE"]
+    sid, session = store.get_session_by_session_key(skey)
+    if not session:
+        return None
+
+    return sid
+
+
+def get_current_session() -> (str, SessionData):
+    skey, is_bearer_token = extract_session_key()
+    if not skey:
+        abort(404)
+
+    store = current_app.config["SESSION_STORE"]
+    sid, session = store.get_session_by_session_key(skey)
+    if sid and session:
+        return sid, session
+
+    provider = get_augmentation_provider(get_realm())
+    if (current_app.config.get("ENABLE_LEGACY_API", False) and
+        hasattr(provider, "session_from_bearer_token") and is_bearer_token):
+        skey, session = provider.session_from_bearer_token(skey)
+        return store.get_session_by_session_key(skey)
+    else:
+        abort(404)
+
+
+def get_realm(realm=None) -> str:
+    if realm and realm in current_app.config["OIDC_IDP_PROFILES"].keys():
+        return realm
+    default = current_app.config.get("DEFAULT_REALM")
+    if not default:
+        abort(400, "No valid realm provided and no DEFAULT_REALM configured")
+    return default
+
+
+def get_augmentation_provider(realm=None):
+    providers = current_app.config["SESSION_AUGMENTATION_PROVIDERS"]
+    provider = providers.get(realm, providers["default"])
+    logger.debug(f"Using augmentation provider {provider} for realm {realm}")
+    return provider
+
+
+def generate_nonce():
+  nonce = str(time.time()) + '.' + base64.urlsafe_b64encode(get_random_bytes(30)).decode() + '.'
+  return nonce
+
+
+def make_json_response(data):
+    return Response(
+        json.dumps(data, sort_keys=False),  # Preserve key order
+        mimetype="application/json"
+    )
+
+
+def get_effective_scopes(session: SessionData) -> list:
+    if not session:
+        return []
+    effective_scopes = list(session.scopes.split())
+    additional_scopes = list(session.additional_tokens.keys())
+    effective_scopes.extend(additional_scopes)
+    return effective_scopes
+
+
+def get_tokens_by_scope(session: SessionData) -> dict:
+    tokens = {session.scopes: {"access_token": session.access_token, "refresh_token": session.refresh_token}}
+    for k, v in session.additional_tokens.items():
+        tokens[k] = {"access_token": v["access_token"], "refresh_token": v.get("refresh_token")}
+
+    return tokens
+
+def refresh_access_token(sid, session):
+    sub = session.userinfo.get("sub")
+    user = session.userinfo.get("email")
+    realm = session.realm
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm)
+    updated = False
+
+    now = time.time()
+    token_expires_at = session.session_metadata.system.get("token_expires_at")
+    refresh_expires_at = session.session_metadata.system.get("refresh_expires_at")
+
+    # Refresh access token only when the token is expired or about to expire
+    if (token_expires_at and
+            token_expires_at < now + current_app.config.get("TOKEN_EXPIRY_THRESHOLD", 300) and
+            refresh_expires_at and
+            refresh_expires_at > now):
+
+        try:
+            refreshed = client.refresh_access_token(refresh_token=session.refresh_token)
+        except Exception as e:
+            logger.warning(
+                f"Access token refresh failed for session {sid} for user {user} {sub} on realm {realm}: {e}")
+            audit_event("access_token_refresh_failed", session_id=sid, user=user, error=str(e))
+            return updated
+
+        # update tokens and metadata
+        session.access_token = refreshed["access_token"]
+        session.refresh_token = refreshed.get("refresh_token", session.refresh_token)
+        session.id_token = refreshed.get("id_token", session.id_token)
+        session.session_metadata.system["token_expires_at"] = refreshed["expires_at"]
+        if "refresh_expires_at" in refreshed:
+            session.session_metadata.system["refresh_expires_at"] = \
+                refreshed["refresh_expires_at"]
+
+        logger.debug(f"Access token refresh for session {sid} for user {user} ({sub}) on realm {realm} complete")
+        audit_event("access_token_refreshed", session_id=sid, user=user, sub=sub, realm=realm)
+        updated = True
+
+    return updated
+
+
+
+def refresh_additional_tokens(sid, session):
+    sub = session.userinfo.get("sub")
+    user = session.userinfo.get("email")
+    realm = session.realm
+    tokens = session.additional_tokens or {}
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm)
+
+    updated = False
+    for scope, token in list(tokens.items()):
+        refresh_token = token.get("refresh_token")
+        if not refresh_token:
+            # logger.debug(f"Token for scope '{scope}' does not contain a refresh token and cannot be refreshed")
+            continue
+
+        now = time.time()
+        expires_at = token.get("expires_at", 0)
+        expiry_threshold = current_app.config.get("TOKEN_EXPIRY_THRESHOLD", 300)
+        if now < expires_at - expiry_threshold:
+            # current_time_dt = datetime.fromtimestamp(now, tz=ZoneInfo(get_localzone_name())).isoformat()
+            # expires_at_threshold_dt = datetime.fromtimestamp(expires_at - expiry_threshold,
+            #                                                  tz=ZoneInfo(get_localzone_name())).isoformat()
+            # logger.debug(f"Additional token refresh skipped for [sid={sid}, user={user}, sub={sub}, scope={scope}] "
+            #              f"with current time {current_time_dt} not exceeding expiry threshold {expires_at_threshold_dt}")
+            continue
+
+        try:
+            refreshed = client.refresh_access_token(refresh_token)
+            logger.debug(f"Additional token refresh successful for sid={sid}, user={user}, sub={sub}, scope={scope}")
+        except Exception as e:
+            tokens.pop(scope, None)
+            logger.warning(f"Token refresh failed for scope={scope}: {e}")
+            audit_event("additional_token_refresh_failed",
+                        sid=sid, user=user, sub=sub, scope=scope, realm=realm, error=str(e))
+            continue
+
+        tokens[scope].update({
+            "access_token": refreshed["access_token"],
+            "refresh_token": refreshed["refresh_token"],
+            "expires_at": refreshed["expires_at"],
+            "last_refresh_at": now,
+            "refreshed_count": token.get("refreshed_count", 0) + 1
+        })
+        updated = True
+
+        audit_event("additional_token_refresh_success",
+                    sid=sid,
+                    user=user,
+                    sub=sub,
+                    scope=scope,
+                    expires_at=datetime.fromtimestamp(refreshed["expires_at"],
+                                                      tz=ZoneInfo(get_localzone_name())).isoformat())
+    session.additional_tokens = tokens
+
+    return updated

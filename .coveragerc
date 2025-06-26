@@ -1,0 +1,5 @@
+[run]
+omit =
+    credenza/app.py
+    credenza/rest/discovery.py
+    credenza/telemetry/metrics/*
