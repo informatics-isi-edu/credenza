@@ -171,6 +171,72 @@ def test_put_session_with_refresh_access_token(client,
     # Finally, ensure update_session bumped the session TTL
     assert updated.expires_at == pytest.approx(now + store.ttl, abs=1)
 
+
+def test_put_session_with_refresh_access_token_failure(client,
+                                                       app,
+                                                       store,
+                                                       base_session,
+                                                       frozen_time,
+                                                       monkeypatch,
+                                                       audit_calls):
+    sid = "S_fail"
+    now = frozen_time
+
+    # Copy session and simulate token about to expire, but refresh still valid
+    sess = copy.deepcopy(base_session)
+    sess.session_metadata.system.update({
+        "token_expires_at":   now - 1,    # already expired
+        "refresh_expires_at": now + 600,  # still valid
+    })
+    sess.refresh_token = "bad_refresh_token"
+    sess.access_token  = "old_access_token"
+    sess.id_token      = "old_id_token"
+
+    # Patch get_current_session
+    monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+
+    # Patch map_session
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id: "dummy-map-key")
+
+    # Configure dummy client that fails
+    class DummyFailClient:
+        def refresh_access_token(self, refresh_token):
+            assert refresh_token == "bad_refresh_token"
+            raise Exception("mock token refresh failure")
+
+    class DummyFactory:
+        def get_client(self, realm, native_client=False):
+            assert realm == sess.realm
+            return DummyFailClient()
+
+    with app.app_context():
+        app.config["TOKEN_EXPIRY_THRESHOLD"] = 300
+        app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
+
+    resp = client.put("/session")
+    assert resp.status_code == 200
+
+    # Check audit includes the failure
+    assert any(ev == "access_token_refresh_failed" for ev, _ in audit_calls), audit_calls
+    assert any(ev == "session_extended" for ev, _ in audit_calls), audit_calls
+
+    # Fetch stored session
+    updated = store.get_session_data(sid)
+
+    # Verify no token fields were changed
+    assert updated.access_token  == "old_access_token"
+    assert updated.refresh_token == "bad_refresh_token"
+    assert updated.id_token      == "old_id_token"
+
+    # Metadata should be unchanged
+    meta = updated.session_metadata.system
+    assert meta["token_expires_at"]   == now - 1
+    assert meta["refresh_expires_at"] == now + 600
+
+    # But TTL was still bumped by update_session
+    assert updated.expires_at == pytest.approx(now + store.ttl, abs=1)
+
+
 def test_put_session_additional_tokens_refresh(client,
                                                app,
                                                store,

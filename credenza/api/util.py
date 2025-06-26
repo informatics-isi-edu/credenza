@@ -17,9 +17,11 @@ import json
 import time
 import base64
 import logging
+import ipaddress
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from tzlocal import get_localzone_name
+from publicsuffix2 import get_sld
 from Cryptodome.Cipher import AES
 from Cryptodome.Random import get_random_bytes
 from flask import current_app, request, Response, abort
@@ -156,6 +158,7 @@ def get_tokens_by_scope(session: SessionData) -> dict:
 
     return tokens
 
+
 def refresh_access_token(sid, session):
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
@@ -178,7 +181,8 @@ def refresh_access_token(sid, session):
         except Exception as e:
             logger.warning(
                 f"Access token refresh failed for session {sid} for user {user} {sub} on realm {realm}: {e}")
-            audit_event("access_token_refresh_failed", session_id=sid, user=user, error=str(e))
+            audit_event("access_token_refresh_failed",
+                        session_id=sid, user=user, sub=sub, realm=realm, error=str(e))
             return updated
 
         # update tokens and metadata
@@ -195,7 +199,6 @@ def refresh_access_token(sid, session):
         updated = True
 
     return updated
-
 
 
 def refresh_additional_tokens(sid, session):
@@ -252,6 +255,42 @@ def refresh_additional_tokens(sid, session):
     session.additional_tokens = tokens
 
     return updated
+
+
+def get_cookie_domain():
+    """
+    Determine which cookie domain to use, based on configuration.
+
+    - If COOKIE_DOMAIN is unset or None: do not set a cookie domain (passthrough to set_cookie which will use FQHN).
+    - If COOKIE_DOMAIN is 'true' or True: determine a base domain heuristically via publicsuffix2.get_sld().
+    - If COOKIE_DOMAIN is a non-IP-address string (e.g. 'example.org'): use it as-is.
+
+    Returns:
+        str | None: The cookie domain to use, or None to omit the 'domain' attribute.
+    """
+    configured = current_app.config.get("COOKIE_DOMAIN")
+
+    if configured and str(configured).lower() in ("true", "1", "yes"):
+        host = request.host.split(":")[0]  # strip port
+
+        # Rule out localhost or numeric IPs
+        try:
+            ipaddress.ip_address(host)
+            return None
+        except ValueError:
+            pass
+
+        if host.endswith("localhost"):
+            return None
+
+        base_domain = get_sld(host)
+        return base_domain if base_domain else None
+
+    if isinstance(configured, str) and configured.strip().lower() not in ("false", "none"):
+        return configured.strip()
+
+    return None
+
 
 # copied from distutils so we don't have to depend on it
 def strtobool (val):  # pragma: no cover

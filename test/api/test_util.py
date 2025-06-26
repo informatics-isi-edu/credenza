@@ -20,7 +20,7 @@ from flask import Flask
 from werkzeug.http import dump_cookie
 from werkzeug.exceptions import HTTPException, NotFound, Forbidden
 from credenza.api import util
-from credenza.api.util import get_tokens_by_scope
+from credenza.api.util import get_tokens_by_scope, get_cookie_domain
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
 from credenza.api.session.storage.session_store import SessionData
 
@@ -130,6 +130,7 @@ def test_extract_session_key_from_bearer_token(app):
         skey, is_bearer = util.extract_session_key()
         assert skey is None
 
+
 def test_get_realm():
     # Create a Flask application context
     app = Flask(__name__)
@@ -143,6 +144,7 @@ def test_get_realm():
         # None provided, should return DEFAULT_REALM
         assert util.get_realm(None) == "default_realm"
 
+
 def test_get_realm_no_default_causes_abort(monkeypatch):
     app = Flask(__name__)
     app.config["OIDC_IDP_PROFILES"] = {}
@@ -153,6 +155,7 @@ def test_get_realm_no_default_causes_abort(monkeypatch):
             util.get_realm(None)
         # Ensure abort created a 400 error
         assert excinfo.value.code == 400
+
 
 def test_generate_nonce_length_and_uniqueness():
     n1 = util.generate_nonce()
@@ -178,6 +181,7 @@ def test_get_effective_scopes_combines_scopes_and_additional_tokens(base_session
     scopes = util.get_effective_scopes(base_session)
     assert set(scopes) == {"openid", "profile", "svc1", "svc2"}
 
+
 def test_encrypt_decrypt_roundtrip():
     codec = util.AESGCMCodec("supersecretvalue")
     plaintext = {"key": "value"}
@@ -196,6 +200,7 @@ def test_get_tokens_by_scope_only_primary(base_session):
         "openid email": {"access_token": "A1", "refresh_token": "R1"}
     }
 
+
 def test_get_tokens_by_scope_with_additional(base_session):
     base_session.scopes = "openid"
     base_session.access_token = "A1"
@@ -210,3 +215,22 @@ def test_get_tokens_by_scope_with_additional(base_session):
         "svc1":   {"access_token": "A2", "refresh_token": None},
         "svc2":   {"access_token": "A3", "refresh_token": "R3"},
     }
+
+
+@pytest.mark.parametrize("host,config,expected", [
+    ("app.example.org", "true", "example.org"),
+    ("example.co.uk", "true", "example.co.uk"),
+    ("localhost", "true", None),
+    ("127.0.0.1", "true", None),
+    ("sub.my.example.com", "true", "example.com"),
+    ("app.example.org", "custom-domain.org", "custom-domain.org"),
+    ("app.example.org", None, None),
+    ("app.example.org", "false", None),
+])
+def test_get_cookie_domain(app, monkeypatch, host, config, expected):
+    app.config["COOKIE_DOMAIN"] = config
+
+    with app.test_request_context("/", base_url=f"http://{host}"):
+        monkeypatch.setattr("flask.current_app", app)
+        result = get_cookie_domain()
+        assert result == expected

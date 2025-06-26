@@ -19,7 +19,8 @@ import base64
 import logging
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify
-from credenza.api.util import has_current_session, get_effective_scopes, generate_nonce, get_augmentation_provider
+from credenza.api.util import has_current_session, get_effective_scopes, generate_nonce, get_augmentation_provider, \
+    get_cookie_domain
 from credenza.telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,12 @@ def callback():
     logger.debug(f"Callback referrer: {referrer}")
 
     response = redirect(referrer)
-    response.set_cookie(current_app.config["COOKIE_NAME"], session_key, httponly=True, secure=True, samesite="Lax")
+    response.set_cookie(current_app.config["COOKIE_NAME"],
+                        session_key,
+                        domain=get_cookie_domain(),
+                        httponly=True,
+                        secure=True,
+                        samesite="Lax")
 
     return response
 
