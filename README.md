@@ -41,6 +41,9 @@ federated environments.
 * [Application identity modernization poses significant risks](https://www.helpnetsecurity.com/2025/05/27/application-identity-modernization-risks/) – Help Net Security 
 * [Session Management in Microservices](https://www.geeksforgeeks.org/system-design/session-management-in-microservices) – GeeksforGeeks
 
+### Credenza Identity Flow
+![credenza-flow](./docs/credenza-flow.png)
+
 ### Project Status
 
 This project is being actively developed and should be considered Alpha quality. It is a functional prototype but is 
