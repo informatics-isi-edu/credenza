@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from tzlocal import get_localzone_name
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from credenza.api.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
-    refresh_additional_tokens
+    refresh_additional_tokens, revoke_tokens, is_browser_client
 from credenza.api.session.storage.session_store import SessionData
 from credenza.telemetry import audit_event
 
@@ -89,6 +89,8 @@ def delete_session():
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
     realm = session.realm
+
+    revoke_tokens(sid, session)
 
     store.delete_session(sid)
     audit_event("logout", session_id=sid, user=user, sub=sub, realm=realm)

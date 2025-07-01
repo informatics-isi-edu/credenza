@@ -200,6 +200,70 @@ def test_get_tokens_by_scope_only_primary(base_session):
         "openid email": {"access_token": "A1", "refresh_token": "R1"}
     }
 
+def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app):
+    """revoke_tokens() revokes access and refresh tokens per scope and emits audit events."""
+
+    sid = "session123"
+    realm = "example-realm"
+    userinfo = {
+        "sub": "abc123",
+        "email": "user@example.org"
+    }
+
+    class DummySession:
+        def __init__(self):
+            self.userinfo = userinfo
+            self.realm = realm
+
+    # Fake token map by scope
+    token_map = {
+        "scope1": {
+            "access_token": "access1",
+            "refresh_token": "refresh1"
+        },
+        "scope2": {
+            "access_token": "access2"  # no refresh token
+        }
+    }
+
+    # Mock token client with revocation
+    revoked_tokens = []
+
+    class DummyClient:
+        def revoke_token(self, scope, token, token_type_hint=None):
+            revoked_tokens.append((scope, token, token_type_hint))
+
+    audit_events = []
+
+    # Patch everything used by revoke_tokens
+    monkeypatch.setattr(util, "get_tokens_by_scope", lambda sess: token_map)
+    monkeypatch.setattr(util, "audit_event",
+                        lambda event, **kwargs: audit_events.append((event, kwargs)))
+
+    app.config["OIDC_CLIENT_FACTORY"] = type(
+        "DummyFactory", (), {"get_client": lambda self, r: DummyClient()}
+    )()
+
+    with app.app_context():
+        util.revoke_tokens(sid, DummySession())
+
+    # Validate expected tokens revoked
+    assert ("scope1", "access1", "access_token") in revoked_tokens
+    assert ("scope1", "refresh1", "refresh_token") in revoked_tokens
+    assert ("scope2", "access2", "access_token") in revoked_tokens
+    assert len(revoked_tokens) == 3
+
+    # Validate audit events
+    expected_events = [
+        ("access_token_revoked",
+         {"sid": sid, "user": "user@example.org", "sub": "abc123", "realm": realm, "scope": "scope1"}),
+        ("refresh_token_revoked",
+         {"sid": sid, "user": "user@example.org", "sub": "abc123", "realm": realm, "scope": "scope1"}),
+        ("access_token_revoked",
+         {"sid": sid, "user": "user@example.org", "sub": "abc123", "realm": realm, "scope": "scope2"}),
+    ]
+    assert audit_events == expected_events
+
 
 def test_get_tokens_by_scope_with_additional(base_session):
     base_session.scopes = "openid"

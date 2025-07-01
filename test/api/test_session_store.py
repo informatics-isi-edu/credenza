@@ -161,7 +161,7 @@ def test_get_session_data_decryption_failure(monkeypatch, store):
     store.crypto_codec = fake_codec
 
     # Manually jam any payload (will be fed to decrypt and return None)
-    bad_id = "baddencrypt"
+    bad_id = "bad-encrypt"
     key = store._key(bad_id)
     store.backend.setex(key,b"garbage", store.ttl)
     # Now get_session_data should catch the decryption failure,

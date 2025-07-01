@@ -153,7 +153,7 @@ def test_device_callback_success(client, app, store, monkeypatch, frozen_time):
         "id_token":"idtok","access_token":"acc","refresh_token":"rt",
         "scope":"openid","refresh_expires_in":0,"expires_at":frozen_time+300
     }
-    client_obj = app.config["OIDC_CLIENT_FACTORY"].get_client(app.config["DEFAULT_REALM"])
+    client_obj = app.config["OIDC_CLIENT_FACTORY"].get_client(app.config["DEFAULT_REALM"], native_client=True)
     monkeypatch.setattr(client_obj, "exchange_code_for_tokens", lambda code, s, v: tokens)
     monkeypatch.setattr(client_obj, "validate_id_token", lambda idt, nn: {"sub":"u","email":"e"})
     provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")

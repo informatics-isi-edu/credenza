@@ -341,13 +341,15 @@ def test_patch_session_invalid_json(client):
     resp = client.patch("/session", data="not json", content_type="application/json")
     assert resp.status_code == 400
 
-def test_delete_session_legacy(client, app):
+def test_delete_session_legacy(client, app, monkeypatch):
+    monkeypatch.setattr(sm,"revoke_tokens", lambda sid, session: None)
     app.config["ENABLE_LEGACY_API"] = True
     resp = client.delete("/session")
     assert resp.status_code == 303
     assert resp.headers["Location"] == "https://localhost/logout"
 
-def test_delete_session_normal(client, app):
+def test_delete_session_normal(client, app, monkeypatch):
+    monkeypatch.setattr(sm,"revoke_tokens", lambda sid, session: None)
     resp = client.delete("/session")
     assert resp.status_code == 200
     assert resp.json == {"status": "logged out"}

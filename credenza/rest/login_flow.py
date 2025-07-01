@@ -20,7 +20,7 @@ import logging
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify
 from credenza.api.util import has_current_session, get_effective_scopes, generate_nonce, get_augmentation_provider, \
-    get_cookie_domain
+    get_cookie_domain, revoke_tokens
 from credenza.telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -159,6 +159,7 @@ def logout():
     logout_url = profile.get("logout_url")
     logout_url_params = profile.get("logout_url_params")
 
+    revoke_tokens(sid, session)
     store.delete_session(sid)
 
     audit_event("logout", session_id=sid, user=user, sub=sub, realm=realm)

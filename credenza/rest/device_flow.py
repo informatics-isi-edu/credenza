@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from tzlocal import get_localzone_name
 from flask import Blueprint, request, jsonify, redirect, abort, current_app
 from credenza.api.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, \
-    get_augmentation_provider, get_tokens_by_scope, strtobool
+    get_augmentation_provider, revoke_tokens, strtobool
 from credenza.telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -133,10 +133,10 @@ def device_callback():
     # Determine refresh expiration
     now = time.time()
     refresh_expires_in = tokens.get("refresh_expires_in")
-    # 0 generally indicates "no expiry" (dubious) and None isn't helpful, so fall back to the default
-    # TODO: try to perform token introspection on the refresh token to get a provider specific TTL
+    # 0 generally indicates "no expiry" (dubious) and None isn't helpful, so fall back to the configured value or default
     if not refresh_expires_in:
-        refresh_expires_at = now + (30 * 86400)  # default to 30 days
+        refresh_expires_at = (
+                now + (current_app.config.get("MAX_REFRESH_TOKEN_LIFETIME", 14) * 86400))  # default to 14 days
     else:
         refresh_expires_at = now + refresh_expires_in
 
@@ -232,22 +232,7 @@ def device_logout():
     if not is_device:
         abort(403, description="Not a device session")
 
-    realm = get_realm(request.args.get("realm"))
-    factory = current_app.config["OIDC_CLIENT_FACTORY"]
-    client = factory.get_client(realm, native_client=True)
-
-    # try to revoke all associated tokens
-    try:
-        tokens = get_tokens_by_scope(session)
-        scopes = ' '.join(tokens.keys())
-        logger.debug(f"Revoking access tokens and refresh tokens (if present) for scopes: [{scopes}]")
-        for k, v in tokens.items():
-            client.revoke_token(k, v["access_token"], token_type_hint="access_token")
-            refresh_token = v.get("refresh_token")
-            if refresh_token:
-                client.revoke_token(k, refresh_token, token_type_hint="refresh_token")
-    except Exception as e:
-        logger.warning(f"Exception during token revocation: {e}")
+    revoke_tokens(sid, session)
 
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")

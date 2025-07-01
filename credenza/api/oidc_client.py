@@ -36,10 +36,11 @@ class OIDCClientFactory:
     def get_client(self, realm, native_client=False):
         if realm not in self.profile_map:
             raise ValueError(f"Unknown realm: {realm}")
-        if realm not in self._client_cache:
+        cache_key = realm if not native_client else realm + "_native"
+        if cache_key not in self._client_cache:
             profile = self.profile_map[realm]
-            self._client_cache[realm] = OIDCClient(profile, native_client)
-        return self._client_cache[realm]
+            self._client_cache[cache_key] = OIDCClient(profile, native_client)
+        return self._client_cache[cache_key]
 
 
 class OIDCClient:

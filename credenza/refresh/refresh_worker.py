@@ -15,18 +15,16 @@
 #
 import time
 import logging
-from credenza.api.util import refresh_access_token, refresh_additional_tokens
+from credenza.api.util import refresh_access_token, refresh_additional_tokens, revoke_tokens
 from credenza.telemetry import audit_event
 
 logger = logging.getLogger(__name__)
 
 def run_refresh_worker(app):
     store = app.config["SESSION_STORE"]
-    factory = app.config["OIDC_CLIENT_FACTORY"]
     profiles = app.config["OIDC_IDP_PROFILES"]
     interval = app.config.get("REFRESH_WORKER_POLL_INTERVAL", 60)
     session_expiry_threshold = app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
-    token_expiry_threshold = app.config.get("TOKEN_EXPIRY_THRESHOLD", 300)
 
     while True:
         now = time.time()
@@ -50,6 +48,7 @@ def run_refresh_worker(app):
             refresh_expires_at = sys_metadata.get("refresh_expires_at")
             if refresh_expires_at and now > refresh_expires_at:
                 audit_event("refresh_expired", session_id=sid)
+                revoke_tokens(sid, session)
                 store.delete_session(sid)
                 continue
 
@@ -59,7 +58,6 @@ def run_refresh_worker(app):
                 continue
 
             modified = False
-            client = factory.get_client(realm)
             allow_auto_refresh = session.session_metadata.system.get("allow_automatic_refresh", False)
 
             # Refresh access tokens for sessions with automatic refresh allowed

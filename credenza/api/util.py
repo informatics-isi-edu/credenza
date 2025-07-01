@@ -258,6 +258,27 @@ def refresh_additional_tokens(sid, session):
     return updated
 
 
+def revoke_tokens(sid, session):
+    sub = session.userinfo.get("sub")
+    user = session.userinfo.get("email")
+    realm = session.realm
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(realm)
+    try:
+        # try to revoke all tokens associated with the session
+        tokens = get_tokens_by_scope(session)
+        scopes = ' '.join(tokens.keys())
+        logger.debug(f"Revoking access tokens and refresh tokens (if present) for scopes: [{scopes}]")
+        for k, v in tokens.items():
+            client.revoke_token(k, v["access_token"], token_type_hint="access_token")
+            audit_event("access_token_revoked", sid=sid, user=user, sub=sub, realm=realm, scope=k)
+            refresh_token = v.get("refresh_token")
+            if refresh_token:
+                client.revoke_token(k, refresh_token, token_type_hint="refresh_token")
+                audit_event("refresh_token_revoked", sid=sid, user=user, sub=sub, realm=realm, scope=k)
+    except Exception as e:
+        logger.warning(f"Exception during token revocation: {e}")
+
+
 def get_cookie_domain():
     """
     Determine which cookie domain to use, based on configuration.
@@ -292,6 +313,14 @@ def get_cookie_domain():
 
     return None
 
+
+def is_browser_client(request): # pragma: no cover
+    has_cookie = current_app.config["COOKIE_NAME"] in request.cookies
+    accept_html = "text/html" in request.headers.get("Accept", "")
+    ua = request.headers.get("User-Agent", "").lower()
+    ua_looks_browser = any(x in ua for x in ["mozilla", "chrome", "safari", "edge", "firefox"])
+
+    return has_cookie and (accept_html or ua_looks_browser)
 
 # copied from distutils so we don't have to depend on it
 def strtobool (val):  # pragma: no cover
