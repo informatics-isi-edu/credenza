@@ -25,6 +25,9 @@ class ValkeyBackend(StorageBackend):
     def setex(self, k,v,t):
         self.r.set(k,v,t)
 
+    def set(self, k, v):
+        self.r.set(k, v)
+
     def get(self, k):
         return self.r.get(k)
 

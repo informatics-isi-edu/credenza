@@ -151,7 +151,7 @@ class SessionStore:
         logger.debug(f"Created session {session_id} (realm={realm})")
         return session_key, session_data
 
-    def get_session_data(self, session_id) -> Optional[str]:
+    def get_session_data(self, session_id) -> Optional[SessionData]:
         data = self.backend.get(self._key(session_id))
         if not data:
             return None

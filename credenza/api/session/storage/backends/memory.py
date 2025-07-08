@@ -36,16 +36,23 @@ class MemoryBackend(StorageBackend):
             raise ValueError("value cannot be None")
         self._store[key] = (value, expiration)
 
+    def set(self, key: str, value: Union[str, bytes]) -> None:
+        if not value:
+            raise ValueError("value cannot be None")
+        self._store[key] = (value, None)  # None for expiration means no expiry
+
     def get(self, key: str) -> Optional[bytes]:
         entry = self._store.get(key)
         if not entry:
             return None
         value, expiration = entry
-        now = time.time()
-        if now >= expiration:
-            # expired
-            del self._store[key]
-            return None
+        # If expiration is None, it's permanent storage
+        if expiration is not None:
+            now = time.time()
+            if now >= expiration:
+                # expired
+                del self._store[key]
+                return None
         return value if isinstance(value, bytes) else value.encode()
 
     def delete(self, key: str) -> None:
@@ -56,7 +63,8 @@ class MemoryBackend(StorageBackend):
         # purge expired keys first
         for k in list(self._store.keys()):
             _, expiration = self._store[k]
-            if now >= expiration:
+            # Only check expiration if it's not None (permanent storage)
+            if expiration is not None and now >= expiration:
                 del self._store[k]
         # fnmatch for glob pattern matching
         return fnmatch.filter(list(self._store.keys()), pattern)
@@ -73,6 +81,9 @@ class MemoryBackend(StorageBackend):
         if not entry:
             return -2  # key missing
         _, expiration = entry
+        # If expiration is None, it's permanent storage
+        if expiration is None:
+            return -1  # no expiration
         now = time.time()
         remaining = expiration - now
         if remaining < 0:

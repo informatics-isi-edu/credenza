@@ -43,6 +43,15 @@ class SQLiteBackend(StorageBackend):
         """, (key, blob, expires_at))
         self.conn.commit()
 
+    def set(self, key: str, value: Union[str, bytes]) -> None:
+        """Set a key-value pair without expiration (permanent storage)"""
+        blob = value if isinstance(value, (bytes, bytearray)) else value.encode()
+        self.conn.execute("""
+            INSERT OR REPLACE INTO credenza (key, value, expires_at)
+            VALUES (?, ?, ?)
+        """, (key, blob, None))  # None for expires_at means no expiration
+        self.conn.commit()
+
     def get(self, key: str) -> Optional[bytes]:
         cur = self.conn.execute("""
             SELECT value, expires_at FROM credenza WHERE key = ?

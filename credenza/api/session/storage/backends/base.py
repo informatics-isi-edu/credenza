@@ -30,6 +30,9 @@ class StorageBackend(ABC):
     def setex(self, key: str, value: Union[str, bytes], ttl: int) -> None: ...
 
     @abstractmethod
+    def set(self, key: str, value: Union[str, bytes]) -> None: ...
+
+    @abstractmethod
     def get(self, key: str) -> Optional[bytes]: ...
 
     @abstractmethod

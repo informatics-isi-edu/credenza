@@ -25,6 +25,9 @@ class RedisBackend(StorageBackend):
     def setex(self, k,v,t):
         self.r.setex(k,t,v)
 
+    def set(self, k, v):
+        self.r.set(k, v)
+
     def get(self, k):
         v=self.r.get(k)
         return v
