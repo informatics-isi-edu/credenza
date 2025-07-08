@@ -19,10 +19,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from tzlocal import get_localzone_name
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
-from credenza.api.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
+from ..api.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
     refresh_additional_tokens, revoke_tokens, is_browser_client
-from credenza.api.session.storage.session_store import SessionData
-from credenza.telemetry import audit_event
+from ..api.session.storage.session_store import SessionData
+from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
 

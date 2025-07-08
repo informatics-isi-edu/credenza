@@ -53,7 +53,7 @@ where = ["."]
 include = ["credenza"]
 
 [tool.setuptools.package-data]
-credenza = ["credenza-wsgi.py"]
+credenza = ["credenza_wsgi.py"]
 
 [tool.setuptools]
 zip-safe = false

@@ -17,7 +17,7 @@ import time
 import fnmatch
 import logging
 from typing import List, Optional, Union
-from credenza.api.session.storage.backends.base import StorageBackend
+from .base import StorageBackend
 
 logger = logging.getLogger(__name__)
 

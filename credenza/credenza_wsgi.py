@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from credenza.app import create_app, start_refresh_worker
+from .app import create_app, start_refresh_worker
 
 application = create_app()
 start_refresh_worker(application)

@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 from typing import Iterable
-from credenza.api.session.storage.backends.base import StorageBackend
+from .base import StorageBackend
 
 class ValkeyBackend(StorageBackend):
     def __init__(self, **kwargs):

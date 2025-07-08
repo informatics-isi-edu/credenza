@@ -26,8 +26,8 @@ from publicsuffix2 import get_sld
 from Cryptodome.Cipher import AES
 from Cryptodome.Random import get_random_bytes
 from flask import current_app, request, Response, abort
-from credenza.api.session.storage.session_store import SessionData
-from credenza.telemetry import audit_event
+from .session.storage.session_store import SessionData
+from ..telemetry import audit_event
 
 
 logger = logging.getLogger(__name__)

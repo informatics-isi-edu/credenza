@@ -22,16 +22,16 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from werkzeug.utils import import_string
 from werkzeug.exceptions import HTTPException
-from credenza.api.oidc_client import OIDCClientFactory
-from credenza.api.session.storage.session_store import SessionStore
-from credenza.api.session.storage.backends.base import create_storage_backend
-from credenza.api.util import AESGCMCodec
-from credenza.rest.session import session_blueprint
-from credenza.rest.login_flow import login_blueprint
-from credenza.rest.device_flow import device_blueprint
-from credenza.rest.discovery import discovery_blueprint
-from credenza.telemetry.metrics.prometheus import metrics_blueprint
-from credenza.refresh.refresh_worker import run_refresh_worker
+from .api.oidc_client import OIDCClientFactory
+from .api.session.storage.session_store import SessionStore
+from .api.session.storage.backends.base import create_storage_backend
+from .api.util import AESGCMCodec
+from .rest.session import session_blueprint
+from .rest.login_flow import login_blueprint
+from .rest.device_flow import device_blueprint
+from .rest.discovery import discovery_blueprint
+from .telemetry.metrics.prometheus import metrics_blueprint
+from .refresh.refresh_worker import run_refresh_worker
 
 logger = logging.getLogger(__name__)
 

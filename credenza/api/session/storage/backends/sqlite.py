@@ -17,8 +17,9 @@ import sqlite3
 import time
 import fnmatch
 from typing import Optional, List, Iterable, Union
+from .base import StorageBackend
 
-class SQLiteBackend:
+class SQLiteBackend(StorageBackend):
     """
     A simple SQLite-based key-value store with TTL support.
     """

@@ -13,4 +13,4 @@ ENV PYTHONPATH=/credenza
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-CMD ["gunicorn", "--workers", "1", "--threads", "4", "--bind", "0.0.0.0:8999", "credenza.credenza-wsgi:application"]
+CMD ["gunicorn", "--workers", "1", "--threads", "4", "--bind", "0.0.0.0:8999", "credenza.credenza_wsgi:application"]

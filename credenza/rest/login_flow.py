@@ -19,9 +19,9 @@ import base64
 import logging
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify
-from credenza.api.util import has_current_session, get_effective_scopes, generate_nonce, get_augmentation_provider, \
+from ..api.util import has_current_session, get_effective_scopes, generate_nonce, get_augmentation_provider, \
     get_cookie_domain, revoke_tokens
-from credenza.telemetry import audit_event
+from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
 

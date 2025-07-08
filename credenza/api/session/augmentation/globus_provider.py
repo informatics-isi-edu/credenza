@@ -18,10 +18,10 @@ from http.client import HTTPException
 import requests
 import logging
 from flask import current_app, abort
-from credenza.api.util import get_effective_scopes
-from credenza.api.session.storage.session_store import SessionData
-from credenza.api.session.augmentation.base_provider import DefaultSessionAugmentationProvider
-from credenza.telemetry import audit_event
+from .base_provider import DefaultSessionAugmentationProvider
+from ...util import get_effective_scopes
+from ...session.storage.session_store import SessionData
+from ....telemetry import audit_event
 
 logger = logging.getLogger(__name__)
 

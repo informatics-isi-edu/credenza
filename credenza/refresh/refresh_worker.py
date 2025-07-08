@@ -15,8 +15,8 @@
 #
 import time
 import logging
-from credenza.api.util import refresh_access_token, refresh_additional_tokens, revoke_tokens
-from credenza.telemetry import audit_event
+from ..api.util import refresh_access_token, refresh_additional_tokens, revoke_tokens
+from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
 

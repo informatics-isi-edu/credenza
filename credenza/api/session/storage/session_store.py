@@ -19,8 +19,8 @@ import json
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional
-from credenza.api.session.storage.backends.base import StorageBackend
-from credenza.api.session.storage.backends.memory import MemoryBackend
+from .backends.base import StorageBackend
+from .backends.memory import MemoryBackend
 
 logger = logging.getLogger(__name__)
 

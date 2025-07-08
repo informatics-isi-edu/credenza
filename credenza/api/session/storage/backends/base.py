@@ -17,7 +17,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional, List, Union, Iterable
 from werkzeug.utils import import_string
-from credenza.api.session.storage.backends import STORAGE_BACKENDS
+from . import STORAGE_BACKENDS
 
 logger = logging.getLogger(__name__)
 
