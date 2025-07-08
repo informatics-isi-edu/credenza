@@ -16,9 +16,9 @@
 import copy
 import time
 import pytest
-from credenza.api import util as um
-from credenza.refresh import refresh_worker as rw
-from credenza.refresh.refresh_worker import run_refresh_worker
+from credenza.broker.api import util as um
+from credenza.broker.refresh import refresh_worker as rw
+from credenza.broker.refresh.refresh_worker import run_refresh_worker
 
 
 @pytest.fixture

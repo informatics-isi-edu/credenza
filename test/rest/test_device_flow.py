@@ -17,8 +17,8 @@ import pytest
 import uuid
 import time
 from urllib.parse import urlparse, parse_qs
-from credenza.rest import device_flow as df
-from credenza.api.session.storage.session_store import SessionData
+from credenza.broker.rest import device_flow as df
+from credenza.broker.api.session.storage.session_store import SessionData
 
 class DummyDeviceOAuth:
     def create_authorization_url(self, url, state, nonce, redirect_uri, access_type):

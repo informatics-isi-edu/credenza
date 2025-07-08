@@ -19,8 +19,8 @@ import pytest
 import requests
 from types import SimpleNamespace
 from authlib.integrations.requests_client import OAuth2Session
-from authlib.jose import jwt, JsonWebKey
-from credenza.api.oidc_client import OIDCClientFactory, OIDCClient
+from authlib.jose import jwt
+from credenza.broker.api.oidc_client import OIDCClientFactory, OIDCClient
 
 # Shared profile fixtures
 @pytest.fixture

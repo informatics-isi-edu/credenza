@@ -100,7 +100,7 @@ def load_config(app):
     # create session augmentation provider map
     provider_map = \
         {"default":
-             import_string("credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider")()}
+             import_string("credenza.broker.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider")()}
     for realm, prof in app.config["OIDC_IDP_PROFILES"].items():
         cls_path = prof.get("session_augmentation_provider")
         if cls_path:

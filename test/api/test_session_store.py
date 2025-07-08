@@ -18,12 +18,12 @@ import redis
 import valkey
 import fakeredis
 from types import SimpleNamespace
-from credenza.api.util import AESGCMCodec
-from credenza.api.session.storage.session_store import SessionStore, SessionData
-from credenza.api.session.storage.backends.memory import MemoryBackend
-from credenza.api.session.storage.backends.redis import RedisBackend
-from credenza.api.session.storage.backends.valkey import ValkeyBackend
-from credenza.api.session.storage.backends.sqlite import SQLiteBackend
+from credenza.broker.api.util import AESGCMCodec
+from credenza.broker.api.session.storage.session_store import SessionStore, SessionData
+from credenza.broker.api.session.storage.backends.memory import MemoryBackend
+from credenza.broker.api.session.storage.backends.redis import RedisBackend
+from credenza.broker.api.session.storage.backends.valkey import ValkeyBackend
+from credenza.broker.api.session.storage.backends.sqlite import SQLiteBackend
 
 @pytest.fixture(params=[
     "redis",

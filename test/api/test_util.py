@@ -18,11 +18,11 @@ import copy
 import json
 from flask import Flask
 from werkzeug.http import dump_cookie
-from werkzeug.exceptions import HTTPException, NotFound, Forbidden
-from credenza.api import util
-from credenza.api.util import get_tokens_by_scope, get_cookie_domain
-from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
-from credenza.api.session.storage.session_store import SessionData
+from werkzeug.exceptions import HTTPException, NotFound
+from credenza.broker.api import util
+from credenza.broker.api.util import get_tokens_by_scope, get_cookie_domain
+from credenza.broker.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
+from credenza.broker.api.session.storage.session_store import SessionData
 
 
 def test_has_current_session_no_sid(monkeypatch, app):

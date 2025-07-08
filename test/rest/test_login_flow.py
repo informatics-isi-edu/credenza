@@ -17,9 +17,9 @@ import pytest
 import json
 import base64
 from urllib.parse import urlparse, parse_qs, unquote
-from credenza.rest import login_flow as lf
-from credenza.api.oidc_client import OIDCClient
-from credenza.api.session.storage.session_store import SessionData
+from credenza.broker.rest import login_flow as lf
+from credenza.broker.api.oidc_client import OIDCClient
+from credenza.broker.api.session.storage.session_store import SessionData
 
 class DummyAuthSession:
     def create_authorization_url(self, url, state, nonce, redirect_uri, code_verifier):

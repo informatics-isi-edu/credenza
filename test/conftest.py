@@ -23,10 +23,10 @@ from werkzeug.exceptions import HTTPException
 # Insert the project root (one level up from tests/) onto sys.path
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from credenza.rest import session as sm
-from credenza.api.util import AESGCMCodec
-from credenza.api.session.storage.session_store import SessionStore, SessionData, SessionMetadata
-from credenza.api.oidc_client import OIDCClientFactory, OIDCClient
+from credenza.broker.rest import session as sm
+from credenza.broker.api.util import AESGCMCodec
+from credenza.broker.api.session.storage.session_store import SessionStore, SessionData, SessionMetadata
+from credenza.broker.api.oidc_client import OIDCClientFactory, OIDCClient
 
 COOKIE_NAME = "credenza-test"
 
@@ -74,9 +74,9 @@ def app(store, discovery_response, dummy_profile, monkeypatch):
     app.config["SERVER_NAME"] = "localhost"
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = \
         {"default":
-             import_string("credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider")(),
+             import_string("credenza.broker.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider")(),
          "globus":
-             import_string("credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider")()}
+             import_string("credenza.broker.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider")()}
 
     app.config["REFRESH_WORKER_POLL_INTERVAL"] = 60
     app.config["SESSION_EXPIRY_THRESHOLD"] = 300

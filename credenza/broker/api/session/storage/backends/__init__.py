@@ -15,8 +15,8 @@
 #
 
 STORAGE_BACKENDS = {
-    "redis": "credenza.api.session.storage.backends.redis.RedisBackend",
-    "valkey": "credenza.api.session.storage.backends.valkey.ValkeyBackend",
-    "sqlite": "credenza.api.session.storage.backends.sqlite.SQLiteBackend",
-    "memory": "credenza.api.session.storage.backends.memory.MemoryBackend"
+    "redis": "credenza.broker.api.session.storage.backends.redis.RedisBackend",
+    "valkey": "credenza.broker.api.session.storage.backends.valkey.ValkeyBackend",
+    "sqlite": "credenza.broker.api.session.storage.backends.sqlite.SQLiteBackend",
+    "memory": "credenza.broker.api.session.storage.backends.memory.MemoryBackend"
 }

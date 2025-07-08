@@ -18,10 +18,10 @@ import copy
 import pytest
 from datetime import datetime
 from werkzeug.exceptions import NotFound
-from credenza.rest import session as sm
-from credenza.api import util as um
-from credenza.rest.session import session_blueprint
-from credenza.api.util import get_effective_scopes
+from credenza.broker.rest import session as sm
+from credenza.broker.api import util as um
+from credenza.broker.rest.session import session_blueprint
+from credenza.broker.api.util import get_effective_scopes
 
 
 @pytest.fixture
