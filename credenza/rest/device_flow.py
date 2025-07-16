@@ -20,8 +20,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from tzlocal import get_localzone_name
 from flask import Blueprint, request, jsonify, redirect, abort, current_app
-from ..api.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, \
-    get_augmentation_provider, revoke_tokens, strtobool
+from ..api.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, augment_session, \
+    revoke_tokens, strtobool
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -140,13 +140,6 @@ def device_callback():
     else:
         refresh_expires_at = now + refresh_expires_in
 
-    # Augment the session, if applicable
-    provider = get_augmentation_provider(realm)
-    # look for additional tokens in the response
-    additional_tokens = provider.process_additional_tokens(tokens, now)
-    # possibly get additional groups using external tokens or other means (e.g. Globus)
-    provider.enrich_userinfo(userinfo, additional_tokens)
-
     metadata = {
         "device_session": True,
         "allow_automatic_refresh": flow.get("refresh", False),
@@ -154,6 +147,9 @@ def device_callback():
         "refresh_expires_at": refresh_expires_at,
         "token_expires_at": tokens.get("expires_at")
     }
+
+    # Augment the session, if applicable
+    userinfo, additional_tokens = augment_session(tokens, realm, userinfo)
 
     session_id = store.generate_session_id()
     session_key, session_data = store.create_session(

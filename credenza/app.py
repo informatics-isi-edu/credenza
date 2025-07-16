@@ -30,6 +30,7 @@ from .rest.session import session_blueprint
 from .rest.login_flow import login_blueprint
 from .rest.device_flow import device_blueprint
 from .rest.discovery import discovery_blueprint
+from .telemetry.audit.logger import init_audit_logger
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker
 
@@ -69,7 +70,9 @@ def configure_authn_env() -> None:
         "CREDENZA_ENABLE_LEGACY_API": "false",
         "CREDENZA_ENABLE_REFRESH_WORKER": "true",
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
-        "CREDENZA_STORAGE_BACKEND": "memory"
+        "CREDENZA_STORAGE_BACKEND": "memory",
+        "CREDENZA_AUDIT_USE_SYSLOG": "false",
+        "CREDENZA_AUDIT_LOGFILE_PATH": "/var/log/credenza-audit.log"
     }
     for key, fallback in defaults.items():
         os.environ.setdefault(key, fallback)
@@ -116,6 +119,8 @@ def create_app():
         logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
     load_config(app)
+    init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
+                      use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
 
     @app.errorhandler(HTTPException)
     def handle_http_exception(e):

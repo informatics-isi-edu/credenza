@@ -148,7 +148,7 @@ def test_put_session_with_refresh_access_token(client,
         # Inject our dummy factory
         app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
 
-    resp = client.put("/session")
+    resp = client.put("/session?refresh_upstream=true")
     assert resp.status_code == 200
 
     # Audit events
@@ -213,7 +213,7 @@ def test_put_session_with_refresh_access_token_failure(client,
         app.config["TOKEN_EXPIRY_THRESHOLD"] = 300
         app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
 
-    resp = client.put("/session")
+    resp = client.put("/session?refresh_upstream=true")
     assert resp.status_code == 200
 
     # Check audit includes the failure
@@ -300,7 +300,7 @@ def test_put_session_additional_tokens_refresh(client,
         app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
 
     # Perform the PUT /session
-    resp = client.put("/session")
+    resp = client.put("/session?refresh_upstream=true")
     assert resp.status_code == 200
 
     # Check that we emitted both the success and failure audit events

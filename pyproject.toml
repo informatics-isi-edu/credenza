@@ -37,6 +37,7 @@ dependencies = [
   "redis",
   "valkey",
   "python-dotenv",
+  "python-json-logger",
   "publicsuffix2"
 ]
 

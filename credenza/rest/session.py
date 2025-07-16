@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from tzlocal import get_localzone_name
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from ..api.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
-    refresh_additional_tokens, revoke_tokens, is_browser_client
+    refresh_additional_tokens, revoke_tokens, get_augmentation_provider, strtobool, is_browser_client
 from ..api.session.storage.session_store import SessionData
 from ..telemetry import audit_event
 
@@ -35,6 +35,13 @@ def whoami():
 
 @session_blueprint.route("/session", methods=["GET", "PUT"])
 def get_session():
+    try:
+        upstream = strtobool(str(request.args.get("refresh_upstream", False)))
+    except ValueError:
+        upstream = False
+    if current_app.config.get("ENABLE_LEGACY_API", False):
+        upstream = True
+
     sid, session = get_current_session()
     store = current_app.config["SESSION_STORE"]
     now = time.time()
@@ -55,10 +62,14 @@ def get_session():
             audit_event("refresh_expired", session_id=sid)
             abort(401, "Session has expired and can no longer be refreshed")
 
-        # Potentially refresh our access token from upstream, if we've got a refresh token to do so
-        refresh_access_token(sid, session)
-        # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
-        refresh_additional_tokens(sid, session)
+        if upstream:
+            # Potentially refresh our access token from upstream, if we've got a refresh token to do so
+            refresh_access_token(sid, session)
+            # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
+            refresh_additional_tokens(sid, session)
+            # Enrich userinfo, if applicable
+            provider = get_augmentation_provider(realm)
+            provider.enrich_userinfo(session.userinfo, session.additional_tokens)
 
         store.update_session(sid, session)
         audit_event("session_extended", session_id=sid, user=user, sub=sub, realm=realm)

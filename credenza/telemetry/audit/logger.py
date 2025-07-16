@@ -14,25 +14,37 @@
 # limitations under the License.
 #
 import os
-import json
 import datetime
 import logging
-from flask import current_app
+from logging.handlers import SysLogHandler, TimedRotatingFileHandler
+from pythonjsonlogger import json
 
 logger = logging.getLogger(__name__)
 
+def init_audit_logger(filename="credenza-audit.log", use_syslog=False):
+    # Default logger
+    log_handler = TimedRotatingFileHandler(filename=filename, when="D", interval=1, backupCount=0)
+
+    # the use of '/dev/log' causes SysLogHandler to assume the availability of Unix sockets
+    syslog_socket = "/dev/log"
+    use_syslog = use_syslog and (os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK))
+    if use_syslog:
+        try:
+            log_handler = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
+            log_handler.ident = 'credenza-audit: '
+        except:
+            # fallback to the default logger
+            pass
+
+    formatter = json.JsonFormatter("{message}", style="{", rename_fields={"message": "event"})
+    log_handler.setFormatter(formatter)
+    logger.addHandler(log_handler)
+    logger.setLevel(logging.INFO)
+
 def audit_event(event, **kwargs):
-    now = datetime.datetime.now().astimezone()
     log_entry = {
-        "ts": now.isoformat(), # ISO 8601 timestamp with offset
         "event": event,
+        "timestamp": datetime.datetime.now().astimezone().isoformat(), # ISO 8601 timestamp with offset
         **kwargs
     }
-
-    try:
-        path = os.path.abspath(current_app.config.get("AUDIT_LOG_PATH", "credenza/authn-audit.log"))
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-            f.flush()
-    except Exception as e:
-        logging.getLogger("audit").error(f"[audit] failed to write log entry: {e}", exc_info=True)
+    logger.info(log_entry)

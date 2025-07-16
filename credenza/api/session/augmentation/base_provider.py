@@ -44,7 +44,7 @@ class SessionAugmentationProvider(ABC):
         """Post-process or filter additional or dependent tokens."""
 
     @abstractmethod
-    def enrich_userinfo(self, userinfo: dict, additional_tokens: dict) -> None:
+    def enrich_userinfo(self, userinfo: dict, additional_tokens: dict) -> bool:
         """Augment userinfo with groups, roles, extra claims, etc."""
 
 
@@ -81,4 +81,4 @@ class DefaultSessionAugmentationProvider(SessionAugmentationProvider):
         return additional_tokens
 
     def enrich_userinfo(self, userinfo, additional_tokens):
-        return
+        return False

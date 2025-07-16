@@ -19,8 +19,8 @@ import base64
 import logging
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify
-from ..api.util import has_current_session, get_effective_scopes, generate_nonce, get_augmentation_provider, \
-    get_cookie_domain, revoke_tokens
+from ..api.util import has_current_session, get_effective_scopes, generate_nonce, augment_session, get_cookie_domain, \
+    revoke_tokens
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -99,11 +99,7 @@ def callback():
         store.delete_nonce(state)
 
     # Augment the session, if applicable
-    provider = get_augmentation_provider(realm)
-    # look for additional tokens in the response
-    additional_tokens = provider.process_additional_tokens(tokens, time.time())
-    # possibly get additional groups using external tokens or other means (e.g. Globus)
-    provider.enrich_userinfo(userinfo, additional_tokens)
+    userinfo, additional_tokens = augment_session(tokens, realm, userinfo)
 
     sid = store.generate_session_id()
     session_key, session_data = store.create_session(

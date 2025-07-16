@@ -112,7 +112,7 @@ def test_enrich_userinfo_non_globus(app):
     with app.app_context():
         provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
         result = provider.enrich_userinfo(userinfo, additional_tokens)
-    assert result is None
+    assert result is False
     assert userinfo["groups"] == ["existing"]
 
 
@@ -122,7 +122,65 @@ def test_enrich_userinfo_globus_no_tokens(app):
     with app.app_context():
         provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
         result = provider.enrich_userinfo(userinfo, additional_tokens)
-    assert result is None
+    assert result is False
+    assert "groups" not in userinfo
+
+
+def test_enrich_userinfo_globus_request_exception(monkeypatch, app):
+    userinfo = {"iss": GlobusSessionAugmentationProvider.GLOBUS_ISSUER, "email": "someone@example.org"}
+    token_value = "bad_token"
+    additional_tokens = {
+        GlobusSessionAugmentationProvider.GLOBUS_GROUPS_SCOPE: {"access_token": token_value}
+    }
+
+    def raise_exception(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(requests, "get", raise_exception)
+
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        result = provider.enrich_userinfo(userinfo, additional_tokens)
+
+    assert result is False
+    assert "groups" not in userinfo
+
+
+def test_enrich_userinfo_globus_invalid_response(monkeypatch, app):
+    userinfo = {"iss": GlobusSessionAugmentationProvider.GLOBUS_ISSUER, "email": "u@example.org"}
+    token_value = "some_token"
+    additional_tokens = {
+        GlobusSessionAugmentationProvider.GLOBUS_GROUPS_SCOPE: {"access_token": token_value}
+    }
+
+    # Simulate bad JSON structure (e.g. not a list)
+    mock_resp = SimpleNamespace(
+        status_code=200,
+        json=lambda: {"not": "a list"},
+        raise_for_status=lambda: None
+    )
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: mock_resp)
+
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        result = provider.enrich_userinfo(userinfo, additional_tokens)
+
+    # Should raise but we catch all exceptions, so it just fails quietly
+    assert result is False
+    assert "groups" not in userinfo
+
+
+def test_enrich_userinfo_globus_wrong_issuer(app):
+    userinfo = {"iss": "https://not.globus.org", "email": "u@example.org"}
+    additional_tokens = {
+        GlobusSessionAugmentationProvider.GLOBUS_GROUPS_SCOPE: {"access_token": "t"}
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        result = provider.enrich_userinfo(userinfo, additional_tokens)
+
+    assert result is False
     assert "groups" not in userinfo
 
 
@@ -184,6 +242,18 @@ def test_fetch_dependent_tokens_failure(app, monkeypatch):
         result = provider.fetch_dependent_tokens("any-token", userinfo)
     assert result == {}
 
+def test_fetch_dependent_tokens_non_globus_issuer(monkeypatch, app):
+    userinfo = {
+        "iss": "https://not.globus.org",
+        "email": "u@example.org"
+    }
+
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        result = provider.fetch_dependent_tokens("any-token", userinfo)
+
+    assert result == {}
+
 def test_session_from_bearer_token(monkeypatch, app, store):
     with app.app_context():
         realm = app.config["DEFAULT_REALM"]
@@ -236,3 +306,132 @@ def test_session_from_bearer_token_invalid(monkeypatch, app, store):
         with pytest.raises(NotFound):
             provider = util.get_augmentation_provider("globus")
             provider.session_from_bearer_token("bad-token")
+
+def test_enrich_userinfo_deriva_success_bearer_token(monkeypatch, app):
+    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+    userinfo = {"email": "u@example.com"}
+    sample_groups = [{"id": "g1", "name": "Group One"}, {"id": "g2", "name": "Group Two"}]
+    config_patch = {
+        "OIDC_IDP_PROFILES": {
+            app.config["DEFAULT_REALM"]: {
+                "session_augmentation_params": {
+                    "groups_api_url": "https://example.org/api/groups"
+                }
+            }
+        }
+    }
+    monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", config_patch["OIDC_IDP_PROFILES"])
+    monkeypatch.setitem(app.config, "COOKIE_NAME", "mycookie")
+
+    monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
+                        lambda: ("my-token", True))
+    mock_resp = SimpleNamespace(
+        status_code=200,
+        json=lambda: {"groups": sample_groups},
+        raise_for_status=lambda: None
+    )
+    monkeypatch.setattr(requests, "get", lambda url, headers, cookies, timeout, verify: mock_resp)
+
+    with app.app_context():
+        provider = DerivaSessionAugmentationProvider()
+        result = provider.enrich_userinfo(userinfo, {})
+    assert result is True
+    assert len(userinfo["groups"]) == 2
+    assert userinfo["groups"][0]["display_name"] == "Group One"
+
+
+def test_enrich_userinfo_deriva_success_cookie(monkeypatch, app):
+    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+    userinfo = {"email": "u@example.com"}
+    sample_groups = [{"id": "g3", "name": "Group Three"}]
+    groups_url = "https://example.org/api/groups"
+    monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", {
+        app.config["DEFAULT_REALM"]: {
+            "session_augmentation_params": {
+                "groups_api_url": groups_url
+            }
+        }
+    })
+    monkeypatch.setitem(app.config, "COOKIE_NAME", "auth_cookie")
+
+    monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
+                        lambda: ("cookieval", False))
+    mock_resp = SimpleNamespace(
+        status_code=200,
+        json=lambda: {"groups": sample_groups},
+        raise_for_status=lambda: None
+    )
+    monkeypatch.setattr(requests, "get", lambda url, headers, cookies, timeout, verify: mock_resp)
+
+    with app.app_context():
+        provider = DerivaSessionAugmentationProvider()
+        result = provider.enrich_userinfo(userinfo, {})
+    assert result is True
+    assert "groups" in userinfo
+    assert userinfo["groups"][0]["display_name"] == "Group Three"
+
+
+def test_enrich_userinfo_deriva_missing_url(monkeypatch, app):
+    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+    userinfo = {"email": "u@example.com"}
+    monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", {
+        app.config["DEFAULT_REALM"]: {
+            "session_augmentation_params": {
+                # intentionally no groups_api_url
+            }
+        }
+    })
+    with app.app_context():
+        provider = DerivaSessionAugmentationProvider()
+        result = provider.enrich_userinfo(userinfo, {})
+    assert result is False
+    assert "groups" not in userinfo
+
+
+def test_enrich_userinfo_deriva_http_401(monkeypatch, app):
+    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+    from requests.models import Response
+    from requests import HTTPError
+
+    userinfo = {"email": "u@example.com"}
+    monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", {
+        app.config["DEFAULT_REALM"]: {
+            "session_augmentation_params": {
+                "groups_api_url": "https://example.org/api/groups"
+            }
+        }
+    })
+    monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
+                        lambda: ("some-token", True))
+
+    def raise_401():
+        resp = Response()
+        resp.status_code = 401
+        raise HTTPError(response=resp)
+
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: raise_401())
+
+    with app.app_context():
+        provider = DerivaSessionAugmentationProvider()
+        result = provider.enrich_userinfo(userinfo, {})
+    assert result is False
+
+
+def test_enrich_userinfo_deriva_request_exception(monkeypatch, app):
+    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+    userinfo = {"email": "u@example.com"}
+    monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", {
+        app.config["DEFAULT_REALM"]: {
+            "session_augmentation_params": {
+                "groups_api_url": "https://example.org/api/groups"
+            }
+        }
+    })
+    monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
+                        lambda: ("any-token", True))
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network fail")))
+
+    with app.app_context():
+        provider = DerivaSessionAugmentationProvider()
+        result = provider.enrich_userinfo(userinfo, {})
+    assert result is False

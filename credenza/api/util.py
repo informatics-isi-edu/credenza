@@ -127,8 +127,24 @@ def get_realm(realm=None) -> str:
 def get_augmentation_provider(realm=None):
     providers = current_app.config["SESSION_AUGMENTATION_PROVIDERS"]
     provider = providers.get(realm, providers["default"])
-    logger.debug(f"Using augmentation provider {provider} for realm {realm}")
     return provider
+
+def get_augmentation_provider_params(realm=None):
+    profile = current_app.config["OIDC_IDP_PROFILES"].get(get_realm(realm), {})
+    return profile.get("session_augmentation_params", {})
+
+def augment_session(tokens, realm, userinfo):
+    provider = get_augmentation_provider(realm)
+    provider_params = get_augmentation_provider_params(realm)
+    defer_augmentation = provider_params.get("defer_augmentation", False)
+    if defer_augmentation:
+        return userinfo, {}
+
+    # look for additional tokens in the response
+    additional_tokens = provider.process_additional_tokens(tokens, time.time())
+    # possibly get additional groups using external tokens or other means
+    provider.enrich_userinfo(userinfo, additional_tokens)
+    return userinfo, additional_tokens
 
 
 def generate_nonce():

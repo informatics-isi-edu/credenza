@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from http.client import HTTPException
-
 import requests
 import logging
 from flask import current_app, abort
@@ -71,7 +69,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
                 access_token = tokens.get("access_token")
             else:
                 logger.debug(f"Tokens for {self.GLOBUS_GROUPS_SCOPE} not found")
-                return
+                return False
 
             try:
                 headers = {"Authorization": f"Bearer {access_token}"}
@@ -86,9 +84,12 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
                     existing_groups.extend(groups)
                 else:
                     userinfo["groups"] = groups
-                logger.debug(f"Augmented userinfo with {len(groups)} Globus groups.")
+                logger.debug(f"Augmented userinfo for {user} with {len(groups)} Globus groups.")
+                return True
             except Exception as e:
                 logger.warning(f"Failed to fetch Globus groups: {e}")
+
+        return False
 
     def session_from_bearer_token(self, bearer_token) -> (str, SessionData):
         realm = current_app.config["DEFAULT_REALM"]

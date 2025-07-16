@@ -37,8 +37,6 @@ class MemoryBackend(StorageBackend):
         self._store[key] = (value, expiration)
 
     def set(self, key: str, value: Union[str, bytes]) -> None:
-        if not value:
-            raise ValueError("value cannot be None")
         self._store[key] = (value, None)  # None for expiration means no expiry
 
     def get(self, key: str) -> Optional[bytes]:
