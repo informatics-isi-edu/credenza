@@ -48,8 +48,7 @@ def configure_authn_env() -> None:
         Path("/etc/credenza/credenza.env"),
         Path.home() / "credenza.env",
         Path("./config/credenza.env"),
-        Path("./credenza.env"),
-        Path("./.env"),
+        Path("./credenza.env")
     ]
     for fn in dotenv_locations:
         if fn.is_file():
