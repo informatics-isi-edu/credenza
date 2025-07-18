@@ -1,6 +1,12 @@
 #!/bin/bash
 set -e
 
+# Suppress cert verify warnings in test environments
+if [[ "$DEPLOY_ENV" != "prod" && "$DEPLOY_ENV" != "staging" && "$DEPLOY_ENV" != "dev" ]]; then
+  export PYTHONWARNINGS="ignore:Unverified HTTPS request"
+fi
+
+
 log() {
   echo "$(date +'%Y-%m-%dT%H:%M:%S.%3N%:z') [entrypoint] $*"
 }

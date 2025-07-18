@@ -1,6 +1,9 @@
 # Stage 1: Build and install the Python app
 FROM python:3.13-slim AS core
 
+# For compose healthchecks
+RUN apt-get update && apt-get install -y curl && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /credenza
 
 COPY pyproject.toml ./
@@ -24,7 +27,7 @@ RUN apt-get update && apt-get install -y \
     rsyslog libsystemd0 --no-install-recommends \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Add configuration and wrapper
+# Add rsyslog configuration
 COPY config/rsyslog.conf /etc/rsyslog.conf
 
 COPY bin/docker-entrypoint.sh /usr/local/bin/entrypoint.sh

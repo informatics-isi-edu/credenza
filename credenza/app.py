@@ -167,8 +167,16 @@ def create_app():
     if app.config.get("ENABLE_LEGACY_API", False):
         app.register_blueprint(discovery_blueprint)
 
+    if app.config.get("ENABLE_HEALTH_CHECK", True):
+        enable_healthcheck(app)
+
     return app
 
+def enable_healthcheck(app):
+    """Health check endpoint for load balancers or other orchestration"""
+    @app.route('/health')
+    def health_check():
+        return jsonify({"status": "healthy", "service": "credenza"}), 200
 
 def start_refresh_worker(app):
     def worker():
