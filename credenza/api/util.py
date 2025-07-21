@@ -19,9 +19,7 @@ import base64
 import logging
 import ipaddress
 from typing import Optional
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from tzlocal import get_localzone_name
+from datetime import datetime, timezone
 from publicsuffix2 import get_sld
 from Cryptodome.Cipher import AES
 from Cryptodome.Random import get_random_bytes
@@ -267,8 +265,7 @@ def refresh_additional_tokens(sid, session):
                     user=user,
                     sub=sub,
                     scope=scope,
-                    expires_at=datetime.fromtimestamp(refreshed["expires_at"],
-                                                      tz=ZoneInfo(get_localzone_name())).isoformat())
+                    expires_at=datetime.fromtimestamp(refreshed["expires_at"], timezone.utc).isoformat())
     session.additional_tokens = tokens
 
     return updated

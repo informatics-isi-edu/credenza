@@ -34,6 +34,7 @@ def init_audit_logger(filename="credenza-audit.log", use_syslog=False):
             log_handler.ident = 'credenza-audit: '
         except:
             # fallback to the default logger
+            print(f"Failed to initialize syslog logger, falling back to {log_handler.__class__.__name__}")
             pass
 
     formatter = json.JsonFormatter("{message}", style="{", rename_fields={"message": "event"})

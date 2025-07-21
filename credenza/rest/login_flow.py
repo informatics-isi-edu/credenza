@@ -14,7 +14,6 @@
 # limitations under the License.
 #
 import json
-import time
 import base64
 import logging
 from urllib.parse import urlencode, quote

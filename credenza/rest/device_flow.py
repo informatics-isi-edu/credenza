@@ -16,9 +16,7 @@
 import uuid
 import time
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from tzlocal import get_localzone_name
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, redirect, abort, current_app
 from ..api.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, augment_session, \
     revoke_tokens, strtobool
@@ -177,8 +175,7 @@ def device_callback():
                 scopes=get_effective_scopes(session_data),
                 realm=realm,
                 offline_access=offline_granted,
-                refresh_expires_at=datetime.fromtimestamp(refresh_expires_at,
-                                                          tz=ZoneInfo(get_localzone_name())).isoformat())
+                refresh_expires_at=datetime.fromtimestamp(refresh_expires_at, timezone.utc).isoformat())
     logger.info(f"Device login successful for user {user} ({sub}) with session id {session_id} on realm {realm}")
 
     return "Device authorization complete. You may return to the device."

@@ -15,9 +15,7 @@
 #
 import time
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from tzlocal import get_localzone_name
+from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from ..api.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
     refresh_additional_tokens, revoke_tokens, get_augmentation_provider, strtobool, is_browser_client
@@ -144,10 +142,8 @@ def make_session_response(sid, session: SessionData):
         attributes.extend(groups)
         response["attributes"] = attributes
 
-        response["since"] = datetime.fromtimestamp(session.created_at,
-                                                   tz=ZoneInfo(get_localzone_name())).isoformat()
-        response["expires"] = datetime.fromtimestamp(session.expires_at,
-                                                     tz=ZoneInfo(get_localzone_name())).isoformat()
+        response["since"] = datetime.fromtimestamp(session.created_at, timezone.utc).isoformat()
+        response["expires"] = datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat()
         response["seconds_remaining"] = store.get_ttl(sid)
     else:
         response.update(
@@ -163,12 +159,9 @@ def make_session_response(sid, session: SessionData):
                 "roles": session.userinfo.get("roles", []),
                 "scopes": get_effective_scopes(session),
                 "metadata": session.session_metadata.to_dict(),
-                "created_at": datetime.fromtimestamp(session.created_at,
-                                                     tz=ZoneInfo(get_localzone_name())).isoformat(),
-                "updated_at": datetime.fromtimestamp(session.updated_at,
-                                                     tz=ZoneInfo(get_localzone_name())).isoformat(),
-                "expires_at": datetime.fromtimestamp(session.expires_at,
-                                                     tz=ZoneInfo(get_localzone_name())).isoformat(),
+                "created_at": datetime.fromtimestamp(session.created_at, timezone.utc).isoformat(),
+                "updated_at": datetime.fromtimestamp(session.updated_at, timezone.utc).isoformat(),
+                "expires_at": datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat(),
                 "seconds_remaining": store.get_ttl(sid)
             }
         )
