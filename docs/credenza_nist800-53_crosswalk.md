@@ -6,9 +6,9 @@
 | Status        | Count | Description                                                                  |
 |---------------|-------|------------------------------------------------------------------------------|
 | Fully Met     | 16    | Controls with verifiable implementation in code and/or delegated to platform |
-| Partially Met | 5     | Present, but dependent on config or missing enforcement                      |
+| Partially Met | 6     | Present, but dependent on config or missing enforcement                      |
 | Missing       | 3     | No current support in code or deployment guidance                            |
-| Unknown       | 4     | Cannot be assessed without deployment details                                |
+| Unknown       | 3     | Cannot be assessed without deployment details                                |
 
 ## Fully Met Controls
 | Control ID | Title                                  | Notes                                                                                                                                                                                                                                                                                                                               |
@@ -37,6 +37,7 @@
 | `CM-7`     | Least Functionality          | Credenza has a modular design that allows optional features (e.g., session augmentation, storage backends) to be enabled via configuration. However, there is no enforcement of a minimal runtime profile or validation against a deny-list, so this control is considered partially met based on deployment discipline.                                                                                                                                           |
 | `RA-5`     | Vulnerability Scanning       | [Bandit](https://bandit.readthedocs.io/en/latest/index.html) has been tested but is not yet integrated into CI/CD pipelines. Evaluation is in-progress as a mechanism for achieving full compliance.                                                                                                                                                                                                                                                               |
 | `SI-4`     | System Monitoring            | Credenza includes structured telemetry and audit logging suitable for external monitoring. However, it lacks built-in anomaly detection, abuse heuristics, and automated alerting. Full compliance depends on deployment-layer observability and threat response tools.                                                                                                                                                                                            |
+| `SI-10`    | Input Validation             | Basic input validation is present in major authentication and session flows (e.g., OIDC callback, token refresh). However, validation is not comprehensive across all input surfaces, and failures are not consistently logged or auditable. This supports partial fulfillment of SI-10, with room for structured improvement.                                                                                                                                     |
 | `SC-5`     | Denial of Service Protection | Credenza itself does not currently implement native rate limiting or abuse throttling mechanisms. However, it is expected to be deployed behind a reverse proxy (e.g., Traefik or nginx), which is responsible for applying DoS protections such as connection limits, timeouts, and rate limiting. If such infrastructure is properly configured, this control is satisfied at the deployment layer. Otherwise, it is considered missing in the core application. |
 
 ## Missing Controls
@@ -52,4 +53,3 @@
 | `IA-8`     | Identification and Authentication (Non-Org Users) | Credenza delegates trust to external OIDC IDPs and does not distinguish org vs non-org users. Control compliance depends on IDP policies.                |
 | `SC-18`    | Mobile Code                                       | Credenza is a backend-only service and does not serve frontend content or mobile code. Not applicable.                                                   |
 | `SC-7`     | Boundary Protection                               | Credenza is designed to run behind a reverse proxy or firewall. Network-level boundary protection is expected to be provided by external infrastructure. |
-| `SI-10`    | Input Validation                                  | Credenza validates OIDC token claims, but general-purpose input validation is limited and not audit-logged.                                              |
