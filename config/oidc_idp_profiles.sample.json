@@ -1,7 +1,7 @@
 {
   "default": {
     "issuer": "https://localhost/auth/realms/deriva",
-    "discovery_url": "https:///keycloak:8080/auth/realms/deriva/.well-known/openid-configuration",
+    "discovery_url": "http://keycloak:8080/auth/realms/deriva/.well-known/openid-configuration",
     "revocation_url": "http://keycloak:8080/auth/realms/deriva/protocol/openid-connect/revoke",
     "logout_url": "https://localhost/auth/realms/deriva/protocol/openid-connect/logout",
     "scopes": "openid email profile",
@@ -16,23 +16,23 @@
       "redirect_uri": "https://localhost",
       "redirect_name": "homepage."
     },
-    "scopes": "{{globus_requested_scopes}}",
+    "scopes": "openid email profile urn:globus:auth:scope:groups.api.globus.org:view_my_groups_and_memberships https://auth.globus.org/scopes/identifiers.fair-research.org/writer",
     "accepted_scopes": [
       {
-        "scope": "{{globus_accepted_scopes}}",
+        "scope": "https://auth.globus.org/scopes/3ba21deb-66d8-482d-8a79-9c8ce54f6097/deriva_all",
         "issuer": "https://auth.globus.org"
       }
     ],
     "discovery_scopes": {
-      "deriva-all": "{{globus_discovery_scopes}}"
+      "deriva-all": "https://auth.globus.org/scopes/3ba21deb-66d8-482d-8a79-9c8ce54f6097/deriva_all"
     },
     "session_augmentation_provider": "credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider",
     "client_secret_file": "secrets/globus_client_secret.json"
   },
   "okta": {
-    "issuer": "{{okta_issuer}}",
-    "discovery_url": "{{okta_issuer}}/.well-known/openid-configuration",
-    "logout_url": "{{okta_issuer}}/oauth2/v1/logout",
+    "issuer": "https://trial-1234567.okta.com",
+    "discovery_url": "https://trial-1234567.okta.com/.well-known/openid-configuration",
+    "logout_url": "https://trial-1234567.okta.com/oauth2/v1/logout",
     "scopes": "openid email profile groups",
     "client_secret_file": "secrets/okta_client_secret.json"
   }

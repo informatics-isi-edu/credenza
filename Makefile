@@ -22,7 +22,7 @@ DAEMONUSER=credenza
 INSTALL_SCRIPT=./install-script
 
 # make this the default target
-install: config/wsgi_credenza.conf config/oidc_idp_profiles.json config/oidc_idp_trusted_issuers.json
+install: config/wsgi_credenza.conf
 		pip3 install .
 
 testvars:
