@@ -13,47 +13,84 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 import sqlite3
+import logging
 import time
 import fnmatch
+import threading
 from typing import Optional, List, Iterable, Union
-from .base import StorageBackend
 
-class SQLiteBackend(StorageBackend):
+logger = logging.getLogger(__name__)
+
+
+class SQLiteBackend:
     """
-    A simple SQLite-based key-value store with TTL support.
+    A simple SQLite-based key-value store with TTL support and thread-local SQLite connections.
     """
-    def __init__(self, db_path: str = ":memory:"):
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS credenza (
-                key TEXT PRIMARY KEY,
-                value BLOB,
-                expires_at REAL
-            )
-        """)
-        self.conn.commit()
+    def __init__(self, db_path: str = ":memory:", idle_timeout=60):
+        self.db_path = db_path if db_path else os.path.expanduser("~/credenza-sqlite.db")
+        logger.debug(f"Using SQLite database: {self.db_path}")
+        if self.db_path != ":memory:" and not os.path.isdir(os.path.dirname(self.db_path)):
+            os.makedirs(os.path.dirname(self.db_path))
+
+        self.idle_timeout = idle_timeout
+        self.local = threading.local()
+
+    def _get_conn(self):
+        now = time.time()
+        conn = getattr(self.local, "conn", None)
+        ts = getattr(self.local, "last_used", 0)
+
+        if conn is not None and (now - ts) > self.idle_timeout:
+            # Close stale connection
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = None
+
+        if conn is None:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS credenza (
+                    key TEXT PRIMARY KEY,
+                    value BLOB,
+                    expires_at REAL
+                )
+            """)
+            conn.commit()
+            self.local.conn = conn
+
+        self.local.last_used = now
+        return conn
+
+    def close(self):
+        """
+        Close the SQLite connection associated with the current thread, if any.
+        """
+        conn = getattr(self.local, "conn", None)
+        if conn is not None:
+            logger.debug(f"Closing SQLite connection to {self.db_path} in thread {threading.get_ident()}")
+            conn.close()
+            del self.local.conn
+            del self.local.last_used
+
 
     def setex(self, key: str, value: Union[str, bytes], ttl: int) -> None:
         expires_at = time.time() + ttl
         blob = value if isinstance(value, (bytes, bytearray)) else value.encode()
-        self.conn.execute("""
+        conn = self._get_conn()
+        conn.execute("""
             INSERT OR REPLACE INTO credenza (key, value, expires_at)
             VALUES (?, ?, ?)
         """, (key, blob, expires_at))
-        self.conn.commit()
-
-    def set(self, key: str, value: Union[str, bytes]) -> None:
-        """Set a key-value pair without expiration (permanent storage)"""
-        blob = value if isinstance(value, (bytes, bytearray)) else value.encode()
-        self.conn.execute("""
-            INSERT OR REPLACE INTO credenza (key, value, expires_at)
-            VALUES (?, ?, ?)
-        """, (key, blob, None))  # None for expires_at means no expiration
-        self.conn.commit()
+        conn.commit()
 
     def get(self, key: str) -> Optional[bytes]:
-        cur = self.conn.execute("""
+        conn = self._get_conn()
+        cur = conn.execute("""
             SELECT value, expires_at FROM credenza WHERE key = ?
         """, (key,))
         row = cur.fetchone()
@@ -61,18 +98,18 @@ class SQLiteBackend(StorageBackend):
             return None
         value, expires_at = row
         if expires_at is not None and time.time() >= expires_at:
-            # expired
             self.delete(key)
             return None
         return value
 
     def delete(self, key: str) -> None:
-        self.conn.execute("DELETE FROM credenza WHERE key = ?", (key,))
-        self.conn.commit()
+        conn = self._get_conn()
+        conn.execute("DELETE FROM credenza WHERE key = ?", (key,))
+        conn.commit()
 
     def keys(self, pattern: str) -> List[str]:
-        # Simple in-memory filtering after retrieving all keys
-        cur = self.conn.execute("SELECT key, expires_at FROM credenza")
+        conn = self._get_conn()
+        cur = conn.execute("SELECT key, expires_at FROM credenza")
         now = time.time()
         result = []
         for key, expires_at in cur:
@@ -91,7 +128,8 @@ class SQLiteBackend(StorageBackend):
         return self.get(key) is not None
 
     def ttl(self, key: str) -> int:
-        cur = self.conn.execute("""
+        conn = self._get_conn()
+        cur = conn.execute("""
             SELECT expires_at FROM credenza WHERE key = ?
         """, (key,))
         row = cur.fetchone()
@@ -101,5 +139,13 @@ class SQLiteBackend(StorageBackend):
         if expires_at is None:
             return -1  # no TTL set
         remaining = int(expires_at - time.time())
-        return remaining if remaining >= 0 else -2  # expired or does not exist
+        return remaining if remaining >= 0 else -2
 
+    def set(self, key: str, value: Union[str, bytes]) -> None:
+        blob = value if isinstance(value, (bytes, bytearray)) else value.encode()
+        conn = self._get_conn()
+        conn.execute("""
+            INSERT OR REPLACE INTO credenza (key, value, expires_at)
+            VALUES (?, ?, ?)
+        """, (key, blob, None))
+        conn.commit()

@@ -151,7 +151,7 @@ def create_app():
             logging.warning("Encryption of session data is disabled due to missing encryption key")
 
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),
-                                             url=app.config.get("STORAGE_BACKEND_URL"))
+                                             app.config.get("STORAGE_BACKEND_URL"))
 
     app.config["SESSION_STORE"] = SessionStore(
         storage_backend,
