@@ -28,8 +28,8 @@ class SQLiteBackend:
     """
     A simple SQLite-based key-value store with TTL support and thread-local SQLite connections.
     """
-    def __init__(self, db_path: str = ":memory:", idle_timeout=60):
-        self.db_path = db_path if db_path else os.path.expanduser("~/credenza-sqlite.db")
+    def __init__(self, url: str = ":memory:", idle_timeout: int = 60):
+        self.db_path = url if url else os.path.expanduser("~/credenza-sqlite.db")
         logger.debug(f"Using SQLite database: {self.db_path}")
         if self.db_path != ":memory:" and not os.path.isdir(os.path.dirname(self.db_path)):
             os.makedirs(os.path.dirname(self.db_path))
