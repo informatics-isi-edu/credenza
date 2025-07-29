@@ -158,14 +158,29 @@ def test_validate_id_token(client, monkeypatch):
 def test_introspect_and_validate_access_token(client, monkeypatch):
     # Setup introspection endpoint
     client.introspect_url = "https://iss/introspect"
-    # Mock requests.post
-    valid = {"active": True, "exp": time.time()+100, "iat": time.time()-100, "iss": client.issuer, "aud": [client.client_id]}
-    resp = SimpleNamespace(status_code=200, json=lambda: valid, raise_for_status=lambda: None)
-    monkeypatch.setattr(requests, "post", lambda url, data, auth: resp)
+
+    # Define valid introspection response
+    valid = {
+        "active": True,
+        "exp": time.time() + 100,
+        "iat": time.time() - 100,
+        "iss": client.issuer,
+        "aud": [client.client_id]
+    }
+
+    # Mock the OAuth2Session returned by get_oauth_session
+    mock_session = SimpleNamespace(
+        introspect_token=lambda url, token, token_type_hint, **kwargs: SimpleNamespace(
+            json=lambda: valid
+        )
+    )
+    monkeypatch.setattr(client, "get_oauth_session", lambda: mock_session)
+
     # Test introspect_token
     result = client.introspect_token("at")
     assert result["active"]
-    # Test validate_access_token happy path
+
+    # Test validate_access_token
     claims = client.validate_access_token("at", required_audience=client.client_id)
     assert claims["active"]
 

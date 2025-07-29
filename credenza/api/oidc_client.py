@@ -230,23 +230,16 @@ class OIDCClient:
             return False
 
     def introspect_token(self, token, token_type_hint="access_token", **kwargs):
-        introspect_url = self.introspect_url
-        if not introspect_url:
+        if not self.introspect_url:
             raise NotImplementedError("Introspection not configured for this client")
 
-        data = {
-            "token": token,
-            "token_type_hint": token_type_hint,
-            **kwargs  # merge additional fields into the data payload
-        }
-
+        # build a session that can do client_secret_basic if we have a secret
+        client = self.get_oauth_session()
         try:
-            resp = requests.post(
-                introspect_url,
-                data=data,
-                auth=(self.client_id, self.client_secret)
-            )
-            resp.raise_for_status()
+            resp = client.introspect_token(self.introspect_url,
+                                           token=token,
+                                           token_type_hint=token_type_hint,
+                                           **kwargs)
             return resp.json()
         except Exception as e:
             logger.exception(f"Token introspection failed: token_type_hint={token_type_hint}")
