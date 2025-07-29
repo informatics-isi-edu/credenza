@@ -85,3 +85,9 @@ ENV/
 
 # pycharm
 .idea/
+
+# emacs temp files
+*~
+
+# local Makefile products
+config/wsgi_credenza.conf
