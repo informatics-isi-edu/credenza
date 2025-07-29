@@ -70,8 +70,7 @@ def configure_authn_env() -> None:
         "CREDENZA_ENABLE_REFRESH_WORKER": "true",
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
         "CREDENZA_STORAGE_BACKEND": "memory",
-        "CREDENZA_AUDIT_USE_SYSLOG": "false",
-        "CREDENZA_AUDIT_LOGFILE_PATH": "/var/log/credenza-audit.log"
+        "CREDENZA_AUDIT_USE_SYSLOG": "false"
     }
     for key, fallback in defaults.items():
         os.environ.setdefault(key, fallback)
