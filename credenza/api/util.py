@@ -75,8 +75,8 @@ class AESGCMCodec:
 
 def extract_session_key() -> (str, bool):
     auth = request.headers.get("Authorization")
-    if auth and auth.startswith("Bearer "):
-        return auth.split(" ", 1)[1], True
+    if auth and auth[:7].lower() == "bearer ":
+        return auth[7:], True
     cookie_val = request.cookies.get(current_app.config["COOKIE_NAME"])
     return cookie_val, False
 
