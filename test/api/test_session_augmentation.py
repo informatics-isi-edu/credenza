@@ -14,16 +14,15 @@
 # limitations under the License.
 #
 import pytest
-import copy
 import requests
 from types import SimpleNamespace
-from flask import Flask
-from werkzeug.http import dump_cookie
+from flask import g
 from werkzeug.exceptions import HTTPException, NotFound, Forbidden
 from credenza.api import util
 from credenza.api.session.storage.session_store import SessionData
 from credenza.api.session.augmentation import globus_provider
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
+from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
 
 # Fixed current time for deterministic ttl calculations
 CUR_TIME = 1000
@@ -308,7 +307,6 @@ def test_session_from_bearer_token_invalid(monkeypatch, app, store):
             provider.session_from_bearer_token("bad-token")
 
 def test_enrich_userinfo_deriva_success_bearer_token(monkeypatch, app):
-    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
     userinfo = {"email": "u@example.com"}
     sample_groups = [{"id": "g1", "name": "Group One"}, {"id": "g2", "name": "Group Two"}]
     config_patch = {
@@ -323,52 +321,22 @@ def test_enrich_userinfo_deriva_success_bearer_token(monkeypatch, app):
     monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", config_patch["OIDC_IDP_PROFILES"])
     monkeypatch.setitem(app.config, "COOKIE_NAME", "mycookie")
 
-    monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
-                        lambda: ("my-token", True))
     mock_resp = SimpleNamespace(
         status_code=200,
         json=lambda: {"groups": sample_groups},
         raise_for_status=lambda: None
     )
-    monkeypatch.setattr(requests, "get", lambda url, headers, cookies, timeout, verify: mock_resp)
 
-    with app.app_context():
+    monkeypatch.setattr(requests, "get", lambda url, headers, timeout, verify: mock_resp)
+
+    with app.test_request_context():
+        g.session_key = "my-token"
         provider = DerivaSessionAugmentationProvider()
         result = provider.enrich_userinfo(userinfo, {})
+
     assert result is True
     assert len(userinfo["groups"]) == 2
     assert userinfo["groups"][0]["display_name"] == "Group One"
-
-
-def test_enrich_userinfo_deriva_success_cookie(monkeypatch, app):
-    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
-    userinfo = {"email": "u@example.com"}
-    sample_groups = [{"id": "g3", "name": "Group Three"}]
-    groups_url = "https://example.org/api/groups"
-    monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", {
-        app.config["DEFAULT_REALM"]: {
-            "session_augmentation_params": {
-                "groups_api_url": groups_url
-            }
-        }
-    })
-    monkeypatch.setitem(app.config, "COOKIE_NAME", "auth_cookie")
-
-    monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
-                        lambda: ("cookieval", False))
-    mock_resp = SimpleNamespace(
-        status_code=200,
-        json=lambda: {"groups": sample_groups},
-        raise_for_status=lambda: None
-    )
-    monkeypatch.setattr(requests, "get", lambda url, headers, cookies, timeout, verify: mock_resp)
-
-    with app.app_context():
-        provider = DerivaSessionAugmentationProvider()
-        result = provider.enrich_userinfo(userinfo, {})
-    assert result is True
-    assert "groups" in userinfo
-    assert userinfo["groups"][0]["display_name"] == "Group Three"
 
 
 def test_enrich_userinfo_deriva_missing_url(monkeypatch, app):
@@ -401,8 +369,6 @@ def test_enrich_userinfo_deriva_http_401(monkeypatch, app):
             }
         }
     })
-    monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
-                        lambda: ("some-token", True))
 
     def raise_401():
         resp = Response()
@@ -411,7 +377,8 @@ def test_enrich_userinfo_deriva_http_401(monkeypatch, app):
 
     monkeypatch.setattr(requests, "get", lambda *a, **kw: raise_401())
 
-    with app.app_context():
+    with app.test_request_context():
+        g.session_key = "my-token"
         provider = DerivaSessionAugmentationProvider()
         result = provider.enrich_userinfo(userinfo, {})
     assert result is False
@@ -427,11 +394,10 @@ def test_enrich_userinfo_deriva_request_exception(monkeypatch, app):
             }
         }
     })
-    monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
-                        lambda: ("any-token", True))
     monkeypatch.setattr(requests, "get", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("network fail")))
 
-    with app.app_context():
+    with app.test_request_context():
+        g.session_key = "any-token"
         provider = DerivaSessionAugmentationProvider()
         result = provider.enrich_userinfo(userinfo, {})
     assert result is False

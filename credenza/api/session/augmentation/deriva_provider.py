@@ -16,9 +16,9 @@
 import requests
 import logging
 from requests import HTTPError
-from flask import current_app
+from flask import current_app, g
 from .base_provider import DefaultSessionAugmentationProvider
-from ...util import extract_session_key, get_realm
+from ...util import get_realm
 
 logger = logging.getLogger(__name__)
 
@@ -33,22 +33,13 @@ class DerivaSessionAugmentationProvider(DefaultSessionAugmentationProvider):
         if not groups_api_url:
             logger.warning(f"Parameter 'groups_api_url' was not found in 'session_augmentation_params' configuration block of profile.")
             return False
+        else:
+            groups_api_url = groups_api_url.rstrip("/")
 
         try:
-            headers = {}
-            cookies = {}
-
-            # Determine current auth method
-            auth, is_token = extract_session_key()
-            if is_token:
-                headers['Authorization'] = f'Bearer {auth}'
-            else:
-                cookie_name = current_app.config["COOKIE_NAME"]
-                cookies[cookie_name] = auth
-
-            resp = requests.get(groups_api_url,
+            headers = {'Authorization': f'Bearer {g.session_key}'}
+            resp = requests.get(groups_api_url + "/my",
                                 headers=headers,
-                                cookies=cookies,
                                 timeout=5,
                                 verify=not params.get("groups_api_bypass_cert_verify", False))
             resp.raise_for_status()

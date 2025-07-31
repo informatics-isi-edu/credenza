@@ -16,9 +16,14 @@
 import pytest
 import uuid
 import time
+import json
+import base64
+from unittest.mock import Mock
+from flask import g
 from urllib.parse import urlparse, parse_qs
 from credenza.rest import device_flow as df
 from credenza.api.session.storage.session_store import SessionData
+from credenza.rest.device_flow import device_callback
 
 class DummyDeviceOAuth:
     def create_authorization_url(self, url, state, nonce, redirect_uri, access_type):
@@ -239,3 +244,72 @@ def test_device_logout_success(client, app, store, monkeypatch):
     assert resp.status_code == 200
     assert resp.get_json() == {"status":"logged out"}
     assert store.get_session_data(sid) is None
+
+def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
+    store = app.config["SESSION_STORE"]
+    device_code = "test-device-code"
+    session_key = "deferred-device-session-key"
+    session_id = "deferred-device-session-id"
+
+    dummy_tokens = {"id_token": "id", "access_token": "atk", "scope": "openid email"}
+    dummy_userinfo = {"sub": "123", "email": "u@example.com"}
+    dummy_augmented_userinfo = {"sub": "123", "email": "u@example.com", "groups": ["g1"]}
+    dummy_additional_tokens = {"foo": "bar"}
+
+    # Simulate an existing device flow entry
+    store.set_device_flow(device_code, {
+        "user_code": "abcd1234",
+        "verified": False,
+        "issued_at": time.time(),
+        "expires_at": time.time() + 600,
+        "session_key": None,
+        "realm": "test",
+        "refresh": False
+    }, 600)
+
+    # Set nonce and pkce verifier
+    monkeypatch.setattr(store, "get_nonce", lambda state: "nonce")
+    monkeypatch.setattr(store, "delete_nonce", lambda state: None)
+    monkeypatch.setattr(store, "get_pkce_verifier", lambda state: "verifier")
+    monkeypatch.setattr(store, "delete_pkce_verifier", lambda state: None)
+
+    # Patch client behavior
+    client = app.config["OIDC_CLIENT_FACTORY"].get_client("test", native_client=True)
+    monkeypatch.setattr(client, "exchange_code_for_tokens", lambda *a, **kw: dummy_tokens)
+    monkeypatch.setattr(client, "validate_id_token", lambda token, nonce: dummy_userinfo)
+
+    # Patch session creation
+    monkeypatch.setattr(store, "generate_session_id", lambda: session_id)
+    monkeypatch.setattr(store, "create_session", lambda **kwargs: (session_key, base_session))
+
+    # Patch augment_session logic
+    call_count = {"count": 0}
+    def mock_augment(tokens, realm, userinfo, metadata):
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            metadata["augmentation_deferred"] = True
+            return userinfo, {}
+        else:
+            return dummy_augmented_userinfo, dummy_additional_tokens
+
+    monkeypatch.setattr("credenza.rest.device_flow.augment_session", mock_augment)
+
+    # Patch update_session
+    update_mock = Mock()
+    monkeypatch.setattr(store, "update_session", update_mock)
+
+    # Execute device callback
+    with app.test_request_context(f"/device/callback?code=abc&state={device_code}"):
+        g.session_key = session_key
+        resp = device_callback()
+
+    assert resp == "Device authorization complete. You may return to the device."
+    assert call_count["count"] == 2
+    update_mock.assert_called_once()
+
+    # Validate updated session
+    updated_sid, updated_session = update_mock.call_args[0]
+    assert updated_sid == session_id
+    assert updated_session.userinfo == dummy_augmented_userinfo
+    assert updated_session.additional_tokens == dummy_additional_tokens
+

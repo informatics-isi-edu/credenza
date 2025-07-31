@@ -17,7 +17,7 @@ import uuid
 import time
 import logging
 from datetime import datetime, timezone
-from flask import Blueprint, request, jsonify, redirect, abort, current_app
+from flask import Blueprint, request, jsonify, redirect, abort, current_app, g
 from ..api.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, augment_session, \
     revoke_tokens, strtobool
 from ..telemetry import audit_event
@@ -147,7 +147,7 @@ def device_callback():
     }
 
     # Augment the session, if applicable
-    userinfo, additional_tokens = augment_session(tokens, realm, userinfo)
+    userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
 
     session_id = store.generate_session_id()
     session_key, session_data = store.create_session(
@@ -165,6 +165,15 @@ def device_callback():
     flow["verified"] = True
     flow["session_key"] = session_key
     store.set_device_flow(device_code, flow, ttl=DEVICE_TTL)
+
+    if metadata.get("augmentation_deferred", False):
+        g.session_key = session_key
+        userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
+        metadata.pop("augmentation_deferred", None)
+        session_data.userinfo = userinfo
+        session_data.metadata = metadata
+        session_data.additional_tokens = additional_tokens
+        store.update_session(session_id, session_data)
 
     sub = userinfo.get("sub")
     user = userinfo.get("email")

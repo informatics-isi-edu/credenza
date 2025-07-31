@@ -16,10 +16,13 @@
 import pytest
 import json
 import base64
+from flask import g
+from unittest.mock import Mock
 from urllib.parse import urlparse, parse_qs, unquote
 from credenza.rest import login_flow as lf
 from credenza.api.oidc_client import OIDCClient
 from credenza.api.session.storage.session_store import SessionData
+from credenza.rest.login_flow import callback
 
 class DummyAuthSession:
     def create_authorization_url(self, url, state, nonce, redirect_uri, code_verifier):
@@ -188,3 +191,56 @@ def test_preauth_json_and_redirect(client, app):
     parsed2 = urlparse(loc)
     qs2 = parse_qs(parsed2.query)
     assert unquote(qs2["referrer"][0]) == "/foo"
+
+def test_callback_deferred_augmentation(app, base_session, monkeypatch):
+    store = app.config["SESSION_STORE"]
+    sid = "deferred-sid"
+    session_key = "deferred-session-key"
+
+    dummy_tokens = {"id_token": "id", "access_token": "atk", "scope": "openid email"}
+    dummy_userinfo = {"sub": "123", "email": "u@example.com"}
+    dummy_augmented_userinfo = {"sub": "123", "email": "u@example.com", "groups": ["g1"]}
+    dummy_additional_tokens = {"foo": "bar"}
+
+    call_count = {"count": 0}
+    def mock_augment(tokens, realm, userinfo, metadata):
+        print ("Mock augment called")
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            metadata["augmentation_deferred"] = True
+            return userinfo, {}
+        else:
+            return dummy_augmented_userinfo, dummy_additional_tokens
+
+    monkeypatch.setattr("credenza.rest.login_flow.augment_session", mock_augment)
+    monkeypatch.setattr("credenza.api.util.get_augmentation_provider_params",
+                        lambda realm: {"defer_augmentation": True})
+
+    client = app.config["OIDC_CLIENT_FACTORY"].get_client("test")
+    monkeypatch.setattr(client, "exchange_code_for_tokens", lambda *a, **kw: dummy_tokens)
+    monkeypatch.setattr(client, "validate_id_token", lambda token, nonce: dummy_userinfo)
+
+    update_mock = Mock()
+    monkeypatch.setattr(store, "update_session", update_mock)
+    monkeypatch.setattr(store, "get_nonce", lambda state: "nonce")
+    monkeypatch.setattr(store, "delete_nonce", lambda state: None)
+    monkeypatch.setattr(store, "get_pkce_verifier", lambda state: "code_verifier")
+    monkeypatch.setattr(store, "delete_pkce_verifier", lambda state: None)
+    monkeypatch.setattr(store, "generate_session_id", lambda: sid)
+    monkeypatch.setattr(store, "create_session", lambda **kwargs: (session_key, base_session))
+
+    encoded_state = base64.urlsafe_b64encode(json.dumps({"nonce": "nonce", "referrer": "/"}).encode()).decode()
+    with app.test_request_context(f"/callback?code=abc&state={encoded_state}"):
+        g.session_key = session_key
+        resp = callback()
+
+    assert resp.status_code == 302
+    assert resp.location.endswith("/")
+    assert call_count["count"] == 2
+    update_mock.assert_called_once()
+
+    updated_sid, updated_session = update_mock.call_args[0]
+    assert updated_sid == sid
+    assert updated_session.userinfo == dummy_augmented_userinfo
+    assert updated_session.additional_tokens == dummy_additional_tokens
+

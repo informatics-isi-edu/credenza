@@ -131,11 +131,12 @@ def get_augmentation_provider_params(realm=None):
     profile = current_app.config["OIDC_IDP_PROFILES"].get(get_realm(realm), {})
     return profile.get("session_augmentation_params", {})
 
-def augment_session(tokens, realm, userinfo):
+def augment_session(tokens, realm, userinfo, metadata):
     provider = get_augmentation_provider(realm)
     provider_params = get_augmentation_provider_params(realm)
     defer_augmentation = provider_params.get("defer_augmentation", False)
-    if defer_augmentation:
+    if defer_augmentation and not metadata.get("augmentation_deferred", False):
+        metadata.update({"augmentation_deferred": defer_augmentation})
         return userinfo, {}
 
     # look for additional tokens in the response

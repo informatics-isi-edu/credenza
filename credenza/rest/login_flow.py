@@ -17,7 +17,7 @@ import json
 import base64
 import logging
 from urllib.parse import urlencode, quote
-from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify
+from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify, g
 from ..api.util import has_current_session, get_effective_scopes, generate_nonce, augment_session, get_cookie_domain, \
     revoke_tokens
 from ..telemetry import audit_event
@@ -73,6 +73,7 @@ def callback():
     factory = current_app.config["OIDC_CLIENT_FACTORY"]
     realm = current_app.config["DEFAULT_REALM"]
     client = factory.get_client(realm)
+    metadata = {}
 
     redirect_uri = f"{current_app.config['BASE_URL']}/callback"
     code_verifier = store.get_pkce_verifier(state)
@@ -98,7 +99,7 @@ def callback():
         store.delete_nonce(state)
 
     # Augment the session, if applicable
-    userinfo, additional_tokens = augment_session(tokens, realm, userinfo)
+    userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
 
     sid = store.generate_session_id()
     session_key, session_data = store.create_session(
@@ -109,7 +110,7 @@ def callback():
         scopes=scopes_granted,
         userinfo=userinfo,
         realm=realm,
-        metadata={},
+        metadata=metadata,
         additional_tokens=additional_tokens
     )
 
@@ -122,6 +123,15 @@ def callback():
                 scopes=get_effective_scopes(session_data),
                 realm=realm)
     logger.info(f"Login successful for user {user} ({sub}) with session id {sid} on realm {realm}")
+
+    if metadata.get("augmentation_deferred", False):
+        g.session_key = session_key
+        userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
+        metadata.pop("augmentation_deferred", None)
+        session_data.userinfo = userinfo
+        session_data.metadata = metadata
+        session_data.additional_tokens = additional_tokens
+        store.update_session(sid, session_data)
 
     decoded_state = json.loads(base64.urlsafe_b64decode(state).decode())
     referrer = decoded_state.get("referrer", current_app.config.get("POST_LOGIN_REDIRECT", "/"))
