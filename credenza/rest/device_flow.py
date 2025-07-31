@@ -31,7 +31,7 @@ DEVICE_TTL = 600  # 10 minutes
 @device_blueprint.route("/device/start", methods=["POST"])
 def start_device_flow():
     store = current_app.config["SESSION_STORE"]
-    realm = get_realm(request.args.get("realm"))
+    realm = current_app.config["DEFAULT_REALM"]
     refresh = request.args.get("refresh")
     refresh = bool(strtobool(refresh)) if refresh is not None else False
 
