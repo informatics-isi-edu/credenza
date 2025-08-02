@@ -38,8 +38,11 @@ class DerivaSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
         try:
             # Determine current auth method
-            auth,_ = extract_session_key()
-            auth = auth if auth is not None else g.session_key
+            if hasattr(g, "session_key"):
+                auth = g.session_key
+            else:
+                auth,_ = extract_session_key()
+
             headers = {'Authorization': f'Bearer {auth}'}
             resp = requests.get(groups_api_url + "/my",
                                 headers=headers,
