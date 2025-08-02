@@ -37,10 +37,10 @@ def client(app, monkeypatch):
     app.register_blueprint(lf.login_blueprint)
     return app.test_client()
 
-def test_login_conflict(client, monkeypatch):
+def test_login_existing(client, monkeypatch):
     monkeypatch.setattr(lf, "has_current_session", lambda: "existing")
     resp = client.get("/login")
-    assert resp.status_code == 409
+    assert resp.status_code == 302
 
 def test_login_redirect(client, app, store, monkeypatch):
     monkeypatch.setattr(lf, "has_current_session", lambda: None)

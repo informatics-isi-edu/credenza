@@ -28,9 +28,6 @@ login_blueprint = Blueprint("login", __name__)
 
 @login_blueprint.route("/login")
 def login():
-    sid = has_current_session()
-    if sid is not None:
-        abort(409, "Login request conflicts with current client authentication state.")
 
     factory = current_app.config["OIDC_CLIENT_FACTORY"]
     store = current_app.config["SESSION_STORE"]
@@ -39,6 +36,11 @@ def login():
 
     referrer = request.args.get('referrer', current_app.config.get("POST_LOGIN_REDIRECT", "/"))
     logger.debug("Login referrer: %s", referrer)
+
+    sid = has_current_session()
+    if sid is not None:
+        return redirect(referrer)
+
     state = {
         "nonce": generate_nonce(),
         "referrer": referrer
