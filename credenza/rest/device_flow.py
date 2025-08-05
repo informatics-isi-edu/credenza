@@ -159,7 +159,8 @@ def device_callback():
         userinfo=userinfo,
         realm=realm,
         metadata=metadata,
-        additional_tokens=additional_tokens
+        additional_tokens=additional_tokens,
+        expires_at=refresh_expires_at
     )
 
     flow["verified"] = True

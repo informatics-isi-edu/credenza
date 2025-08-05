@@ -122,9 +122,13 @@ class SessionStore:
                        scopes = None,
                        metadata=None,
                        additional_tokens=None,
-                       use_access_token_as_session_key=False) -> (SessionData, str):
+                       use_access_token_as_session_key=False,
+                       expires_at=None) -> (SessionData, str):
         now = time.time()
-        expires_at = now + self.ttl
+        if expires_at is None:
+            expires_at = (now + self.ttl)
+        else:
+            self.ttl = int(expires_at - now)
 
         session_data = SessionData(
             id_token=id_token,
