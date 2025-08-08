@@ -185,6 +185,6 @@ class PostgreSQLBackend:
     def set(self, key: str, value: Union[str, bytes]) -> None:
         blob = value if isinstance(value, (bytes, bytearray)) else value.encode()
         row = self._pooled_execute_stmt(
-            "EXECUTE credenza_session_get(%s, %s, %s);",
+            "EXECUTE credenza_session_set(%s, %s, %s);",
             (key, blob, None)
         )
