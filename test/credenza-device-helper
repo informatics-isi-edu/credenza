@@ -1,0 +1,301 @@
+#!/usr/bin/python3
+
+from urllib.parse import urlparse
+import requests
+import json
+import sys
+from os import makedirs
+from os.path import expanduser, dirname, isdir
+
+credfilepath = expanduser("~/.credenza/credentials.json")
+
+session = requests.Session()
+
+commands = {}
+command_usage = {}
+
+def error(*parts, help_args=[]):
+    sys.stderr.write(
+        "error: %s" % (' '.join(parts)) + '\n'
+    )
+    help(help_args)
+    exit(1)
+
+def hostname_from_url(url):
+    parsed_url = urlparse(url)
+    return parsed_url.hostname
+    
+def load_credentials():
+    try:
+        with open(credfilepath, "rb") as credfile:
+            creds = json.load(credfile)
+            return creds
+    except FileNotFoundError:
+        return {}
+
+def load_credential(hostname):
+    return load_credentials().get(hostname)
+
+def apply_credential(headers, hostname):
+    cred = load_credential(hostname)
+    if not cred:
+        return
+    try:
+        token_type = cred['token_type']
+        if isinstance(token_type, str) and token_type.lower() == 'bearer':
+            access_token = cred['access_token']
+            headers["Authorization"] = f"Bearer {access_token}"
+        else:
+            error("Found unknown credential token_type {token_type}")
+    except KeyError as e:
+        error("Malformed credential lacks expected field %r" % str(e))
+
+def store_credential(hostname, cred):
+    # TODO: add file locking?
+    creds = load_credentials()
+    if cred is not None:
+        creds[hostname] = cred
+    else:
+        creds.pop(hostname,None)
+    creddir = dirname(credfilepath)
+    if not isdir(creddir):
+        makedirs(creddir)
+    with open(credfilepath, "wb") as credfile:
+        credfile.truncate(0)
+        creds = json.dumps(creds, indent=2)
+        credfile.write( (creds+'\n').encode('utf-8') )
+
+def logout(args):
+    if len(args) < 1:
+        error("Missing required login argument <hostname>", help_args=["login"])
+
+    hostname = args[0]
+    http_method('post', [f"https://{hostname}/authn/device/logout", "--raise"])
+    store_credential(hostname, None)
+    
+def login(args):
+    if len(args) < 1:
+        error("Missing required login argument <hostname>", help_args=["login"])
+
+    hostname = args[0]
+    refresh = True
+    force = False
+
+    for opt in args[1:]:
+        if opt == '--no-refresh':
+            refresh = False
+        elif opt == '--force':
+            force = True
+        else:
+            error("Unrecognized login option %r" % r, help_args=["login"])
+
+    query = '?refresh=true' if refresh else ""
+
+    if not force:
+        r = http_method('get', [f"https://{hostname}/authn/session"], cli=False)
+        if r.status_code == 200:
+            error(f"Found existing credentials for {hostname} in {credfilepath}", help_args=["login"])
+
+    r = session.post(f"https://{hostname}/authn/device/start{query}")
+    r.raise_for_status()
+    body = r.json()
+    verification_url = body["verification_uri"]
+    sys.stdout.write(f"""
+
+    Device login initiated to {hostname}.
+
+    1. Please visit {verification_url} in a browser to complete authentication.
+    2. After that, return here and enter "yes" at the prompt below to proceed.
+
+    """)
+    while True:
+        sys.stdout.write("\nProceed? (y/N): ")
+        sys.stdout.flush()
+        response = sys.stdin.readline()
+        if response.strip().lower() in {'y','yes'}:
+            break
+
+    r = session.post(
+        f"https://{hostname}/authn/device/token",
+        json={"device_code": body["device_code"]}
+    )
+    r.raise_for_status()
+    body = r.json()
+    store_credential(hostname, body)
+
+    sys.stdout.write(f"Credential written to {credfilepath}\n")
+    sys.stdout.flush()
+    return 0
+
+def http_method(method, args, allow_json=True, cli=True):
+    if len(args) < 1:
+        error(f"Missing required {method} argument <url>", help_args=[method])
+
+    url = args[0]
+    kwargs = {}
+    raise_for_status = False
+    json_pretty = False
+
+    i=1
+    while i<len(args):
+        opt = args[i]
+        i += 1
+        if opt.lower() == '--headers':
+            if i >= len(args):
+                error("Missing <header> argument after --header option flag.", help_args=[method])
+            try:
+                headers = json.loads(args[i])
+            except json.decoder.JSONDecodeError as e:
+                error(f"Failed to decode JSON <headers> parameter {args[i]!r}. {e}", help_args=[method])
+            kwargs['headers'] = headers
+            i += 1
+        elif opt.lower() == '--json':
+            if not allow_json:
+                error(f"Unrecognized {method} option --json", help_args=[method])
+            if i >= len(args):
+                error("Missing <body> argument after --json option flag.", help_args=[method])
+            try:
+                json_body = json.loads(args[i])
+            except json.decoder.JSONDecodeError as e:
+                error(f"Failed to decode JSON <body> parameter. {e}", help_args=[method])
+            i += 1
+            kwargs['json'] = json_body
+        elif opt.lower() == '--raise':
+            raise_for_status = True
+        elif opt.lower() == '--pretty':
+            json_pretty = True
+        else:
+            error(f"Unrecognized {method} option {opt}", help_args=[method])
+
+    func = getattr(session, method, None)
+    if func is None:
+        error(f"Unsupported HTTP method {method}", help_args=[method])
+
+    if cli:
+        sys.stderr.write(f"Performing HTTP {method} {url}\n")
+        if 'headers' in kwargs:
+            sys.stderr.write(f" with user headers {headers}\n")
+        if 'json' in kwargs:
+            sys.stderr.write(" with user-supplied JSON body")
+        sys.stderr.write('\n')
+    
+    apply_credential(kwargs.setdefault('headers', {}), hostname_from_url(url))
+
+    r = func(url, **kwargs)
+
+    if cli:
+        sys.stderr.write('%s %s\n' % (r.status_code, r.reason))
+        for k, v in r.headers.items():
+            sys.stderr.write('%s: %s\n' % (k, v))
+        sys.stderr.write('\n')
+
+    if raise_for_status:
+        r.raise_for_status()
+    if json_pretty and r.headers['Content-Type'] == 'application/json':
+        text = json.dumps(r.json(), indent=2)
+    else:
+        text = r.text
+
+    if cli:
+        sys.stdout.write(text)
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+        return 0
+    else:
+        return r
+
+def help(args):
+    sys.stderr.write(
+        "usage: credenza-device-helper <command> [<command arg>...]\n"
+    )
+
+    if args:
+        command = args[0]
+        if command not in command_usage:
+            error(f"Unrecognized command {command}")
+        sys.stderr.write(command_usage[command]+'\n')
+    else:
+        sys.stderr.write('\n'.join(command_usage.values())+'\n')
+
+commands = {
+    "login": login,
+    "logout": logout,
+    "get": lambda args: http_method('get', args, allow_json=False),
+    "put": lambda args: http_method('put', args),
+    "post": lambda args: http_method('post', args),
+    "delete": lambda args: http_method('delete', args, allow_json=False),
+    "help": help,
+}
+command_usage = {
+    "login": """
+    > credenza-device-helper login <hostname> [<option>...]
+
+    Perform interactive device-flow login to given hostname.
+    Supported options:
+      --no-refresh:  Disable refresh (default is to ask for refresh token)
+      --force:       Do login even if an existing credential is found
+    """,
+    
+    "logout": """
+    > credenza-device-helper logout <hostname>
+
+    Perform device-flow logout to given hostname.
+    """,
+    
+    "get": """
+    > credenza-device-helper get <url> [--headers <headers>] [--pretty]
+
+    Perform HTTP GET to given URL.
+    Supported options:
+      --headers <headers>: Decode <headers> JSON and apply dict key-value pairs as headers.
+      --pretty:            Decode and re-encode JSON response with pretty indentation.
+    """,
+    
+    "put": """
+    > credenza-device-helper put <url> [--json <body>] [--headers <headers>] [--pretty]
+
+    Perform HTTP PUT to given URL.
+    Supported options:
+      --headers <headers>: Decode <headers> JSON and apply dict key-value pairs as headers.
+      --json <body>:       Send <body> JSON as request content of application/json type.
+      --pretty:            Decode and re-encode JSON response with pretty indentation.
+    """,
+    
+    "post": """
+    > credenza-device-helper post <url> [--json <body>] [--headers <headers>] [--pretty]
+
+    Perform HTTP POST to given URL.
+    Supported options:
+      --headers <headers>: Decode <headers> JSON and apply dict key-value pairs as headers.
+      --json <body>:       Send <body> JSON as request content of application/json type.
+      --pretty:            Decode and re-encode JSON response with pretty indentation.
+    """,
+    
+    "delete": """
+    > credenza-device-helper delete <url> [--headers <headers>]
+
+    Perform HTTP DELETE to given URL.
+    Supported options:
+      --headers <headers>: Decode <headers> JSON and apply dict key-value pairs as headers.
+    """,
+    
+    "help": """
+    > credenza-device-helper help [<command>]
+    
+    Prints help for given command name.
+    Prints help for all commands if command name is absent.
+    """,
+}
+
+def main(args):
+    if len(args) < 1:
+        error("Missing required first argument <command>")
+    command = args[0]
+    args = args[1:]
+    if command not in commands:
+        error(f"Unrecognized command {command}")
+    command = commands[command]
+    return command(args)
+
+if __name__ == "__main__":
+    exit(main(sys.argv[1:]))

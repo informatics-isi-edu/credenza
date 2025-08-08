@@ -18,7 +18,7 @@ import logging
 from requests import HTTPError
 from flask import current_app, g
 from .base_provider import DefaultSessionAugmentationProvider
-from ...util import get_realm
+from ...util import get_realm, extract_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,13 @@ class DerivaSessionAugmentationProvider(DefaultSessionAugmentationProvider):
             groups_api_url = groups_api_url.rstrip("/")
 
         try:
-            headers = {'Authorization': f'Bearer {g.session_key}'}
+            # Determine current auth method
+            if hasattr(g, "session_key"):
+                auth = g.session_key
+            else:
+                auth,_ = extract_session_key()
+
+            headers = {'Authorization': f'Bearer {auth}'}
             resp = requests.get(groups_api_url + "/my",
                                 headers=headers,
                                 timeout=5,
