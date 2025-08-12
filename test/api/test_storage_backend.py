@@ -20,15 +20,20 @@ import redis
 import valkey
 import uuid
 import time
+import testing.postgresql
 from credenza.api.session.storage.backends.memory import MemoryBackend
 from credenza.api.session.storage.backends.redis import RedisBackend
 from credenza.api.session.storage.backends.valkey import ValkeyBackend
 from credenza.api.session.storage.backends.sqlite import SQLiteBackend
+from credenza.api.session.storage.backends.postgresql import PostgreSQLBackend
+
+postgresql = testing.postgresql.Postgresql()
 
 @pytest.fixture(params=[
     "memory",
     "redis",
     "valkey",
+    "postgresql",
     "sqlite"
 ], ids=lambda name: name)
 def backend(request, monkeypatch):
@@ -48,6 +53,8 @@ def backend(request, monkeypatch):
         return ValkeyBackend(url="valkey://fake")
     elif request.param == "sqlite":
         return SQLiteBackend()
+    elif request.param == "postgresql":
+        return PostgreSQLBackend(url=postgresql.url())
     else:
         raise RuntimeError("Unsupported backend")
 
