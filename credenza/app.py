@@ -18,7 +18,7 @@ import json
 import logging
 from pathlib import Path
 from threading import Thread
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from flask import Flask, jsonify, request
 from werkzeug.utils import import_string
 from werkzeug.exceptions import HTTPException
@@ -37,12 +37,23 @@ from .refresh.refresh_worker import run_refresh_worker
 logger = logging.getLogger(__name__)
 
 
-def configure_authn_env() -> None:
+def load_config(app):
     """
-    Load CREDENZA_* env vars from a .env file if present, otherwise
+    Load app.config with CREDENZA_* env vars from a .env file if present, os.environ, and
     fall back to sane defaults for any keys still unset.
     Hostname for URLs is taken from CONTAINER_HOSTNAME or system hostname.
     """
+    # defaults for unconfigured variables
+    env_config = {
+        "CREDENZA_DEFAULT_REALM": "default",
+        "CREDENZA_ENABLE_PKCE": "true",
+        "CREDENZA_ENABLE_LEGACY_API": "false",
+        "CREDENZA_ENABLE_REFRESH_WORKER": "true",
+        "CREDENZA_ENCRYPT_SESSION_DATA": "false",
+        "CREDENZA_STORAGE_BACKEND": "memory",
+        "CREDENZA_AUDIT_USE_SYSLOG": "false",
+    }
+
     # Load .env from one of these locations, if it exists
     dotenv_locations = [
         Path("/etc/credenza/credenza.env"),
@@ -53,32 +64,27 @@ def configure_authn_env() -> None:
     for fn in dotenv_locations:
         if fn.is_file():
             fp = str(fn)
-            load_dotenv(dotenv_path=fp, override=False)
+            env_config.update(dotenv_values(dotenv_path=fp))
             logger.info(f"Loaded dotenv configuration file from: {fp}")
             break
 
-    # Determine base host (env override first)
-    host = os.environ.get("CONTAINER_HOSTNAME", os.environ.get("HOSTNAME"))
+    # os.environ overrides .env file
+    env_config.update(os.environ.items())
 
-    # Defaults for any missing CREDENZA_* vars
-    defaults = {
-        "CREDENZA_DEFAULT_REALM": "default",
-        "CREDENZA_BASE_URL": f"https://{host}/authn",
-        "CREDENZA_POST_LOGOUT_REDIRECT_URL": f"https://{host}/",
-        "CREDENZA_ENABLE_PKCE": "true",
-        "CREDENZA_ENABLE_LEGACY_API": "false",
-        "CREDENZA_ENABLE_REFRESH_WORKER": "true",
-        "CREDENZA_ENCRYPT_SESSION_DATA": "false",
-        "CREDENZA_STORAGE_BACKEND": "memory",
-        "CREDENZA_AUDIT_USE_SYSLOG": "false"
-    }
-    for key, fallback in defaults.items():
-        os.environ.setdefault(key, fallback)
+    # Determine base host
+    host = env_config.get("CONTAINER_HOSTNAME", env_config.get("HOSTNAME"))
 
+    # deferred defaults that depend on configured host
+    env_config.setdefault("CREDENZA_BASE_URL", f"https://{host}/authn")
+    env_config.setdefault("CREDENZA_POST_LOGOUT_REDIRECT_URL", f"https://{host}/")
 
-def load_config(app):
-    configure_authn_env()
-    app.config.from_prefixed_env(prefix="CREDENZA")
+    _ENV_PREFIX = "CREDENZA_"
+    app.config.update({
+        # strip _ENV_PREFIX when copying
+        (k[len(_ENV_PREFIX):], v)
+        for k, v in env_config.items()
+        if k.startswith(_ENV_PREFIX)
+    })
 
     legacy_mode = app.config.get("ENABLE_LEGACY_API", False)
     if not app.config.get("COOKIE_NAME"):
