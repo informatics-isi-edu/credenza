@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import platform
 import pytest
 import redis
 import valkey
@@ -27,7 +28,7 @@ from credenza.api.session.storage.backends.valkey import ValkeyBackend
 from credenza.api.session.storage.backends.sqlite import SQLiteBackend
 from credenza.api.session.storage.backends.postgresql import PostgreSQLBackend
 
-postgresql = testing.postgresql.Postgresql()
+postgresql = testing.postgresql.Postgresql() if platform.system() != 'Windows' else None
 
 @pytest.fixture(params=[
     "redis",
@@ -62,6 +63,8 @@ def store(request, monkeypatch):
     elif backend_type.startswith("sqlite"):
         backend = SQLiteBackend()
     elif backend_type.startswith("postgresql"):
+        if platform.system() == "Windows":
+            pytest.skip("PostgreSQL backend tests are skipped on Windows")
         backend = PostgreSQLBackend(url=postgresql.url())
     elif backend_type.startswith("memory"):
         backend = MemoryBackend()

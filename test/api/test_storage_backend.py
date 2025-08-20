@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import platform
 import pytest
 import fakeredis
 import redis
@@ -27,7 +28,7 @@ from credenza.api.session.storage.backends.valkey import ValkeyBackend
 from credenza.api.session.storage.backends.sqlite import SQLiteBackend
 from credenza.api.session.storage.backends.postgresql import PostgreSQLBackend
 
-postgresql = testing.postgresql.Postgresql()
+postgresql = testing.postgresql.Postgresql() if platform.system() != 'Windows' else None
 
 @pytest.fixture(params=[
     "memory",
@@ -53,7 +54,8 @@ def backend(request, monkeypatch):
         return ValkeyBackend(url="valkey://fake")
     elif request.param == "sqlite":
         return SQLiteBackend()
-    elif request.param == "postgresql":
+    if platform.system() == "Windows":
+        pytest.skip("PostgreSQL backend tests are skipped on Windows")
         return PostgreSQLBackend(url=postgresql.url())
     else:
         raise RuntimeError("Unsupported backend")
