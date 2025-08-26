@@ -35,7 +35,7 @@ dependencies = [
   "pycryptodomex",
   "redis",
   "valkey",
-  "psycopg2",
+  "psycopg2-binary",
   "python-dotenv",
   "python-json-logger",
   "publicsuffix2"

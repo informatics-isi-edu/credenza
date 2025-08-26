@@ -22,7 +22,7 @@ DAEMONUSER=credenza
 INSTALL_SCRIPT=./install-script
 
 # make this the default target
-install: config/wsgi_credenza.conf
+install: $(HTTPDCONFDIR)/wsgi_credenza.conf
 		pip3 install .
 
 testvars:
@@ -37,7 +37,7 @@ deploy: install force
 
 redeploy: uninstall deploy
 
-config/wsgi_credenza.conf: config/wsgi_credenza.conf.in force
+$(HTTPDCONFDIR)/wsgi_credenza.conf: config/wsgi_credenza.conf.in force
 		./install-script -M sed -R @PYLIBDIR@=$(PYLIBDIR) @WSGISOCKETPREFIX@=$(WSGISOCKETPREFIX) @DAEMONUSER@=$(DAEMONUSER) -o root -g root -m a+r -p -D $< $@
 
 uninstall: force
