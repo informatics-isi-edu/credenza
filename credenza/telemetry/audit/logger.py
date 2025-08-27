@@ -21,6 +21,7 @@ from logging.handlers import SysLogHandler, TimedRotatingFileHandler
 from pythonjsonlogger import json
 
 logger = logging.getLogger(__name__)
+svc_logger = logging.getLogger("credenza")
 
 def init_audit_logger(filename="credenza-audit.log", use_syslog=False):
     log_handler = StreamHandler() # last-ditch sanity fallback
@@ -31,9 +32,10 @@ def init_audit_logger(filename="credenza-audit.log", use_syslog=False):
         try:
             log_handler = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
             log_handler.ident = 'credenza-audit: '
+            logger.propagate = False
         except Exception as e:
             # fallback to the default logger
-            print(f"Failed to initialize syslog logger, falling back to default audit log handler: {e}")
+            svc_logger.warning(f"Failed to initialize syslog logger, falling back to default audit log handler: {e}")
             use_syslog = False
 
     # fallback to TimedRotatingFileHandler if syslog not available/selected
@@ -42,7 +44,8 @@ def init_audit_logger(filename="credenza-audit.log", use_syslog=False):
             log_handler = TimedRotatingFileHandler(filename=filename, when="D", interval=1, backupCount=0)
         except Exception as e:
             # fallback to the last-ditch stream handler
-            print(f"Failed to initialize {log_handler.__class__.__name__}, falling back to stream handler: {e}")
+            svc_logger.warning(
+                f"Failed to initialize {log_handler.__class__.__name__}, falling back to logging.StreamHandler: {e}")
 
     formatter = json.JsonFormatter("{message}", style="{", rename_fields={"message": "event"})
     log_handler.setFormatter(formatter)

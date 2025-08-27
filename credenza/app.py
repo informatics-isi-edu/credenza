@@ -26,7 +26,7 @@ from werkzeug.exceptions import HTTPException
 from .api.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
-from .api.util import AESGCMCodec
+from .api.util import AESGCMCodec, strtobool
 from .rest.session import session_blueprint
 from .rest.login_flow import login_blueprint
 from .rest.device_flow import device_blueprint
@@ -80,9 +80,14 @@ def load_config(app):
     env_config.setdefault("CREDENZA_POST_LOGOUT_REDIRECT_URL", f"https://{host}/")
 
     _ENV_PREFIX = "CREDENZA_"
+    def decode_json(v):
+        try:
+            return json.loads(v)
+        except:
+            return v
     app.config.update({
         # strip _ENV_PREFIX when copying
-        (k[len(_ENV_PREFIX):], v)
+        (k[len(_ENV_PREFIX):], decode_json(v))
         for k, v in env_config.items()
         if k.startswith(_ENV_PREFIX)
     })

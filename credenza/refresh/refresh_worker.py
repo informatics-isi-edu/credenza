@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 def run_refresh_worker(app):
     store = app.config["SESSION_STORE"]
     profiles = app.config["OIDC_IDP_PROFILES"]
-    interval = int(app.config.get("REFRESH_WORKER_POLL_INTERVAL", 60))
-    session_expiry_threshold = int(app.config.get("SESSION_EXPIRY_THRESHOLD", 300))
+    interval = app.config.get("REFRESH_WORKER_POLL_INTERVAL", 60)
+    session_expiry_threshold = app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
 
     while True:
         now = time.time()
