@@ -127,6 +127,7 @@ def init_logging(app):
             log_handler.ident = "credenza: "
             log_handler.setFormatter(
                 logging.Formatter("[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+            logger.propagate = False
         except Exception as e:
             # fallback to preconfigured StreamHandler
             pass
