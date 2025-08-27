@@ -16,6 +16,7 @@
 import os
 import json
 import logging
+from logging.handlers import SysLogHandler
 from pathlib import Path
 from threading import Thread
 from dotenv import dotenv_values
@@ -34,7 +35,7 @@ from .telemetry.audit.logger import init_audit_logger
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("credenza")
 
 
 def load_config(app):
@@ -114,14 +115,29 @@ def load_config(app):
             provider_map[realm] = import_string(cls_path)()
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = provider_map
 
+def init_logging(app):
+    log_handler = logging.StreamHandler()
+    log_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+
+    syslog_socket = "/dev/log"
+    if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
+        try:
+            log_handler = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
+            log_handler.ident = "credenza: "
+            log_handler.setFormatter(
+                logging.Formatter("[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+        except Exception as e:
+            # fallback to preconfigured StreamHandler
+            pass
+
+    logger.addHandler(log_handler)
+    logger.setLevel(logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
 def create_app():
     app = Flask(__name__)
     app.config.from_prefixed_env(prefix="CREDENZA")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", force=True)
-    logging.getLogger("credenza").setLevel(
-        logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
-
+    init_logging(app)
     load_config(app)
     init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
                       use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
@@ -184,14 +200,14 @@ def enable_healthcheck(app):
         return jsonify({"status": "healthy", "service": "credenza"}), 200
 
 def start_refresh_worker(app):
-    def worker():
+    def refresh_worker():
         with app.app_context():
             logger.info("Starting background refresh worker")
             run_refresh_worker(app)
 
     # ensure we only start it once per process
     if app.config.get("ENABLE_REFRESH_WORKER", False) and not getattr(app, "_refresh_thread_started", False):
-        Thread(target=worker, daemon=True).start()
+        Thread(target=refresh_worker, daemon=True).start()
         app._refresh_thread_started = True
 
 
