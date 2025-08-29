@@ -21,12 +21,13 @@ from pathlib import Path
 from threading import Thread
 from dotenv import dotenv_values
 from flask import Flask, jsonify, request
+from requests import RequestException, ConnectionError, Timeout
 from werkzeug.utils import import_string
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import HTTPException, BadGateway, ServiceUnavailable
 from .api.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
-from .api.util import AESGCMCodec, strtobool
+from .api.util import AESGCMCodec, is_browser_client
 from .rest.session import session_blueprint
 from .rest.login_flow import login_blueprint
 from .rest.device_flow import device_blueprint
@@ -151,6 +152,8 @@ def create_app():
     @app.errorhandler(HTTPException)
     def handle_http_exception(e):
         response = e.get_response()
+        if is_browser_client(request):
+            return response
         response.data = jsonify({
             "error": e.name.lower().replace(" ", "_"),
             "code": e.code,
@@ -158,6 +161,17 @@ def create_app():
         }).data
         response.content_type = "application/json"
         return response
+
+    @app.errorhandler(RequestException)
+    def handle_requests_exc(e):
+        try:
+            logger.error(f"Unhandled exception during external HTTP request: {e}")
+            msg = "Upstream request %s. Check service log for additional details."
+            if isinstance(e, (Timeout, ConnectionError)):
+                raise ServiceUnavailable(description=msg % "incomplete") from e
+            raise BadGateway(description=msg % "failed") from e
+        except HTTPException as he:
+            return handle_http_exception(he)
 
     @app.after_request
     def apply_secure_headers(response):
