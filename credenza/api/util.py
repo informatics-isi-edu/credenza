@@ -24,6 +24,8 @@ from publicsuffix2 import get_sld
 from Cryptodome.Cipher import AES
 from Cryptodome.Random import get_random_bytes
 from flask import current_app, request, Response, abort
+from requests import HTTPError, Timeout, ConnectionError
+from urllib.parse import urlparse
 from .session.storage.session_store import SessionData
 from ..telemetry import audit_event
 
@@ -179,7 +181,9 @@ def refresh_access_token(sid, session):
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
     realm = session.realm
-    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm)
+    sys_metadata = session.session_metadata.system or {}
+    is_device_session = sys_metadata.get("device_session", False)
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=is_device_session)
     updated = False
 
     now = time.time()
@@ -222,7 +226,9 @@ def refresh_additional_tokens(sid, session):
     user = session.userinfo.get("email")
     realm = session.realm
     tokens = session.additional_tokens or {}
-    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm)
+    sys_metadata = session.session_metadata.system or {}
+    is_device_session = sys_metadata.get("device_session", False)
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=is_device_session)
 
     updated = False
     for scope, token in list(tokens.items()):
@@ -276,7 +282,9 @@ def revoke_tokens(sid, session):
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
     realm = session.realm
-    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(realm)
+    sys_metadata = session.session_metadata.system or {}
+    is_device_session = sys_metadata.get("device_session", False)
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(realm, native_client=is_device_session)
     try:
         # try to revoke all tokens associated with the session
         tokens = get_tokens_by_scope(session)
@@ -351,3 +359,20 @@ def strtobool (val):  # pragma: no cover
         return False
     else:
         raise ValueError("invalid truth value %r" % (val,))
+
+def is_transient_request_error(e): # pragma: no cover
+    if isinstance(e, (Timeout, ConnectionError)):
+        return True
+    if isinstance(e, HTTPError) and getattr(e, "response", None):
+        return 500 <= e.response.status_code < 600
+    return False
+
+def safe_referrer(url: str) -> str:# pragma: no cover
+    if not url: return "/"
+    p = urlparse(url)
+    if p.scheme or p.netloc:  # absolute/externals -> reject
+        return "/"
+    # prevent '//' which can be treated as scheme-relative
+    if url.startswith("//"):
+        return "/"
+    return url

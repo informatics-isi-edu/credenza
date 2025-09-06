@@ -62,11 +62,11 @@ def run_refresh_worker(app):
 
             # Refresh access tokens for sessions with automatic refresh allowed
             if session.refresh_token and allow_auto_refresh:
-                modified = refresh_access_token(sid, session)
+                modified = bool(refresh_access_token(sid, session)) or modified
 
             # Refresh other tokens if needed and allowed
             if allow_auto_refresh:
-                modified = refresh_additional_tokens(sid, session)
+                modified = bool(refresh_additional_tokens(sid, session)) or modified
 
             # Just bump session TTL if allowed and it is about to expire and hasn't otherwise been modified
             if not modified and allow_auto_refresh:
