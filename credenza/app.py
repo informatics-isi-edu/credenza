@@ -112,13 +112,13 @@ def load_config(app):
             app.config["TRUSTED_ISSUERS"] = json.load(f)
 
     # create session augmentation provider map
-    provider_map = \
-        {"default":
-             import_string("credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider")()}
+    provider_map = {}
+    default_provider = "credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider"
     for realm, prof in app.config["OIDC_IDP_PROFILES"].items():
         cls_path = prof.get("session_augmentation_provider")
-        if cls_path:
-            provider_map[realm] = import_string(cls_path)()
+        if not cls_path:
+            cls_path = default_provider
+        provider_map[realm] = import_string(cls_path)()
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = provider_map
 
 def init_logging(app):

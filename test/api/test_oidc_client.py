@@ -55,6 +55,16 @@ def discovery_metadata(discovery_response, monkeypatch):
     monkeypatch.setattr(requests, "get", fake_get)
     return meta
 
+class _FakeAuthSession:
+    def __init__(self):
+        self.called_with_url = None
+        self.called_with_kwargs = None
+
+    def create_authorization_url(self, url, **kwargs):
+        self.called_with_url = url
+        self.called_with_kwargs = kwargs
+        return ("https://idp.example/authorize?ok=1", "STATE123")
+
 # Factory tests
 def test_factory_unknown_realm(profile_file):
     factory = OIDCClientFactory({})
@@ -231,3 +241,105 @@ def test_revoke_token_exception(monkeypatch, client):
     err = RuntimeError("boom")
     monkeypatch.setattr(client, "get_oauth_session", lambda: DummySession(exc=err))
     assert client.revoke_token("openid", "tok") is False
+
+@pytest.mark.skip_oauth_patch
+def test_create_auth_url_pkce_add_offline_access(client, monkeypatch):
+    fake_sess = _FakeAuthSession()
+    captured = {}
+
+    # get_oauth_session should receive S256 + augmented scope
+    def fake_get_oauth_session(**kw):
+        captured["kwargs"] = kw
+        return fake_sess
+
+    # deterministic code_verifier
+    monkeypatch.setattr("credenza.api.oidc_client.token_urlsafe", lambda n: "VERIF123")
+    monkeypatch.setattr(client, "get_oauth_session", fake_get_oauth_session)
+
+    url, state, code_verifier = client.create_authorization_url(
+        use_pkce=True,
+        request_offline_access_scope=True,
+        nonce="N",
+        redirect_uri="https://app.example/callback",
+    )
+
+    assert url.startswith("https://idp.example/authorize")
+    assert state == "STATE123"
+    assert code_verifier == "VERIF123"
+
+    gok = captured["kwargs"]
+    assert gok["code_challenge_method"] == "S256"
+    expected_scope = client.scope + " offline_access" if "offline_access" not in client.scope else client.scope
+    assert gok["scope"] == expected_scope  # device flow adds offline_access if missing
+
+    assert fake_sess.called_with_url == client.authorize_url
+    assert fake_sess.called_with_kwargs["code_verifier"] == "VERIF123"
+    assert fake_sess.called_with_kwargs["nonce"] == "N"
+    assert fake_sess.called_with_kwargs["redirect_uri"] == "https://app.example/callback"
+
+
+@pytest.mark.skip_oauth_patch
+def test_create_auth_url_no_pkce_no_scope_override(client, monkeypatch):
+    fake_sess = _FakeAuthSession()
+    captured = {}
+
+    def fake_get_oauth_session(**kw):
+        captured["kwargs"] = kw
+        return fake_sess
+
+    # ensure token_urlsafe would fail if called (it shouldn't be)
+    def _boom(_):
+        raise AssertionError("token_urlsafe must not be called when use_pkce=False")
+    monkeypatch.setattr("credenza.api.oidc_client.token_urlsafe", _boom)
+    monkeypatch.setattr(client, "get_oauth_session", fake_get_oauth_session)
+
+    url, state, code_verifier = client.create_authorization_url(
+        use_pkce=False,
+        request_offline_access_scope=False,
+        prompt="login",
+    )
+
+    assert url.startswith("https://idp.example/authorize")
+    assert state == "STATE123"
+    assert code_verifier is None
+
+    gok = captured["kwargs"]
+    assert gok["code_challenge_method"] is None
+    assert gok["scope"] is None  # no device flow -> don't override scope
+
+    assert "code_verifier" not in fake_sess.called_with_kwargs  # not forwarded
+    assert fake_sess.called_with_kwargs["prompt"] == "login"     # extras forwarded
+
+
+@pytest.mark.skip_oauth_patch
+def test_create_auth_url_device_scope_already_has_offline_access(client, monkeypatch):
+    # Ensure client.scope already contains offline_access
+    if "offline_access" not in client.scope:
+        client.scope = client.scope + " offline_access"
+
+    fake_sess = _FakeAuthSession()
+    captured = {}
+
+    def fake_get_oauth_session(**kw):
+        captured["kwargs"] = kw
+        return fake_sess
+
+    monkeypatch.setattr("credenza.api.oidc_client.token_urlsafe", lambda n: "VERIFXYZ")
+    monkeypatch.setattr(client, "get_oauth_session", fake_get_oauth_session)
+
+    url, state, code_verifier = client.create_authorization_url(
+        use_pkce=True,
+        request_offline_access_scope=True,
+        nonce="NN",
+    )
+
+    assert state == "STATE123"
+    assert code_verifier == "VERIFXYZ"
+
+    gok = captured["kwargs"]
+    assert gok["code_challenge_method"] == "S256"
+    # Since offline_access already in client.scope, method should NOT pass scope override
+    assert gok["scope"] is None
+
+    assert fake_sess.called_with_kwargs["code_verifier"] == "VERIFXYZ"
+    assert fake_sess.called_with_kwargs["nonce"] == "NN"

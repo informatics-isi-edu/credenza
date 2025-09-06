@@ -107,14 +107,15 @@ class OIDCClient:
                 key = k.as_dict()
                 logger.debug(f"Loaded JWK kid={key.get('kid')}, alg={key.get('alg')}")
 
-    def create_authorization_url(self, use_pkce, is_device=False, **kwargs):
+    def create_authorization_url(self, use_pkce, request_offline_access_scope=False, **kwargs):
         """
         Builds the /authorize URL.  If use_pkce=True, Authlib will
         auto-generate a code_verifier & code_challenge.
         Returns (url, state, code_verifier).
         """
         extra = kwargs or {}
-        scope = self.scope + " offline_access" if is_device and "offline_access" not in self.scope else None
+        scope = self.scope + " offline_access" \
+            if request_offline_access_scope and "offline_access" not in self.scope else None
         session = self.get_oauth_session(
             code_challenge_method='S256' if use_pkce else None,
             scope=scope

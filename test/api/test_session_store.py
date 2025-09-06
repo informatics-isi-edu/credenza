@@ -141,10 +141,10 @@ def test_list_session_ids_and_get_ttl(frozen_time, store):
 
 def test_nonce_lifecycle(store):
     # store_nonce and get_nonce should round-trip the JSON-able object
-    store.store_nonce("n1", "abc123")
-    assert store.get_nonce("n1") == "abc123"
-    store.delete_nonce("n1")
-    assert store.get_nonce("n1") is None
+    store.store_authn_request_ctx("n1", {"nonce":"abc123"})
+    assert store.get_authn_request_ctx("n1") == {"nonce":"abc123"}
+    store.delete_authn_request_ctx("n1")
+    assert store.get_authn_request_ctx("n1") is None
 
 def test_device_flow_mappings(store):
     store.set_device_flow("dev1", "abc123", store.ttl)

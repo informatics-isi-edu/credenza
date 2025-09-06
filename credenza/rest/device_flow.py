@@ -37,14 +37,18 @@ def start_device_flow():
 
     device_code = str(uuid.uuid4().hex)
     user_code = str(uuid.uuid4())[:8].upper()
+    poll_interval = current_app.config.get("DEVICE_POLL_INTERVAL", 3)
+    redirect_uri = f"{current_app.config['BASE_URL']}/device/callback"
     flow = {
         "user_code": user_code,
         "verified": False,
+        "interval": poll_interval,
         "issued_at": time.time(),
         "expires_at": time.time() + DEVICE_TTL,
         "session_key": None,
         "realm": realm,
-        "refresh":refresh
+        "refresh":refresh,
+        "redirect_uri":  redirect_uri
     }
     store.set_device_flow(device_code, flow, ttl=DEVICE_TTL)
     store.set_usercode_mapping(user_code, device_code, ttl=DEVICE_TTL)
@@ -70,29 +74,43 @@ def verify_device(user_code):
         abort(404, description="Expired or invalid flow")
 
     realm = flow.get("realm", "default")
+    redirect_uri = flow.get("redirect_uri")
     state = f"{device_code}"
     nonce = generate_nonce()
-    store.store_nonce(state, nonce)
 
+    profile = current_app.config["OIDC_IDP_PROFILES"].get(get_realm(realm), {})
     factory = current_app.config["OIDC_CLIENT_FACTORY"]
-    client = factory.get_client(realm, native_client=True)
-    redirect_uri = f"{current_app.config['BASE_URL']}/device/callback"
+    try:
+        client = factory.get_client(realm, native_client=True)
+    except Exception as e:
+        abort(502, description=f"OIDC client init failed: {e}")
 
+    request_offline_access_scope = profile.get("request_offline_access_scope_in_device_flow", True)
     auth_url, auth_state, code_verifier = client.create_authorization_url(
         use_pkce=current_app.config.get("ENABLE_PKCE", True),
-        is_device=True,
+        request_offline_access_scope=request_offline_access_scope,
         state=state,
         nonce=nonce,
         redirect_uri=redirect_uri,
         access_type="offline"
     )
-    if code_verifier is not None:
-        store.store_pkce_verifier(auth_state, code_verifier)
+
+    flow.update({
+        "nonce": nonce,
+        "code_verifier": code_verifier,
+        "scope": client.scope
+    })
+    store.set_device_flow(device_code, flow, ttl=DEVICE_TTL)
 
     return redirect(auth_url)
 
 @device_blueprint.route("/device/callback", methods=["GET"])
 def device_callback():
+    err = request.args.get("error")
+    if err:
+        desc = request.args.get("error_description") or err
+        abort(400, description=f"Authorization error: {desc}")
+
     code = request.args.get("code")
     state = request.args.get("state")
     if not code or not state:
@@ -104,29 +122,37 @@ def device_callback():
     if not flow:
         abort(404, description="Device code not found or expired")
 
+    if flow.get("verified"):
+        abort(409, "Device already verified")
+
     realm = flow.get("realm", "default")
     factory = current_app.config["OIDC_CLIENT_FACTORY"]
-    client = factory.get_client(realm, native_client=True)
+    try:
+        client = factory.get_client(realm, native_client=True)
+    except Exception as e:
+        abort(502, description=f"OIDC client init failed: {e}")
 
-    redirect_uri = f"{current_app.config['BASE_URL']}/device/callback"
-    code_verifier = store.get_pkce_verifier(state)
+    code_verifier = flow.get("code_verifier")
     if current_app.config.get("ENABLE_PKCE", True) and not code_verifier:
         abort(400, "Missing PKCE verifier")
-    tokens = client.exchange_code_for_tokens(code, redirect_uri, code_verifier)
-    store.delete_pkce_verifier(state)
-    scopes_granted = tokens.get("scope", [])
+
+    redirect_uri = flow.get("redirect_uri")
+    try:
+        tokens = client.exchange_code_for_tokens(code, redirect_uri, code_verifier)
+    except Exception as e:
+        abort(502, description=f"Token exchange failed: {e}")
+    scopes_granted = tokens.get("scope", flow.get("scope"))
     offline_granted = "refresh_token" in tokens
 
     # Validate nonce and token claims
-    nonce = store.get_nonce(state)
+    nonce = flow.get("nonce")
     if not nonce:
         abort(400, description="Missing or expired nonce")
     try:
         userinfo = client.validate_id_token(tokens["id_token"], nonce)
     except Exception as e:
+        store.set_device_flow(device_code, flow, ttl=60)  # shorten TTL
         abort(400, description=f"Unable to validate id_token: {e}")
-    finally:
-        store.delete_nonce(state)
 
     # Determine refresh expiration
     now = time.time()
@@ -163,8 +189,7 @@ def device_callback():
         expires_at=refresh_expires_at
     )
 
-    flow["verified"] = True
-    flow["session_key"] = session_key
+    flow.update({"verified": True, "session_key": session_key, "nonce": None, "code_verifier": None})
     store.set_device_flow(device_code, flow, ttl=DEVICE_TTL)
 
     if metadata.get("augmentation_deferred", False):
@@ -215,14 +240,14 @@ def poll_for_token():
 
     sid, session = store.get_session_by_session_key(flow["session_key"])
     if not session:
-        abort(400, "session lost (timed out or expired)")
+        abort(400, "session lost (flow timed out or session expired)")
 
     store.delete_device_flow(device_code)
 
     return jsonify({
         "access_token": flow["session_key"],
         "token_type": "Bearer",
-        "expires_in": session.expires_at - time.time()
+        "expires_in":  max(0, int(session.expires_at - time.time()))
     })
 
 @device_blueprint.route("/device/logout", methods=["POST"])

@@ -22,7 +22,7 @@ from werkzeug.exceptions import HTTPException, NotFound, Forbidden
 from credenza.api import util
 from credenza.api.util import get_tokens_by_scope, get_cookie_domain
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
-from credenza.api.session.storage.session_store import SessionData
+from credenza.api.session.storage.session_store import SessionData, SessionMetadata
 
 
 def test_has_current_session_no_sid(monkeypatch, app):
@@ -214,6 +214,7 @@ def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app):
         def __init__(self):
             self.userinfo = userinfo
             self.realm = realm
+            self.session_metadata = SessionMetadata()
 
     # Fake token map by scope
     token_map = {
@@ -240,9 +241,17 @@ def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app):
     monkeypatch.setattr(util, "audit_event",
                         lambda event, **kwargs: audit_events.append((event, kwargs)))
 
-    app.config["OIDC_CLIENT_FACTORY"] = type(
-        "DummyFactory", (), {"get_client": lambda self, r: DummyClient()}
-    )()
+    class DummyFactory:
+        def __init__(self):
+            self.calls = []
+
+        def get_client(self, realm, **kwargs):
+            # capture for assertions if you want
+            self.calls.append((realm, kwargs))
+            return DummyClient()
+
+    factory = DummyFactory()
+    app.config["OIDC_CLIENT_FACTORY"] = factory
 
     with app.app_context():
         util.revoke_tokens(sid, DummySession())
