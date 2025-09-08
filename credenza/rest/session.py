@@ -108,37 +108,54 @@ def delete_session():
     resp.set_cookie(current_app.config["COOKIE_NAME"], "", expires=0)
     return resp
 
+def _claim_from_resolver(session, key, fallback=None):
+    resolver = current_app.config.get("CLAIM_RESOLVER")
+    if resolver:
+        return resolver.claim(session.userinfo, key, session.realm, fallback)
+    # fallback if resolver not configured
+    return session.userinfo.get(key, fallback)
+
+
 def make_session_response(sid, session: SessionData):
     response = {}
     store = current_app.config["SESSION_STORE"]
 
     if current_app.config.get("ENABLE_LEGACY_API", False):
-        # format "client" object
-        client = {}
-        issuer = session.userinfo.get("iss")
-        client["id"] = issuer + "/" + session.userinfo.get("sub")
-        client["display_name"] = session.userinfo.get("preferred_username", session.userinfo.get("username"))
-        client["full_name"] = session.userinfo.get("name")
-        client["email"] = session.userinfo.get("email")
+        issuer = _claim_from_resolver(session, "iss")
+        user_id = _claim_from_resolver(session, "id",
+                                       session.userinfo.get("sub", session.userinfo.get("userid")))
+        preferred_username = _claim_from_resolver(session, "preferred_username",
+                                                  session.userinfo.get("username") or session.userinfo.get("name"))
+        full_name = _claim_from_resolver(session, "full_name", session.userinfo.get("name"))
+        email = _claim_from_resolver(session, "email", session.userinfo.get("email"))
 
-        identity_set = session.userinfo.get('identity_set', session.userinfo.get('identity_set_detail'))
+        client = {
+            "id": f"{issuer}/{user_id}" if issuer and user_id else session.userinfo.get("sub"),
+            "display_name": preferred_username,
+            "full_name": full_name,
+            "email": email,
+        }
+
+        identity_set = session.userinfo.get("identity_set", session.userinfo.get("identity_set_detail"))
         identities = []
-        if identity_set is not None:
+        if identity_set:
             for ident in identity_set:
-                full_id = issuer + '/' + ident["sub"]
-                identities.append(full_id)
+                sub = ident.get("sub") or ident.get("id") or ident.get("userid")
+                if sub and issuer:
+                    identities.append(f"{issuer}/{sub}")
         client["identities"] = identities
         response["client"] = client
 
         # format "attributes" array
         attributes = [client]
+        # Use resolver-backed groups so non-standard keys like 'cognito:groups' map correctly
+        groups_claim = _claim_from_resolver(session, "groups", []) or []
         groups = []
-        for group in session.userinfo.get("groups", []):
-            if not isinstance(group, dict):
-                if isinstance(group, str):
-                    groups.append({"id": group, "display_name": group})
-            elif isinstance(group, dict):
+        for group in groups_claim:
+            if isinstance(group, dict):
                 groups.append(group)
+            elif isinstance(group, str):
+                groups.append({"id": group, "display_name": group})
         attributes.extend(groups)
         response["attributes"] = attributes
 
@@ -146,23 +163,41 @@ def make_session_response(sid, session: SessionData):
         response["expires"] = datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat()
         response["seconds_remaining"] = store.get_ttl(sid)
     else:
+        preferred_username = _claim_from_resolver(session, "preferred_username", session.userinfo.get("name"))
+        full_name = _claim_from_resolver(session, "full_name", session.userinfo.get("name"))
+        email = _claim_from_resolver(session, "email", session.userinfo.get("email"))
+        email_verified = _claim_from_resolver(session, "email_verified", "unknown")
+        user_id = _claim_from_resolver(session, "id", session.userinfo.get("sub", session.userinfo.get("userid")))
+        iss = _claim_from_resolver(session, "iss", session.userinfo.get("iss"))
+        aud = _claim_from_resolver(session, "aud", session.userinfo.get("aud"))
+        groups = _claim_from_resolver(session, "groups", []) or []
+        roles = _claim_from_resolver(session, "roles", []) or []
+
+        # normalize email_verified to bool if it arrives as a string
+        if isinstance(email_verified, str):
+            lv = email_verified.strip().lower()
+            if lv in ("true", "1", "yes"):
+                email_verified = True
+            elif lv in ("false", "0", "no"):
+                email_verified = False
+
         response.update(
             {
-                "preferred_username": session.userinfo.get("preferred_username"),
-                "full_name": session.userinfo.get("name"),
-                "email": session.userinfo.get("email"),
-                "email_verified": session.userinfo.get("email_verified", "unknown"),
-                "id": session.userinfo.get("sub", session.userinfo.get("userid")),
-                "iss": session.userinfo.get("iss"),
-                "aud": session.userinfo.get("aud"),
-                "groups": session.userinfo.get("groups", []),
-                "roles": session.userinfo.get("roles", []),
-                "scopes": get_effective_scopes(session),
-                "metadata": session.session_metadata.to_dict(),
-                "created_at": datetime.fromtimestamp(session.created_at, timezone.utc).isoformat(),
-                "updated_at": datetime.fromtimestamp(session.updated_at, timezone.utc).isoformat(),
-                "expires_at": datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat(),
-                "seconds_remaining": store.get_ttl(sid)
+                "preferred_username": preferred_username,
+                "full_name":          full_name,
+                "email":              email,
+                "email_verified":     email_verified,
+                "id":                 user_id,
+                "iss":                iss,
+                "aud":                aud,
+                "groups":             groups,
+                "roles":              roles,
+                "scopes":             get_effective_scopes(session),
+                "metadata":           session.session_metadata.to_dict(),
+                "created_at":         datetime.fromtimestamp(session.created_at, timezone.utc).isoformat(),
+                "updated_at":         datetime.fromtimestamp(session.updated_at, timezone.utc).isoformat(),
+                "expires_at":         datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat(),
+                "seconds_remaining":  store.get_ttl(sid),
             }
         )
     return response

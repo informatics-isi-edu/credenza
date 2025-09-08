@@ -371,7 +371,8 @@ def safe_referrer(url: str) -> str:# pragma: no cover
     if not url: return "/"
     p = urlparse(url)
     if p.scheme or p.netloc:  # absolute/externals -> reject
-        return "/"
+        if not current_app.config.get("ENABLE_LEGACY_API", False):  # TODO: remove this, eventually
+            return "/"
     # prevent '//' which can be treated as scheme-relative
     if url.startswith("//"):
         return "/"
