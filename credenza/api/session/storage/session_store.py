@@ -24,6 +24,8 @@ from .backends.memory import MemoryBackend
 
 logger = logging.getLogger(__name__)
 
+TRANSIENT_DATA_TTL=900
+
 @dataclass
 class SessionMetadata:
     system: Dict[str, Any] = field(default_factory=dict)
@@ -144,7 +146,7 @@ class SessionStore:
             additional_tokens=additional_tokens or {},
         )
 
-        session_json = json.dumps(session_data.to_dict())
+        session_json = json.dumps(session_data.to_dict(), separators=(",", ":"))
         if self.crypto_codec:
             session_json = self.crypto_codec.encrypt(session_json)
 
@@ -182,9 +184,9 @@ class SessionStore:
         session_data.expires_at = session_data.updated_at + self.ttl
         session_key = self.get_session_key_for_session_id(session_id)
         if self.crypto_codec:
-            session_data = self.crypto_codec.encrypt(json.dumps(session_data.to_dict()))
+            session_data = self.crypto_codec.encrypt(json.dumps(session_data.to_dict(), separators=(",", ":")))
         else:
-            session_data = json.dumps(session_data.to_dict())
+            session_data = json.dumps(session_data.to_dict(), separators=(",", ":"))
 
         self.map_session(session_key, session_id)
         self.backend.setex(self._key(session_id), session_data, self.ttl)
@@ -240,32 +242,22 @@ class SessionStore:
         self.update_session(session_id, session)
         logger.debug(f"Tagged session {session_id} metadata[{scope}]: {metadata}")
 
-    def store_nonce(self, state, nonce, ttl=600):
-        self.backend.setex(f"{self.prefix}{self.oidc_prefix}nonce:{state}", nonce, ttl)
+    def store_authn_request_ctx(self, state, authn_request_ctx, ttl=TRANSIENT_DATA_TTL):
+        self.backend.setex(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}",
+                           json.dumps(authn_request_ctx, separators=(",", ":")), ttl)
 
-    def get_nonce(self, state):
-        nonce = self.backend.get(f"{self.prefix}{self.oidc_prefix}nonce:{state}")
-        if nonce:
-            nonce = nonce.decode()
-        return nonce
-
-    def delete_nonce(self, state):
-        self.backend.delete(f"{self.prefix}{self.oidc_prefix}nonce:{state}")
-
-    def store_pkce_verifier(self, state: str, code_verifier: str, ttl: int = 600):
-        self.backend.setex(f"{self.prefix}{self.oidc_prefix}pkce:{state}", code_verifier, ttl)
-
-    def get_pkce_verifier(self, state: str) -> Optional[str]:
-        v = self.backend.get(f"{self.prefix}{self.oidc_prefix}pkce:{state}")
-        if not v:
+    def get_authn_request_ctx(self, state):
+        authn_request_ctx = self.backend.get(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}")
+        if not authn_request_ctx:
             return None
-        return v.decode()
+        return json.loads(authn_request_ctx.decode())
 
-    def delete_pkce_verifier(self, state: str):
-        self.backend.delete(f"{self.prefix}{self.oidc_prefix}pkce:{state}")
+    def delete_authn_request_ctx(self, state):
+        self.backend.delete(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}")
 
     def set_device_flow(self, device_code, flow_data, ttl):
-        self.backend.setex(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}", json.dumps(flow_data), ttl)
+        self.backend.setex(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}",
+                           json.dumps(flow_data, separators=(",", ":")), ttl)
 
     def get_device_flow(self, device_code):
         flow_data = self.backend.get(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}")

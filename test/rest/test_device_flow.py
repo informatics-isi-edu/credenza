@@ -25,9 +25,27 @@ from credenza.rest import device_flow as df
 from credenza.api.session.storage.session_store import SessionData
 from credenza.rest.device_flow import device_callback
 
-class DummyDeviceOAuth:
-    def create_authorization_url(self, url, state, nonce, redirect_uri, access_type):
-        return (f"{url}?state={state}&nonce={nonce}&redirect_uri={redirect_uri},access_type={access_type}", None)
+class StubDeviceClient:
+    def __init__(self, *, tokens=None, userinfo=None, scope="openid email profile"):
+        self.scope = scope
+        self._tokens = tokens or {}
+        self._userinfo = userinfo or {}
+
+    def create_authorization_url(self, **kwargs):
+        # must return (auth_url, auth_state, code_verifier)
+        # include state/nonce in the URL so assertions can read them
+        state = kwargs.get("state", "")
+        nonce = kwargs.get("nonce", "")
+        redirect_uri = kwargs.get("redirect_uri", "")
+        access_type = kwargs.get("access_type", "")
+        url = f"https://idp.example/auth?state={state}&nonce={nonce}&redirect_uri={redirect_uri}&access_type={access_type}"
+        return (url, None, "stub-cv")
+
+    def exchange_code_for_tokens(self, code, redirect_uri, code_verifier):
+        return self._tokens
+
+    def validate_id_token(self, id_token, nonce):
+        return self._userinfo
 
 @pytest.fixture
 def client(app, store, monkeypatch):
@@ -77,17 +95,26 @@ def test_verify_device_redirect(client, app, store, monkeypatch):
         "issued_at": 0,
         "expires_at": 0,
         "session_key": None,
-        "realm": app.config["DEFAULT_REALM"]
+        "realm": app.config["DEFAULT_REALM"],
+        "redirect_uri": f"{app.config['BASE_URL']}/device/callback",
     }
     store.set_device_flow(device_code, flow, ttl=10)
+
+    # nonce is deterministic for assertion
     monkeypatch.setattr(df, "generate_nonce", lambda: "NONCE123")
+
+    # stub the OIDC client returned by the factory
+    stub = StubDeviceClient()
+    monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client",
+                        lambda realm, native_client=True: stub)
+
     resp = client.get(f"/device/verify/{user_code}")
     assert resp.status_code == 302
     loc = resp.headers["Location"]
     qs = parse_qs(urlparse(loc).query)
     assert qs["state"][0] == f"{device_code}"
     assert qs["nonce"][0] == "NONCE123"
-    assert store.get_nonce(qs["state"][0]) == "NONCE123"
+    assert store.get_device_flow(qs["state"][0])["nonce"] == "NONCE123"
 
 @pytest.mark.parametrize("qs,expected_status", [
     ({}, 400),
@@ -105,11 +132,19 @@ def test_device_callback_not_found_flow(client, app, store):
 def test_device_callback_missing_nonce(client, app, store, monkeypatch):
     device_code = "D4"
     state = f"{device_code}"
-    store.set_device_flow(device_code, {"realm": app.config["DEFAULT_REALM"]}, ttl=10)
-    client_obj = app.config["OIDC_CLIENT_FACTORY"].get_client(app.config["DEFAULT_REALM"])
-    monkeypatch.setattr(client_obj, "exchange_code_for_tokens", lambda code, s, v: dict())
+    store.set_device_flow(device_code, {
+        "realm": app.config["DEFAULT_REALM"],
+        "redirect_uri": f"{app.config['BASE_URL']}/device/callback",
+        "code_verifier": "cv123",
+    }, ttl=10)
+
+    stub = StubDeviceClient(tokens={})
+    monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client",
+                        lambda realm, native_client=True: stub)
+
     resp = client.get("/device/callback", query_string={"code":"c","state":state})
     assert resp.status_code == 400
+
 
 def test_device_poll_rate_limit(client, app, store, monkeypatch, frozen_time):
     """
@@ -149,26 +184,33 @@ def test_device_poll_rate_limit(client, app, store, monkeypatch, frozen_time):
 def test_device_callback_success(client, app, store, monkeypatch, frozen_time):
     device_code = "D5"
     state = f"{device_code}"
-    store.set_device_flow(device_code, {"realm": app.config["DEFAULT_REALM"]}, ttl=10)
-    store.store_nonce(state, "N123")
-    # since PKCE is on by default, we must supply a verifier
-    store.store_pkce_verifier(state, "VERIFIER123")
+    flow = {
+        "realm": app.config["DEFAULT_REALM"],
+        "redirect_uri": f"{app.config['BASE_URL']}/device/callback",
+        "nonce": "N123",
+        "code_verifier": "VERIFIER123",
+        "refresh": False,
+    }
+    store.set_device_flow(device_code, flow, ttl=10)
 
     tokens = {
         "id_token":"idtok","access_token":"acc","refresh_token":"rt",
         "scope":"openid","refresh_expires_in":0,"expires_at":frozen_time+300
     }
-    client_obj = app.config["OIDC_CLIENT_FACTORY"].get_client(app.config["DEFAULT_REALM"], native_client=True)
-    monkeypatch.setattr(client_obj, "exchange_code_for_tokens", lambda code, s, v: tokens)
-    monkeypatch.setattr(client_obj, "validate_id_token", lambda idt, nn: {"sub":"u","email":"e"})
+    userinfo = {"sub":"u","email":"e"}
+
+    stub = StubDeviceClient(tokens=tokens, userinfo=userinfo, scope="openid")
+    monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client",
+                        lambda realm, native_client=True: stub)
+
     provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
     monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
     monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
 
-
     resp = client.get("/device/callback", query_string={"code":"c","state":state})
     assert resp.status_code == 200
     assert b"Device authorization complete" in resp.data
+
     new_flow = store.get_device_flow(device_code)
     assert new_flow["verified"] is True
     skey = new_flow["session_key"]
@@ -237,13 +279,28 @@ def test_device_logout_success(client, app, store, monkeypatch):
         metadata={"device_session":True}
     )
     monkeypatch.setattr(df, "get_current_session", lambda: (sid, session))
-    oidc_client = app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm)
-    monkeypatch.setattr(oidc_client,"revoke_token",lambda token, token_type_hint="access_token": True)
+
+    # Stub the OIDC client factory to avoid any network
+    calls = []
+    class DummyClient:
+        def revoke_token(self, scope, token, token_type_hint=None):
+            calls.append((scope, token_type_hint))
+            return True
+
+    monkeypatch.setattr(
+        app.config["OIDC_CLIENT_FACTORY"],
+        "get_client",
+        lambda realm, **kwargs: DummyClient(),   # accept native_client kwarg
+    )
 
     resp = client.post("/device/logout")
     assert resp.status_code == 200
     assert resp.get_json() == {"status":"logged out"}
     assert store.get_session_data(sid) is None
+
+    # prove we invoked revocation
+    assert any(t == "access_token" for _, t in calls) or calls  # depending on your route logic
+
 
 def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
     store = app.config["SESSION_STORE"]
@@ -256,7 +313,6 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
     dummy_augmented_userinfo = {"sub": "123", "email": "u@example.com", "groups": ["g1"]}
     dummy_additional_tokens = {"foo": "bar"}
 
-    # Simulate an existing device flow entry
     store.set_device_flow(device_code, {
         "user_code": "abcd1234",
         "verified": False,
@@ -264,25 +320,22 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
         "expires_at": time.time() + 600,
         "session_key": None,
         "realm": "test",
-        "refresh": False
+        "refresh": False,
+        "nonce": "abc123",
+        "code_verifier": "def345",
+        "redirect_uri": f"{app.config['BASE_URL']}/device/callback",
     }, 600)
 
-    # Set nonce and pkce verifier
-    monkeypatch.setattr(store, "get_nonce", lambda state: "nonce")
-    monkeypatch.setattr(store, "delete_nonce", lambda state: None)
-    monkeypatch.setattr(store, "get_pkce_verifier", lambda state: "verifier")
-    monkeypatch.setattr(store, "delete_pkce_verifier", lambda state: None)
+    # Stub client via factory
+    stub = StubDeviceClient(tokens=dummy_tokens, userinfo=dummy_userinfo, scope="openid email")
+    monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client",
+                        lambda realm, native_client=True: stub)
 
-    # Patch client behavior
-    client = app.config["OIDC_CLIENT_FACTORY"].get_client("test", native_client=True)
-    monkeypatch.setattr(client, "exchange_code_for_tokens", lambda *a, **kw: dummy_tokens)
-    monkeypatch.setattr(client, "validate_id_token", lambda token, nonce: dummy_userinfo)
-
-    # Patch session creation
+    # Session helpers
     monkeypatch.setattr(store, "generate_session_id", lambda: session_id)
     monkeypatch.setattr(store, "create_session", lambda **kwargs: (session_key, base_session))
 
-    # Patch augment_session logic
+    # Augmentation: first call defers, second returns augmented result
     call_count = {"count": 0}
     def mock_augment(tokens, realm, userinfo, metadata):
         call_count["count"] += 1
@@ -291,14 +344,11 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
             return userinfo, {}
         else:
             return dummy_augmented_userinfo, dummy_additional_tokens
-
     monkeypatch.setattr("credenza.rest.device_flow.augment_session", mock_augment)
 
-    # Patch update_session
     update_mock = Mock()
     monkeypatch.setattr(store, "update_session", update_mock)
 
-    # Execute device callback
     with app.test_request_context(f"/device/callback?code=abc&state={device_code}"):
         g.session_key = session_key
         resp = device_callback()
@@ -306,10 +356,9 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
     assert resp == "Device authorization complete. You may return to the device."
     assert call_count["count"] == 2
     update_mock.assert_called_once()
-
-    # Validate updated session
     updated_sid, updated_session = update_mock.call_args[0]
     assert updated_sid == session_id
     assert updated_session.userinfo == dummy_augmented_userinfo
     assert updated_session.additional_tokens == dummy_additional_tokens
+
 

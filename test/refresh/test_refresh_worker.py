@@ -55,7 +55,7 @@ def client_stub():
 @pytest.fixture
 def factory(client_stub):
     class Factory:
-        def get_client(self, realm):
+        def get_client(self, realm, **kwargs):
             return client_stub
     return Factory()
 
@@ -167,7 +167,7 @@ def test_additional_token_refresh_success_and_failure(app,
             else:
                 pytest.skip(f"Unexpected refresh_token {refresh_token}")
 
-    monkeypatch.setattr(factory, "get_client", lambda realm: DummyClient(now))
+    monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: DummyClient(now))
 
     # Run the worker: only "good" and "fail" are under threshold=500
     with app.app_context():
@@ -310,7 +310,7 @@ def test_device_access_token_refresh(app,
                 "refresh_expires_at": self.now + 7200,
             }
 
-    monkeypatch.setattr(factory,"get_client",lambda realm: DummyClient(now))
+    monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: DummyClient(now))
 
     # run once
     with app.app_context():
