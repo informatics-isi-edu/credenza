@@ -167,6 +167,10 @@ sed -e "s/localhost/$(hostname)/" \
     || install -o root -g apache -m u=rw,og=r -T "${TMP_OIDC}" /home/credenza/config/oidc_idp_profiles.json \
     || error Failed to deploy /home/credenza/config/oidc_idp_profiles.json
 
+[[ -f /home/credenza/config/oidc_idp_claim_map.json ]] \
+    || install -o root -g apache -m u=rw,og=r config/oidc_claim_map.json /home/credenza/config/oidc_claim_map.json \
+    || error Failed to deploy /home/credenza/config/oidc_claim_map.json
+
 # set minimal permissions for SE-Linux sandboxed WSGI daemon
 idempotent_semanage_add \
     httpd_sys_content_t \

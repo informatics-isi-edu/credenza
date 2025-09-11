@@ -27,8 +27,7 @@ from werkzeug.exceptions import HTTPException, BadGateway, ServiceUnavailable
 from .api.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
-from .api.claim_resolver import build_combined_resolver, load_claim_overrides_json, \
-    OIDC_CLAIM_DEFAULTS, OIDC_CLAIM_ALIASES
+from .api.claim_mapper import load_claim_map
 from .api.util import AESGCMCodec, is_browser_client
 from .rest.session import session_blueprint
 from .rest.login_flow import login_blueprint
@@ -198,17 +197,9 @@ def create_app():
             encrypt_session_data = False
             logging.warning("Encryption of session data is disabled due to missing encryption key")
 
-    # Build the claim resolver (defaults + aliases + optional file overrides)
-    claim_defaults = app.config.get("OIDC_CLAIM_DEFAULTS", OIDC_CLAIM_DEFAULTS)
-    claim_aliases  = app.config.get("OIDC_CLAIM_ALIASES",  OIDC_CLAIM_ALIASES)
-    overrides_path = app.config.get("CLAIM_OVERRIDES_JSON_PATH")
-    overrides_dict = load_claim_overrides_json(overrides_path)
-
-    app.config["CLAIM_RESOLVER"] = build_combined_resolver(
-        defaults=claim_defaults,
-        aliases=claim_aliases,
-        overrides_json=overrides_dict,
-    )
+    # Load the claim map
+    claim_map_path = app.config.get("IDP_CLAIM_MAP_FILE", "config/oidc_idp_claim_map.json")
+    app.config["IDP_CLAIM_MAP"] = load_claim_map(claim_map_path)
 
     # Create the storage backend and instantiate the session store
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),

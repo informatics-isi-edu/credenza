@@ -1,0 +1,12 @@
+{
+  "groups": ["groups", "cognito:groups", "https://*/groups", "http://*/groups"],
+  "roles": ["roles", ["realm_access","roles"], ["resource_access", null, "roles"]],
+  "preferred_username": ["preferred_username", "username", "name"],
+  "username": ["cognito:username", "username", "name"],
+  "full_name": ["name"],
+  "email": ["email"],
+  "email_verified": ["email_verified"],
+  "id": ["sub", "userid"],
+  "iss": ["iss"],
+  "aud": ["aud"]
+}

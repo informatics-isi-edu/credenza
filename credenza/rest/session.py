@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from ..api.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
     refresh_additional_tokens, revoke_tokens, get_augmentation_provider, strtobool, is_browser_client
+from ..api.claim_mapper import resolve_claim
 from ..api.session.storage.session_store import SessionData
 from ..telemetry import audit_event
 
@@ -108,12 +109,9 @@ def delete_session():
     resp.set_cookie(current_app.config["COOKIE_NAME"], "", expires=0)
     return resp
 
-def _claim_from_resolver(session, key, fallback=None):
-    resolver = current_app.config.get("CLAIM_RESOLVER")
-    if resolver:
-        return resolver.claim(session.userinfo, key, session.realm, fallback)
-    # fallback if resolver not configured
-    return session.userinfo.get(key, fallback)
+def _claim(session, key, fallback=None):
+    claim_map = current_app.config.get("IDP_CLAIM_MAP") or {}
+    return resolve_claim(session.userinfo, claim_map, key, fallback)
 
 
 def make_session_response(sid, session: SessionData):
@@ -121,16 +119,18 @@ def make_session_response(sid, session: SessionData):
     store = current_app.config["SESSION_STORE"]
 
     if current_app.config.get("ENABLE_LEGACY_API", False):
-        issuer = _claim_from_resolver(session, "iss")
-        user_id = _claim_from_resolver(session, "id",
-                                       session.userinfo.get("sub", session.userinfo.get("userid")))
-        preferred_username = _claim_from_resolver(session, "preferred_username",
-                                                  session.userinfo.get("username") or session.userinfo.get("name"))
-        full_name = _claim_from_resolver(session, "full_name", session.userinfo.get("name"))
-        email = _claim_from_resolver(session, "email", session.userinfo.get("email"))
+        issuer =             _claim(session, "iss", session.userinfo.get("iss"))
+        user_id =            _claim(session, "id", session.userinfo.get("sub", session.userinfo.get("userid")))
+        full_name =          _claim(session, "full_name", session.userinfo.get("name"))
+        email =              _claim(session, "email", session.userinfo.get("email"))
+        preferred_username = _claim(session,
+                               "preferred_username",
+                                    session.userinfo.get("preferred_username",
+                                                         session.userinfo.get("username",
+                                                                              session.userinfo.get("name"))))
 
         client = {
-            "id": f"{issuer}/{user_id}" if issuer and user_id else session.userinfo.get("sub"),
+            "id": f"{issuer}/{user_id}" if issuer and user_id else user_id,
             "display_name": preferred_username,
             "full_name": full_name,
             "email": email,
@@ -149,7 +149,7 @@ def make_session_response(sid, session: SessionData):
         # format "attributes" array
         attributes = [client]
         # Use resolver-backed groups so non-standard keys like 'cognito:groups' map correctly
-        groups_claim = _claim_from_resolver(session, "groups", []) or []
+        groups_claim = _claim(session, "groups", session.userinfo.get("groups", []))
         groups = []
         for group in groups_claim:
             if isinstance(group, dict):
@@ -163,23 +163,27 @@ def make_session_response(sid, session: SessionData):
         response["expires"] = datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat()
         response["seconds_remaining"] = store.get_ttl(sid)
     else:
-        preferred_username = _claim_from_resolver(session, "preferred_username", session.userinfo.get("name"))
-        full_name = _claim_from_resolver(session, "full_name", session.userinfo.get("name"))
-        email = _claim_from_resolver(session, "email", session.userinfo.get("email"))
-        email_verified = _claim_from_resolver(session, "email_verified", "unknown")
-        user_id = _claim_from_resolver(session, "id", session.userinfo.get("sub", session.userinfo.get("userid")))
-        iss = _claim_from_resolver(session, "iss", session.userinfo.get("iss"))
-        aud = _claim_from_resolver(session, "aud", session.userinfo.get("aud"))
-        groups = _claim_from_resolver(session, "groups", []) or []
-        roles = _claim_from_resolver(session, "roles", []) or []
+        full_name =          _claim(session, "full_name", session.userinfo.get("name"))
+        email =              _claim(session, "email", session.userinfo.get("email"))
+        email_verified =     _claim(session, "email_verified", session.userinfo.get("email_verified", "unknown"))
+        user_id =            _claim(session, "id", session.userinfo.get("sub", session.userinfo.get("userid")))
+        iss =                _claim(session, "iss", session.userinfo.get("iss"))
+        aud =                _claim(session, "aud", session.userinfo.get("aud"))
+        groups =             _claim(session, "groups", session.userinfo.get("groups", []))
+        roles =              _claim(session, "roles", session.userinfo.get("roles", []))
+        preferred_username = _claim(session,
+                                    "preferred_username",
+                                    session.userinfo.get("preferred_username",
+                                                         session.userinfo.get("username",
+                                                                              session.userinfo.get("name"))))
 
-        # normalize email_verified to bool if it arrives as a string
+        # normalize email_verified if it arrives as a string
         if isinstance(email_verified, str):
             lv = email_verified.strip().lower()
-            if lv in ("true", "1", "yes"):
-                email_verified = True
-            elif lv in ("false", "0", "no"):
-                email_verified = False
+            if lv in ("1", "yes"):
+                email_verified = "true"
+            elif lv in ("0", "no"):
+                email_verified = "false"
 
         response.update(
             {
