@@ -25,8 +25,9 @@ from credenza.api.util import get_effective_scopes
 
 
 @pytest.fixture
-def app(app, fake_current_session, monkeypatch):
+def app(app, fake_current_session, monkeypatch, base_claim_map):
     app.register_blueprint(session_blueprint)
+    app.config["IDP_CLAIM_MAP"] = base_claim_map
 
     return app
 
@@ -63,7 +64,8 @@ def test_get_session(client):
     data = resp.json
 
     # Check some fields in non-legacy mode
-    assert data["id"] == "user1"
+    assert data["sub"] == "user1"
+    assert data["id"] == "https://issuer/user1"
     assert data["email"] == "user1@example.com"
     assert data["scopes"] == ["openid", "email", "profile"]
     assert isinstance(data["created_at"], str)
@@ -373,7 +375,8 @@ def test_make_session_response_non_legacy(app, store, base_session):
     assert resp["full_name"] == base_session.userinfo["name"]
     assert resp["email"] == base_session.userinfo["email"]
     assert resp["email_verified"] is True
-    assert resp["id"] == base_session.userinfo["sub"]
+    assert resp["id"] == base_session.userinfo["id"]
+    assert resp["sub"] == base_session.userinfo["sub"]
     assert resp["iss"] == base_session.userinfo["iss"]
     assert resp["aud"] == base_session.userinfo["aud"]
     assert resp["groups"] == base_session.userinfo["groups"]

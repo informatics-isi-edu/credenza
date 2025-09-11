@@ -120,17 +120,14 @@ def make_session_response(sid, session: SessionData):
 
     if current_app.config.get("ENABLE_LEGACY_API", False):
         issuer =             _claim(session, "iss", session.userinfo.get("iss"))
-        user_id =            _claim(session, "id", session.userinfo.get("sub", session.userinfo.get("userid")))
+        sub =                _claim(session, "sub", session.userinfo.get("sub"))
         full_name =          _claim(session, "full_name", session.userinfo.get("name"))
         email =              _claim(session, "email", session.userinfo.get("email"))
-        preferred_username = _claim(session,
-                               "preferred_username",
-                                    session.userinfo.get("preferred_username",
-                                                         session.userinfo.get("username",
-                                                                              session.userinfo.get("name"))))
+        preferred_username = _claim(session, "preferred_username", session.userinfo.get("preferred_username"))
 
+        # format "client" object
         client = {
-            "id": f"{issuer}/{user_id}" if issuer and user_id else user_id,
+            "id": f"{issuer}/{sub}",
             "display_name": preferred_username,
             "full_name": full_name,
             "email": email,
@@ -140,9 +137,8 @@ def make_session_response(sid, session: SessionData):
         identities = []
         if identity_set:
             for ident in identity_set:
-                sub = ident.get("sub") or ident.get("id") or ident.get("userid")
-                if sub and issuer:
-                    identities.append(f"{issuer}/{sub}")
+                sub = ident.get("sub", ident.get("id", ident.get("userid")))
+                identities.append(f"{issuer}/{sub}")
         client["identities"] = identities
         response["client"] = client
 
@@ -163,19 +159,16 @@ def make_session_response(sid, session: SessionData):
         response["expires"] = datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat()
         response["seconds_remaining"] = store.get_ttl(sid)
     else:
+        preferred_username = _claim(session, "preferred_username", session.userinfo.get("preferred_username"))
         full_name =          _claim(session, "full_name", session.userinfo.get("name"))
         email =              _claim(session, "email", session.userinfo.get("email"))
         email_verified =     _claim(session, "email_verified", session.userinfo.get("email_verified", "unknown"))
-        user_id =            _claim(session, "id", session.userinfo.get("sub", session.userinfo.get("userid")))
+        sub =                _claim(session, "sub", session.userinfo.get("sub"))
         iss =                _claim(session, "iss", session.userinfo.get("iss"))
         aud =                _claim(session, "aud", session.userinfo.get("aud"))
         groups =             _claim(session, "groups", session.userinfo.get("groups", []))
         roles =              _claim(session, "roles", session.userinfo.get("roles", []))
-        preferred_username = _claim(session,
-                                    "preferred_username",
-                                    session.userinfo.get("preferred_username",
-                                                         session.userinfo.get("username",
-                                                                              session.userinfo.get("name"))))
+        userid =             _claim(session, "userid", session.userinfo.get("userid"))
 
         # normalize email_verified if it arrives as a string
         if isinstance(email_verified, str):
@@ -191,9 +184,11 @@ def make_session_response(sid, session: SessionData):
                 "full_name":          full_name,
                 "email":              email,
                 "email_verified":     email_verified,
-                "id":                 user_id,
+                "sub":                sub,
                 "iss":                iss,
                 "aud":                aud,
+                "id":                 f"{iss}/{sub}",
+                "userid":             userid,
                 "groups":             groups,
                 "roles":              roles,
                 "scopes":             get_effective_scopes(session),
@@ -204,4 +199,7 @@ def make_session_response(sid, session: SessionData):
                 "seconds_remaining":  store.get_ttl(sid),
             }
         )
+        if userid is None:
+            del response["userid"]
+
     return response

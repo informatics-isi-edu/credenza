@@ -6,29 +6,6 @@ import json
 import pytest
 from credenza.api.claim_mapper import load_claim_map, resolve_claim
 
-@pytest.fixture
-def base_claim_map():
-    # mirrors the simplified example config
-    return {
-        "groups": [
-            "groups",
-            "cognito:groups",
-            "https://*/groups",
-            "http://*/groups",
-        ],
-        "roles": [
-            "roles",
-            ["realm_access", "roles"],
-            ["resource_access", None, "roles"],
-        ],
-        "preferred_username": ["preferred_username", "username", "name"],
-        "full_name": ["name"],
-        "email": ["email"],
-        "email_verified": ["email_verified"],
-        "id": ["sub", "userid"],
-        "iss": ["iss"],
-        "aud": ["aud"],
-    }
 
 @pytest.fixture
 def userinfo_common():
