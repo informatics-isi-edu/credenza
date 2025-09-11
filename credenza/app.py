@@ -111,9 +111,12 @@ def load_config(app):
     if os.path.exists(trusted_path):
         with open(trusted_path) as f:
             app.config["TRUSTED_ISSUERS"] = json.load(f)
+    else:
+        app.config["TRUSTED_ISSUERS"] = []
 
-    # Optional: default location for claim overrides (can be overridden by env)
-    app.config.setdefault("CLAIM_OVERRIDES_JSON_PATH", "config/oidc_claim_overrides.json")
+    # Load the claim map
+    claim_map_path = app.config.get("IDP_CLAIM_MAP_FILE", "config/oidc_idp_claim_map.json")
+    app.config["IDP_CLAIM_MAP"] = load_claim_map(claim_map_path)
 
     # create session augmentation provider map
     provider_map = {}
@@ -196,10 +199,6 @@ def create_app():
         if encrypt_session_data:
             encrypt_session_data = False
             logging.warning("Encryption of session data is disabled due to missing encryption key")
-
-    # Load the claim map
-    claim_map_path = app.config.get("IDP_CLAIM_MAP_FILE", "config/oidc_idp_claim_map.json")
-    app.config["IDP_CLAIM_MAP"] = load_claim_map(claim_map_path)
 
     # Create the storage backend and instantiate the session store
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),
