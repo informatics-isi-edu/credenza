@@ -27,7 +27,7 @@ from werkzeug.exceptions import HTTPException, BadGateway, ServiceUnavailable
 from .api.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
-from .api.claim_mapper import load_claim_map
+from .api.claim_mapper import build_realm_claim_maps
 from .api.util import AESGCMCodec, is_browser_client
 from .rest.session import session_blueprint
 from .rest.login_flow import login_blueprint
@@ -115,8 +115,7 @@ def load_config(app):
         app.config["TRUSTED_ISSUERS"] = []
 
     # Load the claim map
-    claim_map_path = app.config.get("IDP_CLAIM_MAP_FILE", "config/oidc_idp_claim_map.json")
-    app.config["IDP_CLAIM_MAP"] = load_claim_map(claim_map_path)
+    app.config["IDP_CLAIM_MAPS"] = build_realm_claim_maps(app.config.get("OIDC_IDP_PROFILES"))
 
     # create session augmentation provider map
     provider_map = {}

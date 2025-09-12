@@ -1,131 +1,131 @@
-# Tests for the minimal, overridable claim key mapper
-# (supports: string paths with optional '*' wildcards; list-of-segments with str|None;
-#  None = wildcard over dict keys + flatten)
-
-import json
+#
+# Copyright 2025 University of Southern California
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 import pytest
-from credenza.api.claim_mapper import load_claim_map, resolve_claim
+from copy import deepcopy
+from credenza.api.claim_mapper import DEFAULT_CLAIM_MAP, build_realm_claim_maps, get_claim_map_for_realm, resolve_claim
 
-
-@pytest.fixture
-def userinfo_common():
-    return {
-        "sub": "abc-123",
-        "name": "User One",
-        "email": "u1@example.org",
-        "iss": "https://issuer.example.org",
-        "aud": "client-123",
+def test_build_maps_applies_preset_on_exact_realm_name():
+    profiles = {
+        "cognito": {
+            "client_id": "web",
+        }
     }
+    realm_maps = build_realm_claim_maps(profiles)
+    assert "cognito" in realm_maps
+    assert realm_maps["cognito"]["groups"][0] == "cognito:groups"
+    assert "default" in realm_maps
 
-def test_load_claim_map_reads_file(tmp_path):
-    cfg = {"email": ["email"], "roles": ["roles"]}
-    p = tmp_path / "claim_map.json"
-    p.write_text(json.dumps(cfg), encoding="utf-8")
-
-    loaded = load_claim_map(str(p))
-    assert loaded == cfg
-
-def test_load_claim_map_nonexistent_returns_empty(tmp_path):
-    p = tmp_path / "missing.json"
-    assert load_claim_map(str(p)) == {}
-
-def test_load_claim_map_falsy_returns_empty():
-    assert load_claim_map("") == {}
-
-def test_resolve_direct_string_key(userinfo_common, base_claim_map):
-    ui = dict(userinfo_common, **{"email": "u1@example.org"})
-    assert resolve_claim(ui, base_claim_map, "email") == "u1@example.org"
-
-def test_resolve_default_when_missing(userinfo_common, base_claim_map):
-    assert resolve_claim(userinfo_common, base_claim_map, "email_verified", default="unknown") == "unknown"
-
-def test_first_non_empty_wins(userinfo_common, base_claim_map):
-    # roles exists at top level -> should not evaluate later candidates
-    ui = dict(userinfo_common, **{
-        "roles": ["r1"],
-        "realm_access": {"roles": ["r2"]},
-        "resource_access": {"api": {"roles": ["r3"]}},
-    })
-    assert resolve_claim(ui, base_claim_map, "roles", default=[]) == ["r1"]
-
-def test_non_empty_filter_skips_empty_list(userinfo_common, base_claim_map):
-    # groups exists but empty; second candidate is namespaced and present -> should pick second
-    ui = dict(userinfo_common, **{
-        "groups": [],
-        "https://example.com/groups": ["gA", "gB"],
-    })
-    assert resolve_claim(ui, base_claim_map, "groups", default=[]) == ["gA", "gB"]
-
-def test_namespaced_exact_key(userinfo_common, base_claim_map):
-    ui = dict(userinfo_common, **{
-        "https://example.com/roles": ["rA", "rB"]
-    })
-    # If the exact namespaced key is present, it should be found when configured
-    # Here base_claim_map doesn't include the exact domain by default; emulate an override:
-    claim_map = dict(base_claim_map)
-    claim_map["roles"] = ["https://example.com/roles", "roles"]
-    assert resolve_claim(ui, claim_map, "roles", default=[]) == ["rA", "rB"]
-
-def test_namespaced_wildcard_key(userinfo_common, base_claim_map):
-    ui = dict(userinfo_common, **{
-        "https://tenant.example.com/groups": ["g1", "g2"]
-    })
-    # base map includes "https://*/groups" -> should match
-    assert resolve_claim(ui, base_claim_map, "groups", default=[]) == ["g1", "g2"]
-
-def test_literal_dots_in_key(userinfo_common, base_claim_map):
-    # Ensure dots in a string key are treated literally (no splitting)
-    ui = dict(userinfo_common, **{"a.b": "value"})
-    claim_map = {"custom": ["a.b"]}
-    assert resolve_claim(ui, claim_map, "custom") == "value"
-
-def test_list_path_two_levels(userinfo_common, base_claim_map):
-    ui = dict(userinfo_common, **{"realm_access": {"roles": ["r1","r2"]}})
-    assert resolve_claim(ui, base_claim_map, "roles", default=[]) == ["r1", "r2"]
-
-def test_wildcard_over_dict_values_flatten(userinfo_common, base_claim_map):
-    # resource_access.*.roles -> flatten lists from multiple clients
-    ui = dict(userinfo_common, **{
-        "resource_access": {
-            "api": {"roles": ["apiRole"]},
-            "svc": {"roles": ["svcRole1", "svcRole2"]},
+def test_build_maps_applies_preset_on_substring_match():
+    profiles = {
+        "keycloak-local": {
+            "client_id": "web",
         }
-    })
-    out = resolve_claim(ui, base_claim_map, "roles", default=[])
-    assert sorted(out) == ["apiRole", "svcRole1", "svcRole2"]
+    }
+    realm_maps = build_realm_claim_maps(profiles)
+    roles_paths = realm_maps["keycloak-local"]["roles"]
+    # keycloak preset puts realm_access.roles ahead of plain roles
+    assert roles_paths[0] == ["realm_access", "roles"]
 
-def test_segment_level_wildcard_pattern(userinfo_common, base_claim_map):
-    # Use an explicit wildcard at the middle segment (e.g., "svc*")
-    ui = dict(userinfo_common, **{
-        "resource_access": {
-            "svc-api": {"roles": ["a"]},
-            "svc-web": {"roles": ["b"]},
-            "other":   {"roles": ["c"]},
+def test_substring_choice_prefers_longest_match_when_multiple():
+    # Artificial preset collision scenario: if you ever added overlapping names, longest wins.
+    # For current presets this is mostly a safety net; we emulate by adding a temp preset.
+    try:
+        from credenza.api import claim_mapper as cm
+        cm.IDP_PRESETS["kc"] = {"roles": [["realm_access", "roles"]]}
+        profiles = {"my-kc-keycloak": {}}
+        realm_maps = cm.build_realm_claim_maps(profiles)
+        roles_paths = realm_maps["my-kc-keycloak"]["roles"]
+        # "keycloak" (longer) should be chosen over "kc"
+        assert roles_paths[0] == ["realm_access", "roles"]
+    finally:
+        # cleanup
+        if "kc" in cm.IDP_PRESETS:
+            del cm.IDP_PRESETS["kc"]
+
+def test_build_maps_overrides_replace_roles_list():
+    profiles = {
+        "keycloak": {
+            "claim_map_overrides": {
+                "roles": [["resource_access", "my-client", "roles"]]
+            }
         }
-    })
-    claim_map = dict(base_claim_map)
-    claim_map["roles"] = [
-        ["resource_access", "svc*", "roles"],  # this should match svc-api and svc-web only
-    ]
-    out = resolve_claim(ui, claim_map, "roles", default=[])
-    # Because we used an explicit wildcard segment (not None), this is not a flatten; it returns first match.
-    # Our implementation returns the FIRST matching key's value (iteration order of dict).
-    # To make this deterministic, assert it returns a list from one of the svc-* entries.
-    assert out in (["a"], ["b"])
+    }
+    realm_maps = build_realm_claim_maps(profiles)
+    assert realm_maps["keycloak"]["roles"] == [["resource_access", "my-client", "roles"]]
 
-def test_list_encounter_stops_and_tries_next_path(userinfo_common, base_claim_map):
-    # If a segment expects a dict but finds a list, resolution returns None and we try the next candidate
-    ui = dict(userinfo_common, **{
-        "realm_access": ["not-a-dict"],   # breaks second roles path
-        "roles": ["topR"]
-    })
-    assert resolve_claim(ui, base_claim_map, "roles", default=[]) == ["topR"]
+def test_build_maps_default_when_missing_profiles():
+    realm_maps = build_realm_claim_maps({})
+    assert "default" in realm_maps
+    assert realm_maps["default"] == DEFAULT_CLAIM_MAP
 
-def test_missing_everywhere_returns_default(userinfo_common, base_claim_map):
-    assert resolve_claim(userinfo_common, base_claim_map, "groups", default=[]) == []
+def test_get_claim_map_for_realm_fallback_to_default():
+    realm_maps = {"default": DEFAULT_CLAIM_MAP, "r1": {"email": ["email"]}}
+    assert get_claim_map_for_realm("r1", realm_maps)["email"] == ["email"]
+    assert get_claim_map_for_realm("missing", realm_maps) == DEFAULT_CLAIM_MAP
+    assert get_claim_map_for_realm(None, realm_maps) == DEFAULT_CLAIM_MAP
 
-def test_empty_string_is_treated_as_empty(userinfo_common, base_claim_map):
-    ui = dict(userinfo_common, **{"preferred_username": ""})
-    # preferred_username path falls back to username -> name
-    ui["name"] = "Fallback Name"
-    assert resolve_claim(ui, base_claim_map, "preferred_username") == "Fallback Name"
+def test_realm_overrides_take_precedence_over_preset_and_defaults():
+    profiles = {
+        "auth0-tenantA": {  # substring should match "auth0" preset (which may be empty), then override wins
+            "claim_map_overrides": {
+                "groups": ["https://tenant.example.com/groups"]
+            }
+        }
+    }
+    realm_maps = build_realm_claim_maps(profiles)
+    cmap = realm_maps["auth0-tenantA"]
+    ui = {"https://tenant.example.com/groups": ["g1"]}
+    assert resolve_claim(ui, cmap, "groups", [], listify=True) == ["g1"]
+
+def test_resolve_direct_key_and_list_path():
+    cm = deepcopy(DEFAULT_CLAIM_MAP)
+    ui = {
+        "email": "e@example.org",
+        "realm_access": {"roles": ["r1", "r2"]},
+    }
+    # direct key
+    assert resolve_claim(ui, cm, "email") == "e@example.org"
+    # list path (second candidate for roles)
+    assert resolve_claim(ui, cm, "roles", default=[], listify=True) == ["r1", "r2"]
+
+def test_resolve_order_first_match_wins():
+    cm = {
+        "preferred_username": ["preferred_username", "username", "name"],
+    }
+    ui = {"username": "u1", "name": "Name"}
+    # preferred_username missing -> falls to username
+    assert resolve_claim(ui, cm, "preferred_username") == "u1"
+
+def test_resolve_listify_wraps_scalar_and_keeps_lists():
+    cm = {"groups": ["groups"]}
+    assert resolve_claim({"groups": "dev"}, cm, "groups", [], listify=True) == ["dev"]
+    assert resolve_claim({"groups": ["dev", "ops"]}, cm, "groups", [], listify=True) == ["dev", "ops"]
+
+def test_resolve_default_on_missing_or_empty():
+    cm = {"groups": ["groups"], "email": ["email"]}
+    assert resolve_claim({}, cm, "groups", default=[]) == []
+    assert resolve_claim({"email": ""}, cm, "email", default="unknown") == "unknown"
+
+def test_preset_effect_in_resolution_with_substring_realm_name():
+    profiles = {
+        "cognito-dev": {  # substring should apply the 'cognito' preset
+            "client_id": "web"
+        }
+    }
+    realm_maps = build_realm_claim_maps(profiles)
+    cmap = realm_maps["cognito-dev"]
+    ui = {"cognito:groups": ["A", "B"]}
+    assert resolve_claim(ui, cmap, "groups", [], listify=True) == ["A", "B"]

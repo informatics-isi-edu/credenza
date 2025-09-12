@@ -13,77 +13,153 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import json, os, fnmatch
+import os
+import json
+from copy import deepcopy
 from typing import Any, Dict, List, Union
 
-PathSeg = Union[str, None]
-PathSpec = Union[str, List[PathSeg]]  # "groups" OR ["resource_access", None, "roles"]
+# Minimal, explicit claim mapper:
+# - Exact keys only (no wildcards, no indexing)
+# - Ordered first-match per key
+# - Small provider presets (Cognito, Keycloak, etc.)
+# - Per-realm overrides merged on top of defaults/presets
 
-def load_claim_map(path: str) -> Dict[str, List[PathSpec]]:
+# Global defaults (exact keys only, ordered)
+DEFAULT_CLAIM_MAP: Dict[str, List[Union[str, List[str]]]] = {
+    "groups": ["groups"],
+    "roles":  ["roles", ["realm_access", "roles"]],
+    "preferred_username": ["preferred_username", "username", "name"],
+    "full_name": ["name"],
+    "email": ["email"],
+    "email_verified": ["email_verified"],
+    "id": ["sub", "userid"],
+    "iss": ["iss"],
+    "aud": ["aud"],
+}
+
+# Minimal provider presets: ONLY typical deviations from base defaults.
+IDP_PRESETS: Dict[str, Dict[str, List[Union[str, List[str]]]]] = {
+    "cognito": {
+        "groups": ["cognito:groups", "groups"],
+        "preferred_username": ["cognito:username", "preferred_username", "username", "name"],
+        # include roles only if you mint such a custom claim in Cognito:
+        # "roles": ["cognito:roles", "roles"],
+    },
+    "keycloak": {
+        "roles": [["realm_access", "roles"], "roles"],
+    },
+    # "auth0": {
+    #     # Put your tenant’s namespaced keys here if desired, e.g.:
+    #     # "groups": ["https://example.com/groups", "groups"],
+    #     # "roles":  ["https://example.com/roles",  "roles"],
+    # }
+}
+
+Path = Union[str, List[str]]
+ClaimMap = Dict[str, List[Path]]
+
+
+def load_claim_map(path: str) -> ClaimMap:
+    """Optional utility: load a standalone claim-map JSON file (not required in preset/merge flow)."""
     if not path or not os.path.exists(path):
         return {}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def _match_key(d: dict, seg: str):
-    """Return the first (key, value) whose key matches seg; seg may include *."""
-    if "*" in seg:
-        for k, v in d.items():
-            if fnmatch.fnmatch(k, seg):
-                return k, v
-        return None, None
-    return (seg, d.get(seg)) if seg in d else (None, None)
 
-def _resolve_one(obj: Any, path: PathSpec):
-    """Resolve a single path spec against obj. Returns None if not found/non-existent."""
-    # String path = single key (supports * at this level; dots are literal)
+def _merge_claim_maps(base: ClaimMap, override: ClaimMap | None) -> ClaimMap:
+    """Shallow merge: list for a key is fully replaced by override."""
+    merged = deepcopy(base)
+    if not override:
+        return merged
+    for k, v in override.items():
+        merged[k] = v
+    return merged
+
+
+def _find_preset_for_realm(realm: str) -> str | None:
+    """Return preset key if a known preset name is a substring of realm (case-insensitive).
+    If multiple match, choose the longest (most specific) name.
+    """
+    if not realm:
+        return None
+    r = realm.lower()
+    hits = [name for name in IDP_PRESETS.keys() if name in r]
+    if not hits:
+        return None
+    hits.sort(key=len, reverse=True)  # prefer most specific (longest) match
+    return hits[0]
+
+
+def build_realm_claim_maps(profiles: Dict[str, dict]) -> Dict[str, ClaimMap]:
+    """
+    Build {realm -> claim_map} by merging:
+        DEFAULT_CLAIM_MAP  -> IDP_PRESETS[preset_key]  -> profile['claim_map_overrides']
+    Where preset_key is:
+      - exact realm match in IDP_PRESETS, else
+      - the IDP preset whose name is a substring of the realm (case-insensitive), preferring the longest match.
+    Always includes a 'default' entry if not present in profiles.
+    """
+    realm_maps: Dict[str, ClaimMap] = {}
+
+    for realm, prof in (profiles or {}).items():
+        base = DEFAULT_CLAIM_MAP
+
+        preset_key = realm if realm in IDP_PRESETS else _find_preset_for_realm(realm)
+        if preset_key:
+            base = _merge_claim_maps(base, IDP_PRESETS[preset_key])
+
+        claim_map = _merge_claim_maps(base, prof.get("claim_map_overrides"))
+        realm_maps[realm] = claim_map
+
+    # Ensure fallback
+    if "default" not in realm_maps:
+        realm_maps["default"] = deepcopy(DEFAULT_CLAIM_MAP)
+
+    return realm_maps
+
+
+def get_claim_map_for_realm(realm: str | None, realm_maps: Dict[str, ClaimMap]) -> ClaimMap:
+    """Pick the map for a realm with fallback to 'default' (or empty dict if absent)."""
+    if not realm_maps:
+        return {}
+    if realm and realm in realm_maps:
+        return realm_maps[realm]
+    return realm_maps.get("default", {})
+
+
+def _get_path(obj: Any, path: Path) -> Any:
+    """Exact-key navigation. No wildcards, no indexing, no merging."""
     if isinstance(path, str):
-        if isinstance(obj, dict):
-            _, val = _match_key(obj, path)
-            return val
-        return None
-
-    # List-of-segments path (str | None only)
+        return obj.get(path) if isinstance(obj, dict) else None
     cur = obj
-    i = 0
-    while i < len(path):
-        seg = path[i]
-
-        if seg is None:
-            # wildcard over dict keys: evaluate remainder for each child, flatten list results
-            if not isinstance(cur, dict):
-                return None
-            rem = path[i+1:]
-            acc: List[Any] = []
-            for v in cur.values():
-                got = _resolve_one(v, rem if len(rem) > 1 else (rem[0] if rem else []))
-                if got is None:
-                    continue
-                if isinstance(got, list):
-                    acc.extend(got)
-                else:
-                    acc.append(got)
-            return acc if acc else None
-
-        # seg is str
-        if isinstance(cur, dict):
-            _, val = _match_key(cur, seg)
-            if val is None:
-                return None
-            cur = val
-            i += 1
-            continue
-
-        # encountering a list or scalar where a dict key is expected -> unsupported
-        return None
-
+    for seg in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(seg)
+        if cur is None:
+            return None
     return cur
 
-def resolve_claim(userinfo: dict, claim_map: Dict[str, List[PathSpec]], key: str, default=None):
-    """Try each path for 'key' in order; return the first non-empty (not None, '', []) value."""
+
+def resolve_claim(
+    userinfo: dict,
+    claim_map: ClaimMap,
+    key: str,
+    default=None,
+    *,
+    listify: bool = False,
+):
+    """
+    Try each configured path for 'key' in order; return first non-empty value.
+    If listify=True and the value is a scalar, wrap it as [value].
+    """
     paths = claim_map.get(key, [])
-    for p in paths:
-        val = _resolve_one(userinfo, p)
-        if val not in (None, "", []):
-            return val
+    for candidate in paths:
+        val = _get_path(userinfo, candidate)
+        if val in (None, "", []):
+            continue
+        if listify and not isinstance(val, list):
+            return [val]
+        return val
     return default

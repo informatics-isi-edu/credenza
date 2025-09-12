@@ -109,9 +109,11 @@ def delete_session():
     resp.set_cookie(current_app.config["COOKIE_NAME"], "", expires=0)
     return resp
 
-def _claim(session, key, fallback=None):
-    claim_map = current_app.config.get("IDP_CLAIM_MAP") or {}
-    return resolve_claim(session.userinfo, claim_map, key, fallback)
+def _claim(session, key, fallback=None, *, listify=False):
+    realm = session.realm or "default"
+    maps = current_app.config.get("IDP_CLAIM_MAPS") or {}
+    claim_map = maps.get(realm) or maps.get("default") or {}
+    return resolve_claim(session.userinfo, claim_map, key, fallback, listify=listify)
 
 
 def make_session_response(sid, session: SessionData):
@@ -145,7 +147,7 @@ def make_session_response(sid, session: SessionData):
         # format "attributes" array
         attributes = [client]
         # Use resolver-backed groups so non-standard keys like 'cognito:groups' map correctly
-        groups_claim = _claim(session, "groups", session.userinfo.get("groups", []))
+        groups_claim = _claim(session, "groups", session.userinfo.get("groups", []), listify=True)
         groups = []
         for group in groups_claim:
             if isinstance(group, dict):
@@ -166,8 +168,8 @@ def make_session_response(sid, session: SessionData):
         sub =                _claim(session, "sub", session.userinfo.get("sub"))
         iss =                _claim(session, "iss", session.userinfo.get("iss"))
         aud =                _claim(session, "aud", session.userinfo.get("aud"))
-        groups =             _claim(session, "groups", session.userinfo.get("groups", []))
-        roles =              _claim(session, "roles", session.userinfo.get("roles", []))
+        groups =             _claim(session, "groups", session.userinfo.get("groups", []), listify=True)
+        roles =              _claim(session, "roles", session.userinfo.get("roles", []), listify=True)
         userid =             _claim(session, "userid", session.userinfo.get("userid"))
 
         # normalize email_verified if it arrives as a string
