@@ -27,6 +27,7 @@ from werkzeug.exceptions import HTTPException, BadGateway, ServiceUnavailable
 from .api.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
+from .api.claim_mapper import build_realm_claim_maps
 from .api.util import AESGCMCodec, is_browser_client
 from .rest.session import session_blueprint
 from .rest.login_flow import login_blueprint
@@ -110,6 +111,11 @@ def load_config(app):
     if os.path.exists(trusted_path):
         with open(trusted_path) as f:
             app.config["TRUSTED_ISSUERS"] = json.load(f)
+    else:
+        app.config["TRUSTED_ISSUERS"] = []
+
+    # Load the claim map
+    app.config["IDP_CLAIM_MAPS"] = build_realm_claim_maps(app.config.get("OIDC_IDP_PROFILES"))
 
     # create session augmentation provider map
     provider_map = {}
@@ -143,11 +149,6 @@ def init_logging(app):
 
 def create_app():
     app = Flask(__name__)
-    app.config.from_prefixed_env(prefix="CREDENZA")
-    init_logging(app)
-    load_config(app)
-    init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
-                      use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
 
     @app.errorhandler(HTTPException)
     def handle_http_exception(e):
@@ -180,8 +181,15 @@ def create_app():
             response.headers["Pragma"] = "no-cache"
         return response
 
+    # Bootstrap app
+    app.config.from_prefixed_env(prefix="CREDENZA")
+    init_logging(app)
+    load_config(app)
+    init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
+                      use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
     app.config["OIDC_CLIENT_FACTORY"] = OIDCClientFactory(app.config["OIDC_IDP_PROFILES"])
 
+    # To encrypt or not to encrypt (session data)
     encrypt_session_data = app.config.get("ENCRYPT_SESSION_DATA", False)
     if app.config.get("ENCRYPTION_KEY"):
         app.config["CRYPTO_CODEC"] = AESGCMCodec(key=app.config["ENCRYPTION_KEY"])
@@ -191,6 +199,7 @@ def create_app():
             encrypt_session_data = False
             logging.warning("Encryption of session data is disabled due to missing encryption key")
 
+    # Create the storage backend and instantiate the session store
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),
                                              url=app.config.get("STORAGE_BACKEND_URL"))
 
@@ -201,6 +210,7 @@ def create_app():
     )
     logger.debug(f"Encrypt session store data: {encrypt_session_data}")
 
+    # Register REST API blueprints
     app.register_blueprint(session_blueprint)
     app.register_blueprint(login_blueprint)
     app.register_blueprint(device_blueprint)

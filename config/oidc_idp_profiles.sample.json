@@ -1,14 +1,25 @@
 {
-  "default": {
-    "issuer": "https://localhost/auth/realms/deriva",
+  "keycloak": {
     "discovery_url": "http://keycloak:8080/auth/realms/deriva/.well-known/openid-configuration",
-    "revocation_url": "http://keycloak:8080/auth/realms/deriva/protocol/openid-connect/revoke",
-    "logout_url": "https://localhost/auth/realms/deriva/protocol/openid-connect/logout",
     "scopes": "openid email profile",
     "client_secret_file": "secrets/keycloak_client_secret.json"
   },
+  "okta": {
+    "discovery_url": "https://trial-1234567.okta.com/.well-known/openid-configuration",
+    "scopes": "openid email profile groups",
+    "client_secret_file": "secrets/okta_client_secret.json"
+  },
+  "cognito": {
+    "discovery_url": "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_123456789/.well-known/openid-configuration",
+    "scopes": "openid email profile",
+    "request_offline_access_scope_in_device_flow": false,
+    "logout_url_params": {
+       "client_id": "${COGNITO_CLIENT_ID}",
+       "logout_uri": "https://localhost"
+    },
+    "client_secret_file": "secrets/cognito_client_secret.json"
+  },
   "globus": {
-    "issuer": "https://auth.globus.org",
     "discovery_url": "https://auth.globus.org/.well-known/openid-configuration",
     "introspect_url": "https://auth.globus.org/v2/oauth2/token/introspect",
     "logout_url": "https://auth.globus.org/v2/web/logout",
@@ -28,12 +39,5 @@
     },
     "session_augmentation_provider": "credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider",
     "client_secret_file": "secrets/globus_client_secret.json"
-  },
-  "okta": {
-    "issuer": "https://trial-1234567.okta.com",
-    "discovery_url": "https://trial-1234567.okta.com/.well-known/openid-configuration",
-    "logout_url": "https://trial-1234567.okta.com/oauth2/v1/logout",
-    "scopes": "openid email profile groups",
-    "client_secret_file": "secrets/okta_client_secret.json"
   }
 }
