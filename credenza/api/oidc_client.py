@@ -62,6 +62,7 @@ class OIDCClient:
         self.revocation_url = profile.get("revocation_url") or metadata.get("revocation_endpoint")
         self.userinfo_url = profile.get("userinfo_url") or metadata.get("userinfo_endpoint")
         self.introspect_url = profile.get("introspect_url") or metadata.get("introspection_endpoint")
+        self.logout_url = profile.get("logout_url") or metadata.get("end_session_endpoint")
         self.jwks_uri = profile.get("jwks_uri") or metadata.get("jwks_uri")
         self.issuer = profile.get("issuer", metadata.get("issuer", "")).rstrip("/")
 
