@@ -177,27 +177,3 @@ def frozen_time(monkeypatch):
     fixed = 1750106643
     monkeypatch.setattr(time, "time", lambda: fixed)
     return fixed
-
-@pytest.fixture
-def base_claim_map():
-    # mirrors the simplified example config
-    return {
-        "groups": [
-            "groups",
-            "cognito:groups",
-            "https://*/groups",
-            "http://*/groups",
-        ],
-        "roles": [
-            "roles",
-            ["realm_access", "roles"],
-            ["resource_access", None, "roles"],
-        ],
-        "preferred_username": ["preferred_username", "username", "name"],
-        "full_name": ["name"],
-        "email": ["email"],
-        "email_verified": ["email_verified"],
-        "id": ["userid", "user_id", "uid", "oid", "id"],
-        "iss": ["iss"],
-        "aud": ["aud"],
-    }

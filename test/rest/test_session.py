@@ -25,9 +25,8 @@ from credenza.api.util import get_effective_scopes
 
 
 @pytest.fixture
-def app(app, fake_current_session, monkeypatch, base_claim_map):
+def app(app, fake_current_session, monkeypatch):
     app.register_blueprint(session_blueprint)
-    app.config["IDP_CLAIM_MAP"] = base_claim_map
 
     return app
 
