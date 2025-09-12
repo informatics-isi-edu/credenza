@@ -30,6 +30,7 @@ class StubOIDCClient:
         self.scope = scope
         self._tokens = tokens
         self._userinfo = userinfo
+        self.logout_url = "https://idp/logout"
 
     def create_authorization_url(self, **kwargs):
         # return (auth_url, auth_state, code_verifier)
@@ -198,7 +199,7 @@ def test_logout_normal(client, app, store, monkeypatch, fake_current_session):
     assert "/" == urlparse(resp.headers["Location"]).path
     assert "Expires=Thu, 01 Jan 1970" in resp.headers["Set-Cookie"]
 
-def test_logout_with_profile(client, app, store, monkeypatch):
+def test_logout_uses_client_logout_and_profile(client, app, store, monkeypatch):
     sid = "sid"
     monkeypatch.setattr(lf, "has_current_session", lambda: sid)
     monkeypatch.setattr(lf, "revoke_tokens", lambda sid, session: None)
@@ -210,12 +211,15 @@ def test_logout_with_profile(client, app, store, monkeypatch):
                          refresh_token="rt",
                          scopes="openid")
     app.config["OIDC_IDP_PROFILES"] = {
-        "test": {"logout_url": "https://idp/logout", "logout_url_params": {"foo": "bar"}}
+        "test": {"logout_url_params": {"foo": "bar"}}
     }
+
+    stub = StubOIDCClient(tokens=None, userinfo=None)
+    monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client", lambda _realm: stub)
     resp = client.get("/logout")
     assert resp.status_code in (302, 303)
     loc = resp.headers["Location"]
-    assert loc.startswith("https://idp/logout")
+    assert loc.startswith(stub.logout_url)
     qs = parse_qs(urlparse(loc).query)
     assert qs["foo"] == ["bar"]
 
