@@ -33,7 +33,6 @@ def login():
     factory = current_app.config["OIDC_CLIENT_FACTORY"]
     store = current_app.config["SESSION_STORE"]
     realm = current_app.config["DEFAULT_REALM"]
-    client = factory.get_client(realm)
 
     try:
         client = factory.get_client(realm)
@@ -200,12 +199,18 @@ def logout():
 
     store = current_app.config["SESSION_STORE"]
     session = store.get_session_data(sid)
-
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
     realm = session.realm
     profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
-    logout_url = profile.get("logout_url")
+    factory = current_app.config["OIDC_CLIENT_FACTORY"]
+
+    try:
+        client = factory.get_client(realm)
+    except Exception as e:
+        abort(502, description=f"OIDC client init failed: {e}")
+
+    logout_url = client.logout_url
     logout_url_params = profile.get("logout_url_params")
 
     revoke_tokens(sid, session)
