@@ -127,6 +127,7 @@ def base_session():
             "name": "User One",
             "email_verified": True,
             "iss": "https://issuer",
+            "id": "https://issuer/user1",
             "aud": ["cid"],
             "groups": ["g1", {"id": "g2"}],
             "roles": ["r1"],

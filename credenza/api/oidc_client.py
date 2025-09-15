@@ -199,6 +199,7 @@ class OIDCClient:
             id_token,
             key=self.jwks,
             claims_options={
+                "sub": {"essential": True},
                 "iss": {"values": [self.issuer], "essential": True},
                 "aud": {"values": [self.client_id], "essential": True},
                 "exp": {"essential": True},
