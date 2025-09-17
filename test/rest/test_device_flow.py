@@ -203,7 +203,7 @@ def test_device_callback_success(client, app, store, monkeypatch, frozen_time):
     monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client",
                         lambda realm, native_client=True: stub)
 
-    provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+    provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
     monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
     monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
 

@@ -125,8 +125,10 @@ def get_realm(realm=None) -> str:
 
 
 def get_augmentation_provider(realm=None):
+    if realm is None:
+        realm = get_realm()
     providers = current_app.config["SESSION_AUGMENTATION_PROVIDERS"]
-    provider = providers.get(realm, providers["default"])
+    provider = providers.get(realm)
     return provider
 
 def get_augmentation_provider_params(realm=None):

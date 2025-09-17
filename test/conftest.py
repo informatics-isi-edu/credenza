@@ -73,7 +73,7 @@ def app(store, discovery_response, dummy_profile, monkeypatch):
     app.config["BASE_URL"] = "https://localhost"
     app.config["SERVER_NAME"] = "localhost"
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = \
-        {"default":
+        {"test":
              import_string("credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider")(),
          "globus":
              import_string("credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider")()}

@@ -172,7 +172,7 @@ def test_callback_success(client, app, store, monkeypatch, frozen_time):
     stub = StubOIDCClient(tokens=token_dict, userinfo=userinfo)
     monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client", lambda _realm: stub)
 
-    provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+    provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
     monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
     monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
 

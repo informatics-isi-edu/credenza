@@ -62,7 +62,7 @@ def test_with_list_input_single_scope(monkeypatch, app):
     import time as _time
     monkeypatch.setattr(_time, "time", lambda: CUR_TIME)
     with app.app_context():
-        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
         result = provider.process_additional_tokens(tokens)
     assert result == {"read": expected_entry("at", "rt", CUR_TIME + 10, "rs", CUR_TIME)}
 
@@ -74,7 +74,7 @@ def test_process_additional_tokens_with_list_input_multiple_scopes_and_defaults(
     import time as _time
     monkeypatch.setattr(_time, "time", lambda: CUR_TIME)
     with app.app_context():
-        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
         result = provider.process_additional_tokens(tokens)
     assert result == {
         "x": expected_entry("a", None, CUR_TIME + 5, None, CUR_TIME),
@@ -89,7 +89,7 @@ def test_process_additional_tokens_with_dict_input_other_and_dependent(monkeypat
     import time as _time
     monkeypatch.setattr(_time, "time", lambda: CUR_TIME)
     with app.app_context():
-        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
         result = provider.process_additional_tokens(tokens_map)
     assert result == {
         "one": expected_entry("ot", None, CUR_TIME + 0, None, CUR_TIME),
@@ -100,7 +100,7 @@ def test_process_additional_tokens_with_dict_input_other_and_dependent(monkeypat
 @pytest.mark.parametrize("input_val", [None, {}, []])
 def test_process_additional_tokens_with_empty_inputs(input_val, app):
     with app.app_context():
-        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
         result = provider.process_additional_tokens(input_val)
     assert result == {}
 
@@ -109,7 +109,7 @@ def test_enrich_userinfo_non_globus(app):
     userinfo = {"iss": "https://other", "groups": ["existing"]}
     additional_tokens = {}
     with app.app_context():
-        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
         result = provider.enrich_userinfo(userinfo, additional_tokens)
     assert result is False
     assert userinfo["groups"] == ["existing"]
@@ -202,7 +202,7 @@ def test_enrich_userinfo_globus_with_tokens(monkeypatch, app):
 def test_fetch_dependent_tokens_not_globus(app):
     userinfo = {"iss": "https://other-issuer", "email": "u@example.com"}
     with app.app_context():
-        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
         result = provider.fetch_dependent_tokens("unused_token", userinfo, scopes=["x"], access_type="offline")
     assert result == {}
 
@@ -237,7 +237,7 @@ def test_fetch_dependent_tokens_failure(app, monkeypatch):
     monkeypatch.setattr(factory, "get_client", lambda realm: stub_client)
     userinfo = {"iss": GlobusSessionAugmentationProvider.GLOBUS_ISSUER, "email": "u@example.com"}
     with app.app_context():
-        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("default")
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
         result = provider.fetch_dependent_tokens("any-token", userinfo)
     assert result == {}
 
