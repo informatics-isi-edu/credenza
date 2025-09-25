@@ -191,7 +191,7 @@ def create_app():
 
     # To encrypt or not to encrypt (session data)
     encrypt_session_data = app.config.get("ENCRYPT_SESSION_DATA", False)
-    if app.config.get("ENCRYPTION_KEY"):
+    if encrypt_session_data and app.config.get("ENCRYPTION_KEY"):
         app.config["CRYPTO_CODEC"] = AESGCMCodec(key=app.config["ENCRYPTION_KEY"])
     else:
         app.config["CRYPTO_CODEC"] = None
