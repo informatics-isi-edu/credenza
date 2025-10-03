@@ -25,7 +25,7 @@ def test_build_maps_applies_preset_on_exact_realm_name():
     }
     realm_maps = build_realm_claim_maps(profiles)
     assert "cognito" in realm_maps
-    assert realm_maps["cognito"]["groups"][0] == "cognito:groups"
+    assert realm_maps["cognito"]["groups"][1] == "cognito:groups"
     assert "default" in realm_maps
 
 def test_build_maps_applies_preset_on_substring_match():

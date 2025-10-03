@@ -42,10 +42,10 @@ DEFAULT_CLAIM_MAP: Dict[str, List[Union[str, List[str]]]] = {
 # Minimal provider presets: ONLY typical deviations from base defaults.
 IDP_PRESETS: Dict[str, Dict[str, List[Union[str, List[str]]]]] = {
     "cognito": {
-        "groups": ["cognito:groups", "groups"],
-        "preferred_username": ["cognito:username", "preferred_username", "username", "name"],
+        "groups": ["groups", "cognito:groups"],
+        "preferred_username": ["preferred_username", "username", "name", "cognito:username"],
         # include roles only if you mint such a custom claim in Cognito:
-        # "roles": ["cognito:roles", "roles"],
+        # "roles": ["roles", "cognito:roles"],
     },
     "keycloak": {
         "roles": [["realm_access", "roles"], "roles"],
