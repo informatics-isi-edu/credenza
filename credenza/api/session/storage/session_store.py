@@ -149,8 +149,9 @@ class SessionStore:
             session_json = self.crypto_codec.encrypt(session_json)
 
         session_key = access_token if use_access_token_as_session_key else self.generate_session_key()
-        self.map_session(session_key, session_id)
-        self.backend.setex(self._key(session_id), session_json, int(expires_at - now))
+        ttl = int(expires_at - now)
+        self.map_session(session_key, session_id, ttl)
+        self.backend.setex(self._key(session_id), session_json, ttl)
 
         logger.debug(f"Created session {session_id} (realm={realm})")
         return session_key, session_data
@@ -178,18 +179,21 @@ class SessionStore:
         return session_id, session
 
     def update_session(self, session_id, session_data: SessionData):
-        session_data.updated_at = time.time()
-        session_data.expires_at = session_data.updated_at + self.ttl
+        now = time.time()
+        session_data.updated_at = now
+        if session_data.expires_at < (now + self.ttl):
+            session_data.expires_at = (now + self.ttl)
+        ttl = int(session_data.expires_at - now)
         session_key = self.get_session_key_for_session_id(session_id)
         if self.crypto_codec:
-            session_data = self.crypto_codec.encrypt(json.dumps(session_data.to_dict(), separators=(",", ":")))
+            session_json = self.crypto_codec.encrypt(json.dumps(session_data.to_dict(), separators=(",", ":")))
         else:
-            session_data = json.dumps(session_data.to_dict(), separators=(",", ":"))
-
-        self.map_session(session_key, session_id)
-        self.backend.setex(self._key(session_id), session_data, self.ttl)
+            session_json = json.dumps(session_data.to_dict(), separators=(",", ":"))
+        self.map_session(session_key, session_id, ttl)
+        self.backend.setex(self._key(session_id), session_json, ttl)
 
         logger.debug(f"Updated session {session_id}")
+        return session_key, session_data
 
     def delete_session(self, session_id):
         session = self.get_session_data(session_id)
@@ -232,9 +236,6 @@ class SessionStore:
         # Update metadata in appropriate scope
         target = getattr(session.session_metadata, scope)
         target.update(metadata)
-
-        # Update timestamp
-        session.updated_at = time.time()
 
         # Save updated session back as dict
         self.update_session(session_id, session)

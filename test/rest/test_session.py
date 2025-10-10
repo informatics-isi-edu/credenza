@@ -81,19 +81,29 @@ def test_get_session_invalid_bearer(monkeypatch, client):
     assert resp.status_code == 404
 
 def test_put_session_extend(client, store, frozen_time):
-    sid, session = sm.get_current_session()
+    # Capture original values before the PUT
+    before = store.get_session_data("fake_current_sid")
+    old_expires_at = before.expires_at
+
     resp = client.put("/session")
     assert resp.status_code == 200
-    updated = store.get_session_data(sid)
-    # Expires_at should have been set to frozen_time + ttl
-    assert updated.expires_at == frozen_time + store.ttl
-    # updated_at should match frozen_time
-    assert updated.updated_at == frozen_time
 
-def test_put_session_expired(client):
-    # simulate that refresh_expires_at is in the past
+    after = store.get_session_data("fake_current_sid")
+
+    # update_session sets updated_at to time.time() (frozen_time in tests)
+    assert after.updated_at == pytest.approx(frozen_time, abs=1)
+
+    # update_session sets expires_at = max(current_expires_at, now + ttl)
+    expected_expires = max(old_expires_at, frozen_time + store.ttl)
+    assert after.expires_at == pytest.approx(expected_expires, abs=1)
+
+
+def test_put_session_expired(client, app, monkeypatch):
     sid, sess = sm.get_current_session()
-    sess.session_metadata.system["refresh_expires_at"] = int(time.time()) - 1
+    sess.session_metadata.system["refresh_expires_at"] = int(time.time()) + 60
+    monkeypatch.setattr(sm, "revoke_tokens", lambda sid, session: None)
+    with app.app_context():
+        app.config["SESSION_EXPIRY_THRESHOLD"] = 300
     resp = client.put("/session")
     assert resp.status_code == 401
 
@@ -118,11 +128,14 @@ def test_put_session_with_refresh_access_token(client,
     sess.access_token  = "old_access_token"
     sess.id_token      = "old_id_token"
 
+    # Record current expires_at so we can assert the max() behavior
+    original_expires_at = sess.expires_at
+
     # Stub get_current_session -> (sid, sess)
     monkeypatch.setattr(sm,"get_current_session", lambda: (sid, sess))
 
     # Stub out map_session
-    monkeypatch.setattr(store, "map_session", lambda session_key, session_id: "dummy-map-key")
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
 
     # Configure our dummy OIDC client factory in Flask config
     class DummyClient:
@@ -154,7 +167,7 @@ def test_put_session_with_refresh_access_token(client,
 
     # Audit events
     assert any(ev == "access_token_refreshed" for ev, _ in audit_calls), audit_calls
-    assert any(ev == "session_extended" for ev, _ in audit_calls), audit_calls
+    assert any(ev == "session_updated" for ev, _ in audit_calls), audit_calls
 
     # Fetch the persisted session from the store
     updated = store.get_session_data(sid)
@@ -169,8 +182,10 @@ def test_put_session_with_refresh_access_token(client,
     assert meta["token_expires_at"]   == now + 3600
     assert meta["refresh_expires_at"] == now + 7200
 
-    # Finally, ensure update_session bumped the session TTL
-    assert updated.expires_at == pytest.approx(now + store.ttl, abs=1)
+    # update_session should have bumped updated_at and applied max() for expires_at
+    assert updated.updated_at == pytest.approx(now, abs=1)
+    expected_expires = max(original_expires_at, now + store.ttl)
+    assert updated.expires_at == pytest.approx(expected_expires, abs=1)
 
 
 def test_put_session_with_refresh_access_token_failure(client,
@@ -193,11 +208,13 @@ def test_put_session_with_refresh_access_token_failure(client,
     sess.access_token  = "old_access_token"
     sess.id_token      = "old_id_token"
 
+    original_expires_at = sess.expires_at
+
     # Patch get_current_session
     monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
 
     # Patch map_session
-    monkeypatch.setattr(store, "map_session", lambda session_key, session_id: "dummy-map-key")
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
 
     # Configure dummy client that fails
     class DummyFailClient:
@@ -219,7 +236,7 @@ def test_put_session_with_refresh_access_token_failure(client,
 
     # Check audit includes the failure
     assert any(ev == "access_token_refresh_failed" for ev, _ in audit_calls), audit_calls
-    assert any(ev == "session_extended" for ev, _ in audit_calls), audit_calls
+    assert any(ev == "session_updated" for ev, _ in audit_calls), audit_calls
 
     # Fetch stored session
     updated = store.get_session_data(sid)
@@ -234,8 +251,10 @@ def test_put_session_with_refresh_access_token_failure(client,
     assert meta["token_expires_at"]   == now - 1
     assert meta["refresh_expires_at"] == now + 600
 
-    # But TTL was still bumped by update_session
-    assert updated.expires_at == pytest.approx(now + store.ttl, abs=1)
+    # update_session should have bumped updated_at and applied max() for expires_at
+    assert updated.updated_at == pytest.approx(now, abs=1)
+    expected_expires = max(original_expires_at, now + store.ttl)
+    assert updated.expires_at == pytest.approx(expected_expires, abs=1)
 
 
 def test_put_session_additional_tokens_refresh(client,
@@ -250,9 +269,6 @@ def test_put_session_additional_tokens_refresh(client,
     threshold = 500
 
     # Prepare a session with four additional token blocks:
-    #    - "good" and "fail" are expired by > threshold
-    #    - "not_due" is far in the future
-    #    - "no_rt" has no refresh_token
     sess = copy.deepcopy(base_session)
     sess.additional_tokens = {
         "good":    {"refresh_token": "rt_good", "expires_at": now - threshold - 1},
@@ -265,14 +281,16 @@ def test_put_session_additional_tokens_refresh(client,
     sess.expires_at = now + 10000
 
     # Stub get_current_session so GET/PUT /session uses our SID and session
-    monkeypatch.setattr(sm,"get_current_session", lambda: (sid, sess))
+    monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
 
-    # Stub out map_session
-    monkeypatch.setattr(store, "map_session", lambda session_key, session_id: "dummy-map-key")
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
 
-    # Capture calls to update_session
-    updated = []
-    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+    # Capture calls to update_session, and make it return (session_key, session_data)
+    updated_calls = []
+    def _update_session(s, sd):
+        updated_calls.append((s, sd))
+        return ("dummy-map-key", sd)
+    monkeypatch.setattr(store, "update_session", _update_session)
 
     # Provide a DummyClient that succeeds for "rt_good" and raises for "rt_fail"
     class DummyClient:
@@ -297,7 +315,6 @@ def test_put_session_additional_tokens_refresh(client,
 
     with app.app_context():
         app.config["TOKEN_EXPIRY_THRESHOLD"] = 300
-        # Inject our dummy factory
         app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
 
     # Perform the PUT /session
@@ -310,8 +327,8 @@ def test_put_session_additional_tokens_refresh(client,
     assert "additional_token_refresh_failed"  in events, audit_calls
 
     # Only the "good" path should have resulted in update_session
-    assert len(updated) == 1
-    called_sid, new_sess = updated[0]
+    assert len(updated_calls) == 1
+    called_sid, new_sess = updated_calls[0]
     assert called_sid == sid
 
     # Verify the "good" block was updated correctly

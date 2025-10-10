@@ -50,13 +50,11 @@ def get_session():
     realm = session.realm
 
     if request.method == "PUT":
-        # Extend session lifetime
-        session.updated_at = now
-        session.expires_at = now + store.ttl
-
         # Enforce max refreshable lifetime
+        session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
         refresh_expires_at = session.session_metadata.system.get("refresh_expires_at")
-        if refresh_expires_at and now > refresh_expires_at:
+        if refresh_expires_at and now > (refresh_expires_at - session_expiry_threshold):
+            revoke_tokens(sid, session)
             store.delete_session(sid)
             audit_event("refresh_expired", session_id=sid)
             abort(401, "Session has expired and can no longer be refreshed")
@@ -70,8 +68,13 @@ def get_session():
             provider = get_augmentation_provider(realm)
             provider.enrich_userinfo(session.userinfo, session.additional_tokens)
 
-        store.update_session(sid, session)
-        audit_event("session_extended", session_id=sid, user=user, sub=sub, realm=realm)
+        skey, session_data = store.update_session(sid, session)
+        audit_event("session_updated",
+                    session_id=sid,
+                    user=user,
+                    sub=sub,
+                    realm=realm,
+                    expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat())
 
     response = make_session_response(sid, session)
     return make_json_response(response)

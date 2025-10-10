@@ -46,7 +46,7 @@ def run_refresh_worker(app):
             sub = session.userinfo.get("sub")
             sys_metadata = session.session_metadata.system or {}
             refresh_expires_at = sys_metadata.get("refresh_expires_at")
-            if refresh_expires_at and now > refresh_expires_at:
+            if refresh_expires_at and now > (refresh_expires_at - session_expiry_threshold):
                 audit_event("refresh_expired", session_id=sid)
                 revoke_tokens(sid, session)
                 store.delete_session(sid)
@@ -68,14 +68,8 @@ def run_refresh_worker(app):
             if allow_auto_refresh:
                 modified = bool(refresh_additional_tokens(sid, session)) or modified
 
-            # Just bump session TTL if allowed and it is about to expire and hasn't otherwise been modified
-            if not modified and allow_auto_refresh:
-                ttl = store.get_ttl(sid)
-                if 0 < ttl < session_expiry_threshold:
-                    modified = True
-
             if modified:
                 store.update_session(sid, session)
-                audit_event("device_session_extended", session_id=sid, user=user, sub=sub, realm=realm)
+                audit_event("device_session_updated", session_id=sid, user=user, sub=sub, realm=realm)
 
         time.sleep(interval)

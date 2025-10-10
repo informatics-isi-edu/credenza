@@ -175,9 +175,9 @@ def test_additional_token_refresh_success_and_failure(app,
             run_refresh_worker(app)
 
     # Verify audit events
-    #   - one session refresh success
+    #   - one session update success
     assert any(
-        ev == "device_session_extended" and kw.get("session_id") == sid
+        ev == "device_session_updated" and kw.get("session_id") == sid
         for ev, kw in audit_calls
     ), f"Missing success event in {audit_calls}"
 
@@ -208,52 +208,6 @@ def test_additional_token_refresh_success_and_failure(app,
 
     # The "fail" block should have been removed entirely
     assert "fail" not in new_sess.additional_tokens
-
-def test_device_session_refresh(app, store, base_session, factory, profiles, audit_calls, frozen_time, monkeypatch):
-    sid = "S3"
-    now = int(frozen_time)
-    app.config["OIDC_CLIENT_FACTORY"] = factory
-    app.config["OIDC_IDP_PROFILES"] = profiles
-
-    # Prepare a device session that has “expired” to force the extension path
-    sess = copy.deepcopy(base_session)
-    sess.session_metadata.system = {
-        "device_session": True,
-        "allow_automatic_refresh": True,
-    }
-    sess.expires_at = now - 1
-
-    # Drive exactly one session with TTL below token_expiry_threshold
-    monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
-    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
-    monkeypatch.setattr(store, "get_ttl", lambda s: 10)
-
-    # Stub out update_session to mirror real behavior
-    updated = []
-    def fake_update_session(session_id, session_data):
-        # frozen_time == time.time() in this test
-        session_data.updated_at = frozen_time
-        session_data.expires_at = session_data.updated_at + store.ttl
-        updated.append((session_id, session_data))
-
-    monkeypatch.setattr(store, "update_session", fake_update_session)
-
-    # Run one iteration (should raise StopIteration at loop end)
-    with app.app_context():
-        with pytest.raises(StopIteration):
-            run_refresh_worker(app)
-
-    # We expect exactly one session-extension audit event
-    assert any(ev == "device_session_extended" for ev, _ in audit_calls), \
-        f"got audit events {audit_calls}"
-
-    # update_session should have been called once for our SID
-    assert len(updated) == 1
-    called_sid, new_sess = updated[0]
-    assert called_sid == sid
-
-    # expires_at must equal frozen_time + store.ttl
-    assert new_sess.expires_at == now + store.ttl
 
 def test_device_access_token_refresh(app,
                                      store,
@@ -321,8 +275,8 @@ def test_device_access_token_refresh(app,
     events = [ev for ev, _ in audit_calls]
     assert "access_token_refreshed" in events
 
-    # And the worker should then have extended the session
-    assert "device_session_extended" in events
+    # And the worker should then have emitted the device session updated event
+    assert "device_session_updated" in events
 
     # We must have called update_session exactly once
     assert len(updated) == 1
