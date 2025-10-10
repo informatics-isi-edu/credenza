@@ -129,8 +129,6 @@ class SessionStore:
         now = time.time()
         if expires_at is None:
             expires_at = (now + self.ttl)
-        else:
-            self.ttl = int(expires_at - now)
 
         session_data = SessionData(
             id_token=id_token,
@@ -152,7 +150,7 @@ class SessionStore:
 
         session_key = access_token if use_access_token_as_session_key else self.generate_session_key()
         self.map_session(session_key, session_id)
-        self.backend.setex(self._key(session_id), session_json, self.ttl)
+        self.backend.setex(self._key(session_id), session_json, int(expires_at - now))
 
         logger.debug(f"Created session {session_id} (realm={realm})")
         return session_key, session_data
