@@ -15,6 +15,7 @@
 #
 import copy
 import time
+import logging
 import pytest
 from credenza.api import util as um
 from credenza.refresh import refresh_worker as rw
@@ -294,3 +295,37 @@ def test_device_access_token_refresh(app,
     # Finally, the session TTL was bumped by update_session
     assert new_sess.expires_at == frozen_time + store.ttl
 
+
+def test_worker_survives_pass_exception(app,
+                                        store,
+                                        profiles,
+                                        frozen_time,
+                                        monkeypatch,
+                                        caplog):
+    """
+    With only a pass-level try/except, an exception raised for one session
+    aborts the current pass but must NOT kill the worker thread. We verify
+    the exception is logged and the loop reaches the sleep (triggering
+    StopIteration via the break_loop fixture).
+    """
+    app.config["OIDC_IDP_PROFILES"] = profiles
+
+    sid_bad = "BAD"
+
+    # Present a single 'bad' session which will raise on get_session_data
+    monkeypatch.setattr(store, "list_session_ids", lambda: [sid_bad])
+    monkeypatch.setattr(store, "get_session_data", lambda _sid: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    # Keep other store methods inert if somehow called
+    monkeypatch.setattr(store, "update_session", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(store, "delete_session", lambda *a, **k: None, raising=False)
+
+    with app.app_context(), caplog.at_level(logging.ERROR):
+        # The worker should catch the exception at pass level and continue to the sleep,
+        # where the break_loop fixture raises StopIteration to end the test quickly.
+        with pytest.raises(StopIteration):
+            run_refresh_worker(app)
+
+    # Ensure our pass-level handler logged the unhandled exception
+    assert any("Unhandled exception in refresh pass" in rec.getMessage() for rec in caplog.records), \
+        "Expected pass-level exception log not found"
