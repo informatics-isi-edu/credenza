@@ -73,7 +73,7 @@ class PostgreSQLBackend:
     """
     A simple PostgreSQL-based key-value store with TTL support and pooled psycopg2 connections.
     """
-    def __init__(self, url: str = "postgresql:///credenza", idle_timeout: int = 60):
+    def __init__(self, url: str = "postgresql:///credenza", idle_timeout: int = 60, trace = False):
         # TODO: figure out what idle_timeout would even mean here with pooling??
         # TODO: add configuration for minconn, maxconn here?
         self.dsn = url
@@ -82,16 +82,19 @@ class PostgreSQLBackend:
         self.pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, dsn=url, connection_factory=connection)
         logger.debug(f"Using threaded connection pool for PostgreSQL: minconn={minconn} maxconn={maxconn} url={self.dsn}")
         self.idle_timeout = idle_timeout
+        self.trace = trace
 
     def _get_conn(self):
         conn = self.pool.getconn()
-        logger.debug(f"Got pooled connection dsn={conn.dsn} status={conn.status}")
+        if self.trace:
+            logger.debug(f"Got pooled connection dsn={conn.dsn} status={conn.status}")
         conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_REPEATABLE_READ)
         return conn
 
     def _put_conn(self, conn):
         if conn is not None:
-            logger.debug(f"Returning connection to pool dsn={conn.dsn} status={conn.status}")
+            if self.trace:
+                logger.debug(f"Returning connection to pool dsn={conn.dsn} status={conn.status}")
             self.pool.putconn(conn)
 
     def close(self):
