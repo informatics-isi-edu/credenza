@@ -78,7 +78,7 @@ class PostgreSQLBackend:
         # TODO: add configuration for minconn, maxconn here?
         self.dsn = url
         minconn = 1 # need to keep an idle connection open to really benefit from pool?
-        maxconn = 4
+        maxconn = 6
         self.pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, dsn=url, connection_factory=connection)
         logger.debug(f"Using threaded connection pool for PostgreSQL: minconn={minconn} maxconn={maxconn} url={self.dsn}")
         self.idle_timeout = idle_timeout
@@ -88,7 +88,7 @@ class PostgreSQLBackend:
         conn = self.pool.getconn()
         if self.trace:
             logger.debug(f"Got pooled connection dsn={conn.dsn} status={conn.status}")
-        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_REPEATABLE_READ)
+        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_READ_COMMITTED)
         return conn
 
     def _put_conn(self, conn):
