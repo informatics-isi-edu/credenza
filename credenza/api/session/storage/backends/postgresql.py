@@ -78,7 +78,7 @@ class PostgreSQLBackend:
         # TODO: add configuration for minconn, maxconn here?
         self.dsn = url
         minconn = 1 # need to keep an idle connection open to really benefit from pool?
-        maxconn = 6
+        maxconn = 32 # temp - fix to smaller default after configurability is in place
         self.pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, dsn=url, connection_factory=connection)
         logger.debug(f"Using threaded connection pool for PostgreSQL: minconn={minconn} maxconn={maxconn} url={self.dsn}")
         self.idle_timeout = idle_timeout
