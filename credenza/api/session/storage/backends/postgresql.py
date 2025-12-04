@@ -123,8 +123,8 @@ class PostgreSQLBackend:
             conn = None
             return result
         except Exception as e:
-            # fall through to finally, but save exception
             error = e
+            raise
         finally:
             if conn is not None:
                 logger.warning(f"Closing pooled connection due to error={error}")
