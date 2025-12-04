@@ -222,6 +222,8 @@ def create_app():
     app.config.from_prefixed_env(prefix="CREDENZA")
     init_logging(app)
     load_config(app)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"Config loaded: {app.config}")
     init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
                       use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
     app.config["OIDC_CLIENT_FACTORY"] = OIDCClientFactory(app.config["OIDC_IDP_PROFILES"])
