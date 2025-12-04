@@ -147,6 +147,41 @@ def init_logging(app):
     logger.addHandler(log_handler)
     logger.setLevel(logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
+def load_serialized_kwargs(raw_value) -> dict:
+    """
+    Safely parse a kwargs-like JSON string config to a dict.
+
+    - None or empty/whitespace-only -> {}
+    - Invalid JSON -> logs and returns {}
+    - JSON that is not an object -> logs and returns {}
+    """
+    if raw_value is None:
+        return {}
+
+    if isinstance(raw_value, str):
+        raw = raw_value.strip()
+        if not raw:
+            return {}
+    else:
+        # If someone has already put a dict here, just normalize.
+        if isinstance(raw_value, dict):
+            return raw_value
+        raw = str(raw_value).strip()
+        if not raw:
+            return {}
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in serialized kwargs={raw!r}; using empty dict: {e}")
+        return {}
+
+    if not isinstance(parsed, dict):
+        logger.warning(f"Serialized kwargs should be a JSON object; got {type(parsed).__name__}; using empty dict")
+        return {}
+
+    return parsed
+
 def create_app():
     app = Flask(__name__)
 
@@ -201,7 +236,8 @@ def create_app():
 
     # Create the storage backend and instantiate the session store
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),
-                                             url=app.config.get("STORAGE_BACKEND_URL"))
+                                             url=app.config.get("STORAGE_BACKEND_URL"),
+                                             kwargs=load_serialized_kwargs(app.config.get("STORAGE_BACKEND_KWARGS")))
 
     app.config["SESSION_STORE"] = SessionStore(
         storage_backend,
