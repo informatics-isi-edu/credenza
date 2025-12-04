@@ -83,13 +83,15 @@ def load_config(app):
 
     _ENV_PREFIX = "CREDENZA_"
     def decode_json(v):
-        try:
-            return json.loads(v)
-        except:
-            return v
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return v
+        return v
     app.config.update({
         # strip _ENV_PREFIX when copying
-        (k[len(_ENV_PREFIX):], decode_json(v))
+        k[len(_ENV_PREFIX):]: decode_json(v)
         for k, v in env_config.items()
         if k.startswith(_ENV_PREFIX)
     })
