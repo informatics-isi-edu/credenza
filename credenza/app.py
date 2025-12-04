@@ -241,7 +241,7 @@ def create_app():
     # Create the storage backend and instantiate the session store
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),
                                              url=app.config.get("STORAGE_BACKEND_URL"),
-                                             kwargs=load_serialized_kwargs(app.config.get("STORAGE_BACKEND_KWARGS")))
+                                             **load_serialized_kwargs(app.config.get("STORAGE_BACKEND_KWARGS")))
 
     app.config["SESSION_STORE"] = SessionStore(
         storage_backend,
