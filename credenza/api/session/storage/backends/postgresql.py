@@ -73,13 +73,12 @@ class PostgreSQLBackend:
     """
     A simple PostgreSQL-based key-value store with TTL support and pooled psycopg2 connections.
     """
-    def __init__(self, **kwargs):
-        self.dsn = kwargs.get("url", "postgresql:///credenza")
-        minconn = kwargs.get("minconn", 1) # need to keep an idle connection open to really benefit from pool?
-        maxconn = kwargs.get("maxconn", 8)
-        self.trace = kwargs.get("trace", False)
+    def __init__(self, url="postgresql:///credenza", minconn=1, maxconn=8, trace=False):
+        self.dsn = url
+        self.trace = trace
         self.pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, dsn=self.dsn, connection_factory=connection)
         logger.debug(f"Using threaded connection pool for PostgreSQL: minconn={minconn} maxconn={maxconn} url={self.dsn}")
+
     def _get_conn(self):
         conn = self.pool.getconn()
         if self.trace:
