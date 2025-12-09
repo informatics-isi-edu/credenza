@@ -153,6 +153,9 @@ def load_serialized_kwargs(raw):
    if not raw:
       return {}
 
+   if isinstance(raw, dict):
+       return raw
+
    try:
       parsed = json.loads(raw)
 
