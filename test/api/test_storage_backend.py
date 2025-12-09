@@ -57,7 +57,7 @@ def backend(request, monkeypatch):
     elif request.param == "postgresql":
         if platform.system() == "Windows":
             pytest.skip("PostgreSQL backend tests are skipped on Windows")
-        return PostgreSQLBackend(url=postgresql.url())
+        return PostgreSQLBackend(url=postgresql.url(), trace=True)
     else:
         raise RuntimeError("Unsupported backend")
 

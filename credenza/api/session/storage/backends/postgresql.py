@@ -73,16 +73,11 @@ class PostgreSQLBackend:
     """
     A simple PostgreSQL-based key-value store with TTL support and pooled psycopg2 connections.
     """
-    def __init__(self, url: str = "postgresql:///credenza", idle_timeout: int = 60, trace = False):
-        # TODO: figure out what idle_timeout would even mean here with pooling??
-        # TODO: add configuration for minconn, maxconn here?
+    def __init__(self, url="postgresql:///credenza", minconn=1, maxconn=8, trace=False):
         self.dsn = url
-        minconn = 1 # need to keep an idle connection open to really benefit from pool?
-        maxconn = 32 # temp - fix to smaller default after configurability is in place
-        self.pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, dsn=url, connection_factory=connection)
-        logger.debug(f"Using threaded connection pool for PostgreSQL: minconn={minconn} maxconn={maxconn} url={self.dsn}")
-        self.idle_timeout = idle_timeout
         self.trace = trace
+        self.pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, dsn=self.dsn, connection_factory=connection)
+        logger.debug(f"Using threaded connection pool for PostgreSQL: minconn={minconn} maxconn={maxconn} url={self.dsn}")
 
     def _get_conn(self):
         conn = self.pool.getconn()

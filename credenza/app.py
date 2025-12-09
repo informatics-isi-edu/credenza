@@ -83,13 +83,15 @@ def load_config(app):
 
     _ENV_PREFIX = "CREDENZA_"
     def decode_json(v):
-        try:
-            return json.loads(v)
-        except:
-            return v
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return v
+        return v
     app.config.update({
         # strip _ENV_PREFIX when copying
-        (k[len(_ENV_PREFIX):], decode_json(v))
+        k[len(_ENV_PREFIX):]: decode_json(v)
         for k, v in env_config.items()
         if k.startswith(_ENV_PREFIX)
     })
@@ -147,6 +149,26 @@ def init_logging(app):
     logger.addHandler(log_handler)
     logger.setLevel(logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
+def load_serialized_kwargs(raw):
+   if not raw:
+      return {}
+
+   if isinstance(raw, dict):
+       return raw
+
+   try:
+      parsed = json.loads(raw)
+
+      if not isinstance(parsed, dict):
+         logger.warning(f"Serialized kwargs should be a JSON object; got {type(parsed).__name__}; using empty dict")
+         return {}
+
+      return parsed
+
+   except Exception as e:
+      logger.warning(f"Invalid JSON in serialized kwargs={raw!r}; using empty dict: {e}")
+      return {}
+
 def create_app():
     app = Flask(__name__)
 
@@ -185,6 +207,9 @@ def create_app():
     app.config.from_prefixed_env(prefix="CREDENZA")
     init_logging(app)
     load_config(app)
+    # if logger.isEnabledFor(logging.DEBUG):
+    #     logger.debug(f"Config loaded: {app.config}")
+
     init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
                       use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
     app.config["OIDC_CLIENT_FACTORY"] = OIDCClientFactory(app.config["OIDC_IDP_PROFILES"])
@@ -201,7 +226,8 @@ def create_app():
 
     # Create the storage backend and instantiate the session store
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),
-                                             url=app.config.get("STORAGE_BACKEND_URL"))
+                                             url=app.config.get("STORAGE_BACKEND_URL"),
+                                             **load_serialized_kwargs(app.config.get("STORAGE_BACKEND_KWARGS")))
 
     app.config["SESSION_STORE"] = SessionStore(
         storage_backend,
