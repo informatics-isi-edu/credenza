@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 
 TRANSIENT_DATA_TTL=900
 
-SESSION_TYPE = enum.StrEnum("SessionType", ["user", "service"])
+class SessionType(str, enum.Enum):
+    user = "user"
+    service = "service"
+
 
 @dataclass
 class SessionMetadata:
@@ -132,7 +135,7 @@ class SessionStore:
                        use_access_token_as_session_key=False,
                        expires_at=None,
                        session_ttl=None,
-                       session_type=SESSION_TYPE.user) -> Tuple[Optional[str], Optional[SessionData]]:
+                       session_type=SessionType.user) -> Tuple[Optional[str], Optional[SessionData]]:
         now = time.time()
         if expires_at is None:
             expires_at = (now + self.ttl)

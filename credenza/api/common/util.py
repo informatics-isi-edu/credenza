@@ -31,7 +31,7 @@ from Cryptodome.Random import get_random_bytes
 from flask import current_app, request, make_response, Request, Response, abort, jsonify, g
 from requests import HTTPError, Timeout, ConnectionError
 from urllib.parse import urlparse
-from ..session.storage.session_store import SessionData, SESSION_TYPE
+from ..session.storage.session_store import SessionData, SessionType
 from ..auth.service.adapters.base import DEFAULT_MAX_ABSOLUTE_LIFETIME
 from ...telemetry import audit_event
 
@@ -109,7 +109,7 @@ def get_current_session() -> Tuple[Optional[str], Optional[SessionData]]:
 
     store = current_app.config["SESSION_STORE"]
     sid, session = store.get_session_by_session_key(skey)
-    if session and session.session_type == SESSION_TYPE.service:
+    if session and session.session_type == SessionType.service:
         policy = (session.session_metadata.system or {}).get("service_policy") or {}
         abs_life = int(policy.get("absolute_lifetime_seconds") or DEFAULT_MAX_ABSOLUTE_LIFETIME)
         # Absolute lifetime: never extend past created_at + abs_life
@@ -327,7 +327,7 @@ def refresh_additional_tokens(sid, session):
 
 
 def revoke_tokens(sid, session):
-    if session.session_type == SESSION_TYPE.service:
+    if session.session_type == SessionType.service:
         return
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")

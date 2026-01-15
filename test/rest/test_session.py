@@ -22,7 +22,7 @@ from credenza.rest import session as sm
 from credenza.api.common import util as um
 from credenza.rest.session import session_blueprint
 from credenza.api.session.storage import session_store as ss
-from credenza.api.session.storage.session_store import SESSION_TYPE
+from credenza.api.session.storage.session_store import SessionType
 from credenza.api.common.util import get_effective_scopes
 
 @pytest.fixture
@@ -457,7 +457,7 @@ def test_make_session_response_legacy(app, store, base_session):
 
 def test_get_session_service_missing_resource_403(monkeypatch, client, base_session):
     # Make the base session a service session with an audience
-    base_session.session_type = SESSION_TYPE.service
+    base_session.session_type = SessionType.service
     base_session.userinfo["aud"] = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-miss", base_session))
@@ -467,7 +467,7 @@ def test_get_session_service_missing_resource_403(monkeypatch, client, base_sess
 
 
 def test_get_session_service_wrong_resource_403(monkeypatch, client, base_session):
-    base_session.session_type = SESSION_TYPE.service
+    base_session.session_type = SessionType.service
     base_session.userinfo["aud"] = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-wrong", base_session))
@@ -477,7 +477,7 @@ def test_get_session_service_wrong_resource_403(monkeypatch, client, base_sessio
 
 
 def test_get_session_service_multiple_resources_one_matches_200(monkeypatch, client, base_session):
-    base_session.session_type = SESSION_TYPE.service
+    base_session.session_type = SessionType.service
     base_session.userinfo["aud"] = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-ok", base_session))
@@ -491,7 +491,7 @@ def test_get_session_service_multiple_resources_one_matches_200(monkeypatch, cli
 
 
 def test_get_session_service_aud_as_string_normalized_200(monkeypatch, client, base_session):
-    base_session.session_type = SESSION_TYPE.service
+    base_session.session_type = SessionType.service
     base_session.userinfo["aud"] = "rest-api"  # single string; handler normalizes
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-str", base_session))
@@ -505,7 +505,7 @@ def test_get_session_service_aud_as_string_normalized_200(monkeypatch, client, b
 
 
 def test_put_session_service_missing_resource_403(monkeypatch, client, base_session):
-    base_session.session_type = SESSION_TYPE.service
+    base_session.session_type = SessionType.service
     base_session.userinfo["aud"] = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-miss", base_session))
@@ -516,7 +516,7 @@ def test_put_session_service_missing_resource_403(monkeypatch, client, base_sess
 
 def test_put_session_service_match_200(monkeypatch, client, base_session, store):
     # Make this a service session whose aud includes the requested resource
-    base_session.session_type = SESSION_TYPE.service
+    base_session.session_type = SessionType.service
     base_session.userinfo["aud"] = ["rest-api"]
 
     # Return our session from the handler
@@ -540,7 +540,7 @@ def test_put_session_service_match_200(monkeypatch, client, base_session, store)
 
 def test_get_session_user_ignores_resource(monkeypatch, client, base_session):
     # Ensure user session path ignores 'resource' entirely
-    base_session.session_type = SESSION_TYPE.user
+    base_session.session_type = SessionType.user
     base_session.userinfo["aud"] = ["some-other-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("user-ok", base_session))
@@ -557,7 +557,7 @@ def test_put_session_service_ttl_clamped_to_max_ttl_200_and_persisted(
     cap = now + max_ttl
 
     sess = copy.deepcopy(base_session)
-    sess.session_type = SESSION_TYPE.service
+    sess.session_type = SessionType.service
     sess.userinfo["aud"] = ["rest-api"]
     sess.created_at = now - 10
     sess.expires_at = now + 99999  # > cap -> clamp should fire
@@ -594,7 +594,7 @@ def test_put_session_service_ttl_clamped_to_max_ttl_200_and_persisted(
 def test_get_session_service_empty_aud_misconfig_403(monkeypatch, client, base_session, audit_calls):
     # Make a service session with an empty/missing aud claim
     sess = copy.deepcopy(base_session)
-    sess.session_type = SESSION_TYPE.service
+    sess.session_type = SessionType.service
 
     # Option A: explicit empty list
     sess.userinfo["aud"] = []

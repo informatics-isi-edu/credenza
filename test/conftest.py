@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from credenza.rest import session as sm
 from credenza.api.common.util import AESGCMCodec
-from credenza.api.session.storage.session_store import SessionStore, SessionData, SessionMetadata, SESSION_TYPE
+from credenza.api.session.storage.session_store import SessionStore, SessionData, SessionMetadata, SessionType
 from credenza.api.auth.client.oidc_client import OIDCClientFactory, OIDCClient
 
 COOKIE_NAME = "credenza-test"
@@ -137,7 +137,7 @@ def base_session():
         created_at=now - 100,
         updated_at=now - 50,
         realm="test",
-        session_type=SESSION_TYPE.user,
+        session_type=SessionType.user,
         session_metadata=metadata,
         additional_tokens={}
     )

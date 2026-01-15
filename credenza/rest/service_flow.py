@@ -17,7 +17,7 @@ import time
 from dataclasses import asdict
 from typing import Dict, Tuple, Optional, List
 from flask import Blueprint, request, jsonify, abort, current_app
-from ..api.session.storage.session_store import SessionStore, SESSION_TYPE
+from ..api.session.storage.session_store import SessionStore, SessionType
 from ..api.common.util import get_current_session, client_ip, limit_or_429, route_label, perf_logged, ip_rate_limited
 from ..api.auth.service.adapters.base import ProofContext, ServicePolicy, DEFAULT_SERVICE_AUTH_URN
 from ..api.auth.service.adapters.aws_presigned import AwsPresignedAdapter
@@ -200,7 +200,7 @@ def revoke_service_token():
     store: SessionStore = current_app.config["SESSION_STORE"]
 
     # Only service tokens are revocable here; user sessions should use user logout
-    if session.session_type != SESSION_TYPE.service:
+    if session.session_type != SessionType.service:
         audit_event(
             "service_token_revoke_denied",
             session_id=sid,
@@ -249,7 +249,7 @@ def issue(
     sid = store.generate_session_id()
     session_key, _session_data = store.create_session(
         session_id=sid,
-        session_type=SESSION_TYPE.service,
+        session_type=SessionType.service,
         access_token=store.generate_session_key(),
         scopes=authz["scopes"],
         realm=authz["realm"],

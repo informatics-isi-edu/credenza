@@ -16,7 +16,7 @@
 import time
 import logging
 from ..api.common.util import refresh_access_token, refresh_additional_tokens, revoke_tokens
-from ..api.session.storage.session_store import SESSION_TYPE
+from ..api.session.storage.session_store import SessionType
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def run_refresh_worker(app):
                 if not session:
                     continue
 
-                if session.session_type == SESSION_TYPE.service:
+                if session.session_type == SessionType.service:
                     continue
 
                 realm = session.realm

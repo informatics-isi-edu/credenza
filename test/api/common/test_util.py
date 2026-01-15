@@ -24,7 +24,7 @@ from werkzeug.exceptions import HTTPException, NotFound
 from credenza.api.common import util
 from credenza.api.common.util import get_tokens_by_scope, get_cookie_domain
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
-from credenza.api.session.storage.session_store import SessionData, SessionMetadata, SESSION_TYPE
+from credenza.api.session.storage.session_store import SessionData, SessionMetadata, SessionType
 
 
 def test_decrypt_invalid_ciphertext_returns_none():
@@ -142,7 +142,7 @@ def test_get_current_session_service_absolute_lifetime_exceeded_401_deletes_and_
     now = 1_700_000_000  # deterministic "current" time
 
     sess = copy.deepcopy(base_session)
-    sess.session_type = SESSION_TYPE.service
+    sess.session_type = SessionType.service
     sess.created_at = now - 100  # created exactly abs_life seconds ago => hard_stop == now
     sess.expires_at = now + 10_000
 
@@ -293,7 +293,7 @@ def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app):
         def __init__(self):
             self.userinfo = userinfo
             self.realm = realm
-            self.session_type = SESSION_TYPE.user
+            self.session_type = SessionType.user
             self.session_metadata = SessionMetadata()
 
     # Fake token map by scope

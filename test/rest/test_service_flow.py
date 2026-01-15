@@ -15,7 +15,7 @@
 import pytest
 from types import SimpleNamespace
 from credenza.rest import service_flow as sf
-from credenza.api.session.storage.session_store import SESSION_TYPE
+from credenza.api.session.storage.session_store import SessionType
 from credenza.api.auth.service.adapters.base import ProofContext
 
 
@@ -185,7 +185,7 @@ def test_issue_creates_service_session_with_expected_fields(monkeypatch):
 
     # Verify create_session() call contract
     assert calls["session_id"] == "SID-1"
-    assert calls["session_type"] == SESSION_TYPE.service
+    assert calls["session_type"] == SessionType.service
     assert calls["access_token"] == "AT-1"
     assert calls["scopes"] == ["s1", "s2"]
     assert calls["realm"] == "test"
@@ -454,7 +454,7 @@ def test_issue_service_token_success_200(client, audit_calls, monkeypatch, app):
 
 def test_revoke_service_token_denied_non_service_403(client, audit_calls, monkeypatch, app, store):
     # Handler uses imported get_current_session from util; patch the local symbol
-    sess = SimpleNamespace(session_type=SESSION_TYPE.user, realm="test", userinfo={"sub": "u"})
+    sess = SimpleNamespace(session_type=SessionType.user, realm="test", userinfo={"sub": "u"})
     monkeypatch.setattr(sf, "get_current_session", lambda: ("sid-user", sess))
 
     with app.app_context():
@@ -472,7 +472,7 @@ def test_revoke_service_token_denied_non_service_403(client, audit_calls, monkey
 
 
 def test_revoke_service_token_success_204(client, audit_calls, monkeypatch, app, store):
-    sess = SimpleNamespace(session_type=SESSION_TYPE.service, realm="test", userinfo={"sub": "svc-123"})
+    sess = SimpleNamespace(session_type=SessionType.service, realm="test", userinfo={"sub": "svc-123"})
     monkeypatch.setattr(sf, "get_current_session", lambda: ("sid-svc", sess))
 
     with app.app_context():

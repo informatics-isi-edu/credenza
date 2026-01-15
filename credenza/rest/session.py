@@ -21,7 +21,7 @@ from ..api.common.util import get_current_session, get_effective_scopes, make_js
     refresh_additional_tokens, revoke_tokens, get_augmentation_provider, strtobool, perf_logged
 from ..api.common.claim_mapper import resolve_claim
 from ..api.auth.service.adapters.base import DEFAULT_MAX_TTL
-from ..api.session.storage.session_store import SessionData, SESSION_TYPE
+from ..api.session.storage.session_store import SessionData, SessionType
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def get_session():
 
     realm = session.realm
     sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email") if session.session_type == SESSION_TYPE.user else session.userinfo.get("name")
+    user = session.userinfo.get("email") if session.session_type == SessionType.user else session.userinfo.get("name")
 
     # Normalize token 'aud' claim (could be str or list from the session store/userinfo)
     aud_raw = session.userinfo.get("aud") or []
@@ -71,7 +71,7 @@ def get_session():
         aud = []
     aud_claim = {s for a in aud if isinstance(a, str) and (s := a.strip())}
 
-    if session.session_type == SESSION_TYPE.service:
+    if session.session_type == SessionType.service:
         # Audience binding for service/M2M tokens at introspection.
         # - Accept multiple resource hints via repeated query params: ?resource=A&resource=B
         # - Enforce ONLY for service sessions; user sessions skip audience checks entirely, as these have already been
@@ -122,7 +122,7 @@ def get_session():
 
     if request.method == "PUT":
 
-        if session.session_type == SESSION_TYPE.service:
+        if session.session_type == SessionType.service:
             policy = (session.session_metadata.system or {}).get("service_policy") or {}
             max_ttl = int(policy.get("max_ttl_seconds") or DEFAULT_MAX_TTL)
             now_i = int(now)
