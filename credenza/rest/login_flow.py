@@ -19,8 +19,8 @@ import uuid
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify, g
 from ..api.session.storage.session_store import TRANSIENT_DATA_TTL
-from ..api.util import has_current_session, get_effective_scopes, generate_nonce, augment_session, get_cookie_domain, \
-    revoke_tokens, safe_referrer, is_transient_request_error
+from ..api.common.util import has_current_session, get_effective_scopes, generate_nonce, augment_session, \
+    get_cookie_domain, revoke_tokens, safe_referrer, is_transient_request_error, perf_logged
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 login_blueprint = Blueprint("login", __name__)
 
 @login_blueprint.route("/login")
+@perf_logged(warn_ms=1000)
 def login():
 
     factory = current_app.config["OIDC_CLIENT_FACTORY"]
@@ -72,6 +73,7 @@ def login():
     return redirect(auth_url)
 
 @login_blueprint.route("/callback")
+@perf_logged(warn_ms=1000)
 def callback():
     err = request.args.get("error")
     if err:
@@ -103,7 +105,7 @@ def callback():
         if now - int(authn_request_ctx.get("created_at", 0)) > TRANSIENT_DATA_TTL:
             abort(400, description="State expired")
 
-        code_verifier =authn_request_ctx.get("code_verifier")
+        code_verifier = authn_request_ctx.get("code_verifier")
         if current_app.config.get("ENABLE_PKCE", True) and not code_verifier:
             abort(400, "Missing PKCE verifier")
 
@@ -191,6 +193,7 @@ def callback():
                 logger.exception(f"Failed to delete authn_request_ctx for state {state}")
 
 @login_blueprint.route("/logout", methods=["GET"])
+@perf_logged(warn_ms=1000)
 def logout():
     post_logout_redirect_uri = current_app.config.get("POST_LOGOUT_REDIRECT_URL", "/")
     sid = has_current_session()
@@ -246,6 +249,7 @@ def logout():
 
 # This is a webauthn2 legacy compatibility endpoint
 @login_blueprint.route("/preauth")
+@perf_logged(warn_ms=1000)
 def preauth():
     do_redirect = request.args.get('do_redirect')
     referrer_arg = request.args.get('referrer')

@@ -16,8 +16,6 @@
 import pytest
 import uuid
 import time
-import json
-import base64
 from unittest.mock import Mock
 from flask import g
 from urllib.parse import urlparse, parse_qs

@@ -18,8 +18,8 @@ import time
 import logging
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, redirect, abort, current_app, g
-from ..api.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, augment_session, \
-    revoke_tokens, strtobool
+from ..api.common.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, augment_session, \
+    revoke_tokens, strtobool, perf_logged
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ device_blueprint = Blueprint("device", __name__)
 DEVICE_TTL = 600  # 10 minutes
 
 @device_blueprint.route("/device/start", methods=["POST"])
+@perf_logged(warn_ms=1000)
 def start_device_flow():
     store = current_app.config["SESSION_STORE"]
     realm = current_app.config["DEFAULT_REALM"]
@@ -105,6 +106,7 @@ def verify_device(user_code):
     return redirect(auth_url)
 
 @device_blueprint.route("/device/callback", methods=["GET"])
+@perf_logged(warn_ms=1000)
 def device_callback():
     err = request.args.get("error")
     if err:
@@ -216,6 +218,7 @@ def device_callback():
     return "Device authorization complete. You may return to the device."
 
 @device_blueprint.route("/device/token", methods=["POST"])
+@perf_logged(warn_ms=1000)
 def poll_for_token():
     data = request.get_json()
     device_code = data.get("device_code")
@@ -251,6 +254,7 @@ def poll_for_token():
     })
 
 @device_blueprint.route("/device/logout", methods=["POST"])
+@perf_logged(warn_ms=1000)
 def device_logout():
     sid, session = get_current_session()
     store = current_app.config["SESSION_STORE"]

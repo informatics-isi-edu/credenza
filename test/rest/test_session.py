@@ -19,10 +19,11 @@ import pytest
 from datetime import datetime
 from werkzeug.exceptions import NotFound
 from credenza.rest import session as sm
-from credenza.api import util as um
+from credenza.api.common import util as um
 from credenza.rest.session import session_blueprint
-from credenza.api.util import get_effective_scopes
-
+from credenza.api.session.storage import session_store as ss
+from credenza.api.session.storage.session_store import SESSION_TYPE
+from credenza.api.common.util import get_effective_scopes
 
 @pytest.fixture
 def app(app, fake_current_session, monkeypatch):
@@ -452,3 +453,166 @@ def test_make_session_response_legacy(app, store, base_session):
     assert abs(expires_dt.timestamp() - base_session.expires_at) < 1
 
     assert resp["seconds_remaining"] == store.get_ttl("sid123")
+
+
+def test_get_session_service_missing_resource_403(monkeypatch, client, base_session):
+    # Make the base session a service session with an audience
+    base_session.session_type = SESSION_TYPE.service
+    base_session.userinfo["aud"] = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-miss", base_session))
+
+    resp = client.get("/session")  # no ?resource=
+    assert resp.status_code == 403
+
+
+def test_get_session_service_wrong_resource_403(monkeypatch, client, base_session):
+    base_session.session_type = SESSION_TYPE.service
+    base_session.userinfo["aud"] = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-wrong", base_session))
+
+    resp = client.get("/session?resource=files-api")
+    assert resp.status_code == 403
+
+
+def test_get_session_service_multiple_resources_one_matches_200(monkeypatch, client, base_session):
+    base_session.session_type = SESSION_TYPE.service
+    base_session.userinfo["aud"] = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-ok", base_session))
+
+    stub = {"ok": True}
+    monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
+
+    resp = client.get("/session?resource=files-api&resource=rest-api")
+    assert resp.status_code == 200
+    assert resp.json == stub
+
+
+def test_get_session_service_aud_as_string_normalized_200(monkeypatch, client, base_session):
+    base_session.session_type = SESSION_TYPE.service
+    base_session.userinfo["aud"] = "rest-api"  # single string; handler normalizes
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-str", base_session))
+
+    stub = {"ok": True}
+    monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
+
+    resp = client.get("/session?resource=rest-api")
+    assert resp.status_code == 200
+    assert resp.json == stub
+
+
+def test_put_session_service_missing_resource_403(monkeypatch, client, base_session):
+    base_session.session_type = SESSION_TYPE.service
+    base_session.userinfo["aud"] = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-miss", base_session))
+
+    resp = client.put("/session")  # no ?resource=
+    assert resp.status_code == 403
+
+
+def test_put_session_service_match_200(monkeypatch, client, base_session, store):
+    # Make this a service session whose aud includes the requested resource
+    base_session.session_type = SESSION_TYPE.service
+    base_session.userinfo["aud"] = ["rest-api"]
+
+    # Return our session from the handler
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-ok", base_session))
+
+    # Stub map_session so the backend doesn't receive None values
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+
+    # Optionally stub update_session to avoid touching real persistence paths
+    monkeypatch.setattr(store, "update_session", lambda sid, sess: ("dummy-map-key", sess))
+
+    # Avoid relying on the full response construction
+    stub = {"ok": True}
+    monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
+
+    # Audience intersects -> 200
+    resp = client.put("/session?resource=rest-api")
+    assert resp.status_code == 200
+    assert resp.json == stub
+
+
+def test_get_session_user_ignores_resource(monkeypatch, client, base_session):
+    # Ensure user session path ignores 'resource' entirely
+    base_session.session_type = SESSION_TYPE.user
+    base_session.userinfo["aud"] = ["some-other-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("user-ok", base_session))
+
+    resp = client.get("/session?resource=rest-api")
+    assert resp.status_code == 200
+
+
+def test_put_session_service_ttl_clamped_to_max_ttl_200_and_persisted(
+    monkeypatch, client, app, base_session, store, frozen_time, audit_calls):
+    sid = "svc-ttl-clamp"
+    now = int(frozen_time)
+    max_ttl = 3600
+    cap = now + max_ttl
+
+    sess = copy.deepcopy(base_session)
+    sess.session_type = SESSION_TYPE.service
+    sess.userinfo["aud"] = ["rest-api"]
+    sess.created_at = now - 10
+    sess.expires_at = now + 99999  # > cap -> clamp should fire
+
+    sess.session_metadata.system = dict(sess.session_metadata.system or {})
+    sess.session_metadata.system["service_policy"] = {
+        "max_ttl_seconds": max_ttl,
+        "require_proof_on_extend": False,
+    }
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda _sid: "SKEY")
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: None)
+
+    # Freeze handler and store time
+    monkeypatch.setattr(sm.time, "time", lambda: float(now))
+    monkeypatch.setattr(ss.time, "time", lambda: float(now))
+
+    with app.app_context():
+        app.config["SESSION_STORE"] = store
+        app.config["ENABLE_LEGACY_API"] = False
+
+    resp = client.put("/session?resource=rest-api")
+    assert resp.status_code == 200
+
+    persisted = store.get_session_data(sid)
+    assert int(persisted.expires_at) == cap
+    assert persisted.session_ttl == 0
+
+    events = [ev for ev, _ in audit_calls]
+    assert "service_session_ttl_clamped" in events, audit_calls
+
+
+def test_get_session_service_empty_aud_misconfig_403(monkeypatch, client, base_session, audit_calls):
+    # Make a service session with an empty/missing aud claim
+    sess = copy.deepcopy(base_session)
+    sess.session_type = SESSION_TYPE.service
+
+    # Option A: explicit empty list
+    sess.userinfo["aud"] = []
+
+    # If you prefer "missing key" instead, swap the above for:
+    # sess.userinfo.pop("aud", None)
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-empty-aud", sess))
+
+    resp = client.get("/session?resource=rest-api")
+    assert resp.status_code == 403
+
+    # Verify audit event + payload
+    matches = [(ev, kw) for ev, kw in audit_calls if ev == "service_session_audience_misconfig"]
+    assert matches, audit_calls
+
+    ev, kw = matches[-1]
+    assert kw["session_id"] == "svc-empty-aud"
+    assert kw["reason"] == "empty_aud_in_session"
+    # realm is implementation-specific; if you want, you can assert it exists:
+    assert "realm" in kw

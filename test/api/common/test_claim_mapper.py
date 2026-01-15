@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import pytest
 from copy import deepcopy
-from credenza.api.claim_mapper import DEFAULT_CLAIM_MAP, build_realm_claim_maps, get_claim_map_for_realm, resolve_claim
+from credenza.api.common.claim_mapper import DEFAULT_CLAIM_MAP, build_realm_claim_maps, get_claim_map_for_realm, resolve_claim
 
 def test_build_maps_applies_preset_on_exact_realm_name():
     profiles = {
@@ -43,7 +42,7 @@ def test_substring_choice_prefers_longest_match_when_multiple():
     # Artificial preset collision scenario: if you ever added overlapping names, longest wins.
     # For current presets this is mostly a safety net; we emulate by adding a temp preset.
     try:
-        from credenza.api import claim_mapper as cm
+        from credenza.api.common import claim_mapper as cm
         cm.IDP_PRESETS["kc"] = {"roles": [["realm_access", "roles"]]}
         profiles = {"my-kc-keycloak": {}}
         realm_maps = cm.build_realm_claim_maps(profiles)

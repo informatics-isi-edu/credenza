@@ -15,19 +15,25 @@
 #
 import json
 import time
+import uuid
 import base64
 import logging
 import ipaddress
-from typing import Optional
+import requests
+import functools
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
+from typing import Iterable, Optional, Set, Tuple
 from datetime import datetime, timezone
 from publicsuffix2 import get_sld
 from Cryptodome.Cipher import AES
 from Cryptodome.Random import get_random_bytes
-from flask import current_app, request, Response, abort
+from flask import current_app, request, make_response, Request, Response, abort, jsonify, g
 from requests import HTTPError, Timeout, ConnectionError
 from urllib.parse import urlparse
-from .session.storage.session_store import SessionData
-from ..telemetry import audit_event
+from ..session.storage.session_store import SessionData, SESSION_TYPE
+from ..auth.service.adapters.base import DEFAULT_MAX_ABSOLUTE_LIFETIME
+from ...telemetry import audit_event
 
 
 logger = logging.getLogger(__name__)
@@ -75,7 +81,7 @@ class AESGCMCodec:
             return None
 
 
-def extract_session_key() -> (str, bool):
+def extract_session_key() -> Tuple[str, bool]:
     auth = request.headers.get("Authorization")
     if auth and auth[:7].lower() == "bearer ":
         return auth[7:], True
@@ -83,7 +89,7 @@ def extract_session_key() -> (str, bool):
     return cookie_val, False
 
 
-def has_current_session() -> str or None:
+def has_current_session() -> Optional[str]:
     skey,_ = extract_session_key()
     if not skey:
         return None
@@ -96,13 +102,33 @@ def has_current_session() -> str or None:
     return sid
 
 
-def get_current_session() -> (str, SessionData):
+def get_current_session() -> Tuple[Optional[str], Optional[SessionData]]:
     skey, is_bearer_token = extract_session_key()
     if not skey:
         abort(404)
 
     store = current_app.config["SESSION_STORE"]
     sid, session = store.get_session_by_session_key(skey)
+    if session and session.session_type == SESSION_TYPE.service:
+        policy = (session.session_metadata.system or {}).get("service_policy") or {}
+        abs_life = int(policy.get("absolute_lifetime_seconds") or DEFAULT_MAX_ABSOLUTE_LIFETIME)
+        # Absolute lifetime: never extend past created_at + abs_life
+        if abs_life > 0:
+            now = int(time.time())
+            hard_stop = int(session.created_at) + abs_life
+            if now >= hard_stop:
+                store.delete_session(sid)
+                audit_event(
+                    "service_session_absolute_lifetime_exceeded",
+                    session_id=sid,
+                    realm=session.realm,
+                    created_at=session.created_at,
+                    absolute_lifetime_seconds=abs_life,
+                )
+                abort(401,
+                      description=
+                      f"Service session exceeded absolute lifetime")
+
     if sid and session:
         return sid, session
 
@@ -131,9 +157,11 @@ def get_augmentation_provider(realm=None):
     provider = providers.get(realm)
     return provider
 
+
 def get_augmentation_provider_params(realm=None):
     profile = current_app.config["OIDC_IDP_PROFILES"].get(get_realm(realm), {})
     return profile.get("session_augmentation_params", {})
+
 
 def augment_session(tokens, realm, userinfo, metadata):
     provider = get_augmentation_provider(realm)
@@ -160,6 +188,24 @@ def make_json_response(data):
         json.dumps(data, sort_keys=False),  # Preserve key order
         mimetype="application/json"
     )
+
+
+def route_label(req):
+    # Prefer the matched rule (shows which alias hit), else fallback to raw path
+    rule = getattr(req, "url_rule", None)
+    route = rule.rule if rule is not None else req.path
+    return f"{req.method} {route}"
+
+
+def limit_or_429(limiter, key, detail):
+    allowed, remaining, reset_s = limiter.allow(key)
+    if allowed:
+        return None, remaining, reset_s
+    resp = make_response(jsonify({"error": "rate_limited", "detail": detail}), 429)
+    resp.headers.update(limiter.headers(remaining, reset_s))
+    resp.headers["Retry-After"] = str(reset_s)
+    audit_event("request_rate_limited", detail=detail)
+    return resp, remaining, reset_s
 
 
 def get_effective_scopes(session: SessionData) -> list:
@@ -281,6 +327,8 @@ def refresh_additional_tokens(sid, session):
 
 
 def revoke_tokens(sid, session):
+    if session.session_type == SESSION_TYPE.service:
+        return
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
     realm = session.realm
@@ -379,3 +427,219 @@ def safe_referrer(url: str) -> str:# pragma: no cover
     if url.startswith("//"):
         return "/"
     return url
+
+def retrying_requests_session(
+    *,
+    total: int = 3,
+    connect: Optional[int] = None,   # defaults to 'total' if None
+    read: Optional[int] = None,
+    status: Optional[int] = None,
+    backoff_factor: float = 0.3,     # ~0.3, 0.6, 1.2s between attempts (exp)
+    status_forcelist: Iterable[int] = (500, 502, 503, 504),
+    allowed_methods: Optional[Set[str]] = frozenset({"GET"}),
+    pool_connections: int = 16,
+    pool_maxsize: int = 16) -> requests.Session:
+    """
+    Build a requests.Session configured to retry on transient errors.
+    - Retries: connect/read failures and the given 5xx codes.
+    - Never retries 4xx (e.g., SignatureDoesNotMatch).
+    - Honors Retry-After headers.
+    """
+    retry = Retry(
+        total=total,
+        connect=connect if connect is not None else total,
+        read=read if read is not None else total,
+        status=status if status is not None else total,
+        status_forcelist=set(status_forcelist),
+        allowed_methods=allowed_methods,   # None => retry on any; we restrict to GET
+        backoff_factor=backoff_factor,
+        respect_retry_after_header=True,
+        raise_on_redirect=False,
+        raise_on_status=False,             # we’ll inspect status ourselves
+    )
+    adapter = HTTPAdapter(max_retries=retry,
+                          pool_connections=pool_connections,
+                          pool_maxsize=pool_maxsize)
+    s = requests.Session()
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+
+def client_ip(req: Request) -> str:
+    """
+    Return the best-effort client IP for logging, audit, and rate limiting.
+
+    IMPORTANT: Assumptions & caveats about `request.remote_addr`
+
+    1) Direct exposure (no reverse proxy):
+       - `request.remote_addr` is the real client IP. Safe to use as-is.
+
+    2) Behind a reverse proxy (Traefik / NGINX Ingress / mod_proxy / cloud LB):
+       - By default, the app sees the proxy’s IP as `remote_addr`.
+       - So we MUST either:
+         a) enable Werkzeug ProxyFix in the app, and restrict trust to specific proxy IPs
+            (gunicorn: `--forwarded-allow-ips=<comma-separated literal IPs>`), or
+         b) on Apache/mod_wsgi, enable `mod_remoteip` with an explicit allowlist
+            (`RemoteIPTrustedProxy`), so Apache rewrites `REMOTE_ADDR` before the app.
+       - Only after (a) or (b) is correctly configured will `request.remote_addr`
+         reflect the true client IP (derived from `X-Forwarded-For`).
+
+    3) Don’t trust headers alone:
+       - Never trust `X-Forwarded-For` without a trust boundary. It is trivially spoofable.
+       - Gunicorn’s `--forwarded-allow-ips` (or Apache `RemoteIPTrustedProxy`) forms that boundary.
+         If the peer is not in the allowlist, forwarded headers are ignored.
+
+    4) Multiple proxy hops (e.g., cloud LB -> Traefik / NGINX Ingress / mod_proxy -> app):
+       - Set ProxyFix hop counts accordingly (x_for/x_proto/etc. = 2) OR configure Apache `mod_remoteip`
+         to trust both layers. Also include each proxy’s literal IP in the allowlist.
+       - If hop counts or allowlists are wrong, you’ll either see the proxy IP, or you’ll
+         accept spoofed headers—both are bad.
+
+    Summary:
+      - Prefer to fix client-IP derivation at the edge (Apache mod_remoteip) or enable ProxyFix
+        *with a strict allowlist*. After that, using `request.remote_addr` centrally here is correct.
+
+    """
+    # This relies on the app being configured correctly (ProxyFix or mod_remoteip).
+    ip = (req.remote_addr or "").strip()
+    return ip if ip else "unknown"
+
+
+def get_correlation_id(req) -> str:
+    # W3C Trace Context first
+    tp = req.headers.get("traceparent")
+    if tp:
+        return tp  # or parse to extract trace-id
+
+    # Common de-facto headers
+    for h in ("X-Request-Id", "X-Request-ID", "x-request-id",
+              "X-Correlation-Id", "X-Correlation-ID", "x-correlation-id",
+              "X-Amzn-Trace-Id", "x-amzn-trace-id"):
+        v = req.headers.get(h)
+        if v:
+            return v
+
+    # Last resort: generate one and expose it
+    rid = str(uuid.uuid4())
+
+    return rid
+
+def ip_rate_limited(unknown_bucket="10_per_min", normal_bucket="30_per_min"):
+    """
+    Decorator that enforces an IP-based rate limit and adds its headers
+    to the final response. Stashes details in g.rate_limit for handlers.
+
+    Set app.config["ENABLE_RATE_LIMITING"] = False to bypass entirely.
+
+    Usage:
+      @service_blueprint.route("/service/token", methods=["DELETE"])
+      @ip_rate_limited()
+      def revoke_service_token(): ...
+    """
+    def _decorator(fn):
+        @functools.wraps(fn)
+        def _wrapped(*args, **kwargs):
+            # Bypass completely if disabled (default: enabled)
+            try:
+                enabled = current_app.config.get("ENABLE_RATE_LIMITING", True)
+            except Exception:
+                enabled = True
+
+            if not enabled:
+                return fn(*args, **kwargs)
+
+            limits = current_app.extensions["rate_limits"]
+            ip = client_ip(request)
+            ip_key = f"ip:{ip}"
+            detail = f"Too many requests: {route_label(request)} from: {ip_key}"
+            bucket = limits[unknown_bucket] if ip == "unknown" else limits[normal_bucket]
+
+            resp, rem, reset = limit_or_429(bucket, ip_key, detail)
+            if resp is not None:
+                return resp  # already a proper 429
+
+            # stash for handler (optional)
+            g.rate_limit = {"bucket": bucket, "remaining": rem, "reset": reset}
+
+            rv = fn(*args, **kwargs)
+
+            # always attach IP bucket headers to the outgoing response
+            response = current_app.make_response(rv)
+            try:
+                response.headers.update(bucket.headers(rem, reset))
+            except Exception:
+                pass
+            return response
+
+        return _wrapped
+    return _decorator
+
+
+def perf_logged(*, warn_ms: int | None = None, logger=None, include_query=False):
+    """
+    Log total handler time with endpoint + rule inferred from the request.
+
+    Args:
+      warn_ms: log at WARNING if elapsed >= warn_ms, else DEBUG.
+      logger:  override logger; defaults to current_app.logger.
+      include_query: include the query string in the logged path.
+
+    Always logs, even on abort/exception. Never affects response flow.
+    """
+    def _decorator(fn):
+        @functools.wraps(fn)
+        def _wrap(*args, **kwargs):
+            start = time.perf_counter()
+            status = "-"
+            try:
+                rv = fn(*args, **kwargs)
+                return rv
+            finally:
+                # Do NOT return from finally
+                try:
+                    enabled = bool(getattr(current_app, "config", {}).get("DEBUG_PERF", False))
+                except Exception:
+                    enabled = False
+
+                if not enabled:
+                    # Skip logging silently
+                    pass
+                else:
+                    elapsed_ms = int((time.perf_counter() - start) * 1000)
+                    try:
+                        # Best-effort status extraction
+                        if "rv" in locals():
+                            try:
+                                status = make_response(rv).status_code
+                            except Exception:
+                                pass
+
+                        # Infer labels from the request
+                        endpoint = request.endpoint or "-"          # e.g. "session.get_session"
+                        rule     = getattr(request, "url_rule", None)
+                        rule_s   = rule.rule if rule else request.path
+                        path     = request.full_path if include_query else request.path
+
+                        # Short function name (after blueprint) if helpful
+                        # e.g., "session.get_session" -> "get_session"
+                        short_fn = endpoint.split(".")[-1] if endpoint else "-"
+
+                        # Compose message
+                        msg = (
+                            f"{request.method} {path} -> {status} "
+                            f"[rule={rule_s} endpoint={endpoint} fn={short_fn}] "
+                            f"took {elapsed_ms} ms"
+                        )
+
+                        log = logger or getattr(current_app, "logger", None)
+                        if log:
+                            if warn_ms is not None and elapsed_ms >= warn_ms:
+                                log.warning(msg)
+                            else:
+                                log.debug(msg)
+                    except Exception:
+                        # Never let logging break the response
+                        pass
+        return _wrap
+    return _decorator

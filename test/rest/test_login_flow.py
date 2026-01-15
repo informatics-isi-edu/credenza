@@ -21,7 +21,7 @@ from unittest.mock import Mock
 from urllib.parse import urlparse, parse_qs, unquote
 from credenza.rest import login_flow as lf
 from credenza.api.session.storage.session_store import TRANSIENT_DATA_TTL
-from credenza.api.oidc_client import OIDCClient
+from credenza.api.auth.client.oidc_client import OIDCClient
 from credenza.api.session.storage.session_store import SessionData
 from credenza.rest.login_flow import callback
 
@@ -273,7 +273,7 @@ def test_callback_deferred_augmentation(app, base_session, monkeypatch):
             return {"sub": "123", "email": "u@example.com", "groups": ["g1"]}, {"foo": "bar"}
 
     monkeypatch.setattr("credenza.rest.login_flow.augment_session", mock_augment)
-    monkeypatch.setattr("credenza.api.util.get_augmentation_provider_params",
+    monkeypatch.setattr("credenza.api.common.util.get_augmentation_provider_params",
                         lambda realm: {"defer_augmentation": True})
 
     # New: stub the client via the factory (instance patch is safer)

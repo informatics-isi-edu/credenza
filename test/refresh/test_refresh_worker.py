@@ -17,7 +17,7 @@ import copy
 import time
 import logging
 import pytest
-from credenza.api import util as um
+from credenza.api.common import util as um
 from credenza.refresh import refresh_worker as rw
 from credenza.refresh.refresh_worker import run_refresh_worker
 

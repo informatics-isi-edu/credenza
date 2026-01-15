@@ -20,19 +20,22 @@ from logging.handlers import SysLogHandler
 from pathlib import Path
 from threading import Thread
 from dotenv import dotenv_values
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from requests import RequestException, ConnectionError, Timeout
 from werkzeug.utils import import_string
 from werkzeug.exceptions import HTTPException, BadGateway, ServiceUnavailable
-from .api.oidc_client import OIDCClientFactory
+from werkzeug.middleware.proxy_fix import ProxyFix
+from .api.common.rate_limit import FixedWindowJitterLimiter
+from .api.auth.client.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
-from .api.claim_mapper import build_realm_claim_maps
-from .api.util import AESGCMCodec, is_browser_client
+from .api.common.claim_mapper import build_realm_claim_maps
+from .api.common.util import AESGCMCodec, is_browser_client, get_correlation_id
 from .rest.session import session_blueprint
 from .rest.login_flow import login_blueprint
 from .rest.device_flow import device_blueprint
 from .rest.discovery import discovery_blueprint
+from .rest.service_flow import service_blueprint
 from .telemetry.audit.logger import init_audit_logger
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker
@@ -107,6 +110,14 @@ def load_config(app):
             app.config["OIDC_IDP_PROFILES"] = json.load(f)
     else:
         app.config["OIDC_IDP_PROFILES"] = {}
+
+    # Optional service authentication (M2M) config
+    service_auth_path = app.config.get("SERVICE_AUTH_FILE", "config/service_auth.json")
+    if os.path.exists(service_auth_path):
+        with open(service_auth_path) as f:
+            app.config["SERVICE_AUTH"] = json.load(f)
+    else:
+        app.config["SERVICE_AUTH"] = {}
 
     # Optional trusted issuers
     trusted_path = app.config.get("TRUSTED_ISSUERS_FILE", "config/oidc_idp_trusted_issuers.json")
@@ -203,12 +214,28 @@ def create_app():
             response.headers["Pragma"] = "no-cache"
         return response
 
+    @app.after_request
+    def add_rid(resp):
+        rid = getattr(g, "rid", None) or get_correlation_id(request)
+        resp.headers.setdefault("X-Request-Id", rid)
+        return resp
+
     # Bootstrap app
     app.config.from_prefixed_env(prefix="CREDENZA")
     init_logging(app)
     load_config(app)
     # if logger.isEnabledFor(logging.DEBUG):
     #     logger.debug(f"Config loaded: {app.config}")
+
+    if app.config.get("ENABLE_PROXYFIX", False):
+        # Default: one proxy hop (Reverse Proxy -> Credenza)
+        proxy_depth = app.config.get("PROXYFIX_DEPTH", 1)
+        logger.info(f"Enabling ProxyFix with depth {proxy_depth}")
+        app.wsgi_app = ProxyFix(app.wsgi_app,
+                                x_for=proxy_depth,
+                                x_proto=proxy_depth,
+                                x_host=proxy_depth,
+                                x_port=proxy_depth)
 
     init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
                       use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
@@ -240,12 +267,19 @@ def create_app():
     app.register_blueprint(session_blueprint)
     app.register_blueprint(login_blueprint)
     app.register_blueprint(device_blueprint)
+    app.register_blueprint(service_blueprint)
     app.register_blueprint(metrics_blueprint)
     if app.config.get("ENABLE_LEGACY_API", False):
         app.register_blueprint(discovery_blueprint)
 
     if app.config.get("ENABLE_HEALTH_CHECK", True):
         enable_healthcheck(app)
+
+    app.extensions["rate_limits"] = {
+        "10_per_min": FixedWindowJitterLimiter(limit=10, window_sec=60),
+        "30_per_min": FixedWindowJitterLimiter(limit=30, window_sec=60),
+        "60_per_min": FixedWindowJitterLimiter(limit=60, window_sec=60),
+    }
 
     return app
 

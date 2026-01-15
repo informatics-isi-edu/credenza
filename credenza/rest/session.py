@@ -17,23 +17,35 @@ import time
 import logging
 from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
-from ..api.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
-    refresh_additional_tokens, revoke_tokens, get_augmentation_provider, strtobool, is_browser_client
-from ..api.claim_mapper import resolve_claim
-from ..api.session.storage.session_store import SessionData
+from ..api.common.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
+    refresh_additional_tokens, revoke_tokens, get_augmentation_provider, strtobool, perf_logged
+from ..api.common.claim_mapper import resolve_claim
+from ..api.auth.service.adapters.base import DEFAULT_MAX_TTL
+from ..api.session.storage.session_store import SessionData, SESSION_TYPE
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
 
 session_blueprint = Blueprint("session", __name__)
 
+
 @session_blueprint.route("/whoami", methods=["GET"])
+@perf_logged(warn_ms=1000)
 def whoami():
     sid, session = get_current_session()
-    return make_json_response(session.userinfo)
+    response = {
+        "remote_addr": request.remote_addr,
+        "xff": request.headers.get("X-Forwarded-For"),
+        "proto": request.headers.get("X-Forwarded-Proto")
+    }
+    response.update(session.userinfo)
+    return make_json_response(response)
+
 
 @session_blueprint.route("/session", methods=["GET", "PUT"])
+@perf_logged(warn_ms=1000, include_query=True)
 def get_session():
+
     try:
         upstream = strtobool(str(request.args.get("refresh_upstream", False)))
     except ValueError:
@@ -45,28 +57,106 @@ def get_session():
     store = current_app.config["SESSION_STORE"]
     now = time.time()
 
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    sub = session.userinfo.get("sub")
+    user = session.userinfo.get("email") if session.session_type == SESSION_TYPE.user else session.userinfo.get("name")
+
+    # Normalize token 'aud' claim (could be str or list from the session store/userinfo)
+    aud_raw = session.userinfo.get("aud") or []
+    if isinstance(aud_raw, str):
+        aud = [aud_raw]
+    elif isinstance(aud_raw, (list, tuple, set)):
+        aud = aud_raw
+    else:
+        aud = []
+    aud_claim = {s for a in aud if isinstance(a, str) and (s := a.strip())}
+
+    if session.session_type == SESSION_TYPE.service:
+        # Audience binding for service/M2M tokens at introspection.
+        # - Accept multiple resource hints via repeated query params: ?resource=A&resource=B
+        # - Enforce ONLY for service sessions; user sessions skip audience checks entirely, as these have already been
+        #   validated by the OIDC OP/RP flow.
+        # - Rationale: issuance != proper use. This prevents cross-service replay by requiring that
+        #   at least one requested resource matches the token's declared audiences.
+        resources = [s for r in request.args.getlist("resource") if isinstance(r, str) and (s := r.strip())][:64]
+
+        if not aud_claim:
+            audit_event(
+                "service_session_audience_misconfig",
+                session_id=sid,
+                realm=realm,
+                reason="empty_aud_in_session",
+            )
+            abort(403)
+
+        if not resources:
+            audit_event(
+                "service_session_audience_denied",
+                session_id=sid,
+                realm=realm,
+                requested_resources=[],
+                token_audiences=sorted(aud_claim),
+                reason="missing_resource_param",
+            )
+            abort(403)
+
+        if not (set(resources) & aud_claim):
+            audit_event(
+                "service_session_audience_denied",
+                session_id=sid,
+                realm=realm,
+                requested_resources=resources,
+                token_audiences=sorted(aud_claim),
+                reason="no_intersection",
+            )
+            abort(403)
+
+        # Successful service audience check
+        audit_event(
+            "service_session_audience_ok",
+            session_id=sid,
+            realm=realm,
+            requested_resources=resources,
+            token_audiences=sorted(aud_claim),
+        )
 
     if request.method == "PUT":
-        # Enforce max refreshable lifetime
-        session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
-        refresh_expires_at = session.session_metadata.system.get("refresh_expires_at")
-        if refresh_expires_at and now > (refresh_expires_at - session_expiry_threshold):
-            revoke_tokens(sid, session)
-            store.delete_session(sid)
-            audit_event("refresh_expired", session_id=sid)
-            abort(401, "Session has expired and can no longer be refreshed")
 
-        if upstream:
-            # Potentially refresh our access token from upstream, if we've got a refresh token to do so
-            refresh_access_token(sid, session)
-            # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
-            refresh_additional_tokens(sid, session)
-            # Enrich userinfo, if applicable
-            provider = get_augmentation_provider(realm)
-            provider.enrich_userinfo(session.userinfo, session.additional_tokens)
+        if session.session_type == SESSION_TYPE.service:
+            policy = (session.session_metadata.system or {}).get("service_policy") or {}
+            max_ttl = int(policy.get("max_ttl_seconds") or DEFAULT_MAX_TTL)
+            now_i = int(now)
+
+            # Clamp final expiry to max_ttl_seconds if configured
+            if max_ttl > 0:
+                cap = now_i + max_ttl
+                if session.expires_at > cap:
+                    session.expires_at = cap
+                    session.session_ttl = 0
+                    audit_event(
+                        "service_session_ttl_clamped",
+                        session_id=sid,
+                        realm=realm,
+                        clamped_expires_at=datetime.fromtimestamp(cap, timezone.utc).isoformat(),
+                        max_session_ttl_seconds=max_ttl)
+        else:
+            # enforce max refreshable lifetime for user sessions
+            session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
+            refresh_expires_at = session.session_metadata.system.get("refresh_expires_at")
+            if refresh_expires_at and now > (refresh_expires_at - session_expiry_threshold):
+                revoke_tokens(sid, session)
+                store.delete_session(sid)
+                audit_event("refresh_expired", session_id=sid)
+                abort(401, "Session has expired and can no longer be refreshed")
+
+            if upstream:
+                # Potentially refresh our access token from upstream, if we've got a refresh token to do so
+                refresh_access_token(sid, session)
+                # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
+                refresh_additional_tokens(sid, session)
+                # Enrich userinfo, if applicable
+                provider = get_augmentation_provider(realm)
+                provider.enrich_userinfo(session.userinfo, session.additional_tokens)
 
         skey, session_data = store.update_session(sid, session)
         audit_event("session_updated",
@@ -79,7 +169,9 @@ def get_session():
     response = make_session_response(sid, session)
     return make_json_response(response)
 
+
 @session_blueprint.route("/session", methods=["PATCH"])
+@perf_logged(warn_ms=1000)
 def patch_session():
     sid, _ = get_current_session()
     patch = request.get_json()
@@ -91,7 +183,9 @@ def patch_session():
     audit_event("session_metadata_patch", session_id=sid, metadata=patch)
     return jsonify({"status": "updated", "patched": patch})
 
+
 @session_blueprint.route("/session", methods=["DELETE"])
+@perf_logged(warn_ms=1000)
 def delete_session():
     if current_app.config.get("ENABLE_LEGACY_API", False):
         return redirect(f"{current_app.config['BASE_URL']}/logout", 303)
@@ -118,7 +212,6 @@ def _claim(session, key, fallback=None, *, listify=False):
     claim_map = maps.get(realm) or maps.get("default") or {}
     return resolve_claim(session.userinfo, claim_map, key, fallback, listify=listify)
 
-
 def make_session_response(sid, session: SessionData):
     response = {}
     store = current_app.config["SESSION_STORE"]
@@ -131,8 +224,9 @@ def make_session_response(sid, session: SessionData):
         preferred_username = _claim(session, "preferred_username", session.userinfo.get("preferred_username"))
 
         # format "client" object
+        client_id = f"{issuer}/{sub}" if issuer else sub
         client = {
-            "id": f"{issuer}/{sub}",
+            "id": client_id,
             "display_name": preferred_username,
             "full_name": full_name,
             "email": email,
@@ -142,14 +236,13 @@ def make_session_response(sid, session: SessionData):
         identities = []
         if identity_set:
             for ident in identity_set:
-                sub = ident.get("sub", ident.get("id", ident.get("userid")))
-                identities.append(f"{issuer}/{sub}")
+                ident_sub = ident.get("sub", ident.get("id", ident.get("userid")))
+                identities.append(f"{issuer}/{ident_sub}" if issuer else ident_sub)
         client["identities"] = identities
         response["client"] = client
 
         # format "attributes" array
         attributes = [client]
-        # Use resolver-backed groups so non-standard keys like 'cognito:groups' map correctly
         groups_claim = _claim(session, "groups", session.userinfo.get("groups", []), listify=True)
         groups = []
         for group in groups_claim:
@@ -183,6 +276,8 @@ def make_session_response(sid, session: SessionData):
             elif lv in ("0", "no"):
                 email_verified = "false"
 
+        _id = f"{iss}/{sub}" if iss else sub
+
         response.update(
             {
                 "preferred_username": preferred_username,
@@ -192,7 +287,7 @@ def make_session_response(sid, session: SessionData):
                 "sub":                sub,
                 "iss":                iss,
                 "aud":                aud,
-                "id":                 f"{iss}/{sub}",
+                "id":                 _id,
                 "userid":             userid,
                 "groups":             groups,
                 "roles":              roles,

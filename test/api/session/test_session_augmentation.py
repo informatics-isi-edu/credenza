@@ -17,8 +17,8 @@ import pytest
 import requests
 from types import SimpleNamespace
 from flask import g
-from werkzeug.exceptions import HTTPException, NotFound, Forbidden
-from credenza.api import util
+from werkzeug.exceptions import NotFound
+from credenza.api.common import util
 from credenza.api.session.storage.session_store import SessionData
 from credenza.api.session.augmentation import globus_provider
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider

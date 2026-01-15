@@ -91,3 +91,6 @@ ENV/
 
 # local Makefile products
 config/wsgi_credenza.conf
+
+# secrets
+/secrets/

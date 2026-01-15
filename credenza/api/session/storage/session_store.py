@@ -14,17 +14,20 @@
 # limitations under the License.
 #
 import time
+import enum
 import uuid
 import json
 import logging
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional
 from .backends.base import StorageBackend
 from .backends.memory import MemoryBackend
 
 logger = logging.getLogger(__name__)
 
 TRANSIENT_DATA_TTL=900
+
+SESSION_TYPE = enum.StrEnum("SessionType", ["user", "service"])
 
 @dataclass
 class SessionMetadata:
@@ -45,6 +48,8 @@ class SessionData:
     created_at: float
     updated_at: float
     realm: str
+    session_type: str
+    session_ttl: Optional[int] = None
     session_metadata: SessionMetadata = field(default_factory=SessionMetadata)
     additional_tokens: Dict[str, Any] = field(default_factory=dict)
 
@@ -77,10 +82,10 @@ class SessionStore:
     def generate_session_key() -> str:
         return str(uuid.uuid4().hex)
 
-    def _key(self, session_id):
+    def _key(self, session_id) -> str:
         return f"{self.prefix}{self.sid_prefix}{session_id}"
 
-    def map_session(self, session_key: str, session_id: str, ttl: int = None):
+    def map_session(self, session_key: str, session_id: str, ttl: int = None) -> None:
         """
         Store both directions of the mapping:
           skey:<session_key> -> session_id
@@ -90,7 +95,7 @@ class SessionStore:
         self.backend.setex(f"{self.prefix}{self.key_prefix}skey:{session_key}", session_id, ttl)
         self.backend.setex(f"{self.prefix}{self.key_prefix}sid:{session_id}", session_key, ttl)
 
-    def unmap_session(self, session_id: str = None, session_key: str = None):
+    def unmap_session(self, session_id: str = None, session_key: str = None) -> None:
         if not (session_key or session_id):
             logger.debug("No session key or session id provided")
 
@@ -125,7 +130,9 @@ class SessionStore:
                        metadata=None,
                        additional_tokens=None,
                        use_access_token_as_session_key=False,
-                       expires_at=None) -> (SessionData, str):
+                       expires_at=None,
+                       session_ttl=None,
+                       session_type=SESSION_TYPE.user) -> Tuple[Optional[str], Optional[SessionData]]:
         now = time.time()
         if expires_at is None:
             expires_at = (now + self.ttl)
@@ -140,6 +147,8 @@ class SessionStore:
             created_at=now,
             updated_at=now,
             realm=realm,
+            session_type=session_type,
+            session_ttl=session_ttl if session_ttl else self.ttl,
             session_metadata=SessionMetadata(system=metadata or {}, user={}),
             additional_tokens=additional_tokens or {},
         )
@@ -171,31 +180,41 @@ class SessionStore:
             logger.debug(f"Deleted corrupted or un-parseable session data for session {session_id}")
             return None
 
-    def get_session_by_session_key(self, session_key) -> (str or None, SessionData or None):
+    def get_session_by_session_key(self, session_key) -> Tuple[Optional[str], Optional[SessionData]]:
         session_id = self.get_session_id_for_session_key(session_key)
         if not session_id:
             return None, None
         session = self.get_session_data(session_id)
         return session_id, session
 
-    def update_session(self, session_id, session_data: SessionData):
+    def update_session(self, session_id, session_data: SessionData) -> Tuple[Optional[str], Optional[SessionData]]:
         now = time.time()
         session_data.updated_at = now
-        if session_data.expires_at < (now + self.ttl):
-            session_data.expires_at = (now + self.ttl)
+
+        # Only extend expires_at if session_ttl is explicitly provided
+        if session_data.session_ttl is not None:
+            if session_data.session_ttl > 0 and session_data.expires_at < (now + session_data.session_ttl):
+                session_data.expires_at = (now + session_data.session_ttl)
+        else:
+            if session_data.expires_at < (now + self.ttl):
+                session_data.expires_at = (now + self.ttl)
         ttl = int(session_data.expires_at - now)
+        if ttl < 0:
+            ttl = 0
+
         session_key = self.get_session_key_for_session_id(session_id)
         if self.crypto_codec:
             session_json = self.crypto_codec.encrypt(json.dumps(session_data.to_dict(), separators=(",", ":")))
         else:
             session_json = json.dumps(session_data.to_dict(), separators=(",", ":"))
+
         self.map_session(session_key, session_id, ttl)
         self.backend.setex(self._key(session_id), session_json, ttl)
 
         logger.debug(f"Updated session {session_id}")
         return session_key, session_data
 
-    def delete_session(self, session_id):
+    def delete_session(self, session_id) -> None:
         session = self.get_session_data(session_id)
         if session:
             self.unmap_session(session_id)
@@ -203,7 +222,7 @@ class SessionStore:
 
         logger.debug(f"Deleted session {session_id}")
 
-    def list_session_ids(self):
+    def list_session_ids(self) -> List[str]:
         base = f"{self.prefix}{self.sid_prefix}"
         ids = []
         for val in self.backend.scan_iter(f"{base}*"):
@@ -222,10 +241,10 @@ class SessionStore:
 
         return ids
 
-    def get_ttl(self, session_id):
+    def get_ttl(self, session_id) -> int:
         return self.backend.ttl(self._key(session_id))
 
-    def tag_session_metadata(self, session_id: str, metadata: dict, scope: str = "system"):
+    def tag_session_metadata(self, session_id: str, metadata: dict, scope: str = "system") -> None:
         if scope not in ("user", "system"):
             raise ValueError("Metadata scope must be 'user' or 'system'")
 
@@ -241,43 +260,43 @@ class SessionStore:
         self.update_session(session_id, session)
         logger.debug(f"Tagged session {session_id} metadata[{scope}]: {metadata}")
 
-    def store_authn_request_ctx(self, state, authn_request_ctx, ttl=TRANSIENT_DATA_TTL):
+    def store_authn_request_ctx(self, state, authn_request_ctx, ttl=TRANSIENT_DATA_TTL) -> None:
         self.backend.setex(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}",
                            json.dumps(authn_request_ctx, separators=(",", ":")), ttl)
 
-    def get_authn_request_ctx(self, state):
+    def get_authn_request_ctx(self, state) -> Any:
         authn_request_ctx = self.backend.get(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}")
         if not authn_request_ctx:
             return None
         return json.loads(authn_request_ctx.decode())
 
-    def delete_authn_request_ctx(self, state):
+    def delete_authn_request_ctx(self, state) -> None:
         self.backend.delete(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}")
 
-    def set_device_flow(self, device_code, flow_data, ttl):
+    def set_device_flow(self, device_code, flow_data, ttl) -> None:
         self.backend.setex(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}",
                            json.dumps(flow_data, separators=(",", ":")), ttl)
 
-    def get_device_flow(self, device_code):
+    def get_device_flow(self, device_code) -> Any:
         flow_data = self.backend.get(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}")
         if not flow_data:
             return None
         return json.loads(flow_data.decode())
 
-    def get_device_flow_ttl(self, device_code):
+    def get_device_flow_ttl(self, device_code) -> int:
         return self.backend.ttl(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}")
 
-    def delete_device_flow(self, device_code):
+    def delete_device_flow(self, device_code) -> None:
         self.backend.delete(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}")
 
-    def set_usercode_mapping(self, user_code, device_code, ttl):
+    def set_usercode_mapping(self, user_code, device_code, ttl) -> None:
         self.backend.setex(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}", device_code, ttl)
 
-    def get_device_code_for_usercode(self, user_code):
+    def get_device_code_for_usercode(self, user_code) -> str | None:
         code = self.backend.get(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}")
         if code:
             return code.decode()
         return None
 
-    def delete_usercode_mapping(self, user_code):
+    def delete_usercode_mapping(self, user_code) -> None:
         self.backend.delete(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}")

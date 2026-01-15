@@ -20,7 +20,7 @@ import valkey
 import fakeredis
 import testing.postgresql
 from types import SimpleNamespace
-from credenza.api.util import AESGCMCodec
+from credenza.api.common.util import AESGCMCodec
 from credenza.api.session.storage.session_store import SessionStore, SessionData
 from credenza.api.session.storage.backends.memory import MemoryBackend
 from credenza.api.session.storage.backends.redis import RedisBackend

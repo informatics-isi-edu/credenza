@@ -19,8 +19,8 @@ import pytest
 import requests
 from types import SimpleNamespace
 from authlib.integrations.requests_client import OAuth2Session
-from authlib.jose import jwt, JsonWebKey
-from credenza.api.oidc_client import OIDCClientFactory, OIDCClient
+from authlib.jose import jwt
+from credenza.api.auth.client.oidc_client import OIDCClientFactory, OIDCClient
 
 # Shared profile fixtures
 @pytest.fixture
@@ -253,7 +253,7 @@ def test_create_auth_url_pkce_add_offline_access(client, monkeypatch):
         return fake_sess
 
     # deterministic code_verifier
-    monkeypatch.setattr("credenza.api.oidc_client.token_urlsafe", lambda n: "VERIF123")
+    monkeypatch.setattr("credenza.api.auth.client.oidc_client.token_urlsafe", lambda n: "VERIF123")
     monkeypatch.setattr(client, "get_oauth_session", fake_get_oauth_session)
 
     url, state, code_verifier = client.create_authorization_url(
@@ -290,7 +290,7 @@ def test_create_auth_url_no_pkce_no_scope_override(client, monkeypatch):
     # ensure token_urlsafe would fail if called (it shouldn't be)
     def _boom(_):
         raise AssertionError("token_urlsafe must not be called when use_pkce=False")
-    monkeypatch.setattr("credenza.api.oidc_client.token_urlsafe", _boom)
+    monkeypatch.setattr("credenza.api.auth.client.oidc_client.token_urlsafe", _boom)
     monkeypatch.setattr(client, "get_oauth_session", fake_get_oauth_session)
 
     url, state, code_verifier = client.create_authorization_url(
@@ -324,7 +324,7 @@ def test_create_auth_url_device_scope_already_has_offline_access(client, monkeyp
         captured["kwargs"] = kw
         return fake_sess
 
-    monkeypatch.setattr("credenza.api.oidc_client.token_urlsafe", lambda n: "VERIFXYZ")
+    monkeypatch.setattr("credenza.api.auth.client.oidc_client.token_urlsafe", lambda n: "VERIFXYZ")
     monkeypatch.setattr(client, "get_oauth_session", fake_get_oauth_session)
 
     url, state, code_verifier = client.create_authorization_url(

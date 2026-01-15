@@ -15,7 +15,8 @@
 #
 import time
 import logging
-from ..api.util import refresh_access_token, refresh_additional_tokens, revoke_tokens
+from ..api.common.util import refresh_access_token, refresh_additional_tokens, revoke_tokens
+from ..api.session.storage.session_store import SESSION_TYPE
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -25,8 +26,10 @@ def run_refresh_worker(app):
     profiles = app.config["OIDC_IDP_PROFILES"]
     interval = app.config.get("REFRESH_WORKER_POLL_INTERVAL", 60)
     session_expiry_threshold = app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
+    debug_perf = app.config.get("DEBUG_PERF", False)
 
     while True:
+        start = time.perf_counter()
         try:
             now = time.time()
             session_ids = store.list_session_ids()
@@ -35,6 +38,9 @@ def run_refresh_worker(app):
             for sid in session_ids:
                 session = store.get_session_data(sid)
                 if not session:
+                    continue
+
+                if session.session_type == SESSION_TYPE.service:
                     continue
 
                 realm = session.realm
@@ -76,5 +82,9 @@ def run_refresh_worker(app):
         except Exception:
             # pass-level guard: never let the thread die due to an unhandled exception
             logger.exception("Unhandled exception in refresh pass; continuing")
+
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        if debug_perf:
+            logger.debug(f"Refresh worker pass elapsed time: {elapsed_ms} ms")
 
         time.sleep(interval)

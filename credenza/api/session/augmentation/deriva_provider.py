@@ -18,7 +18,7 @@ import logging
 from requests import HTTPError
 from flask import current_app, g
 from .base_provider import DefaultSessionAugmentationProvider
-from ...util import get_realm, extract_session_key
+from ....api.common.util import get_realm, extract_session_key
 
 logger = logging.getLogger(__name__)
 
