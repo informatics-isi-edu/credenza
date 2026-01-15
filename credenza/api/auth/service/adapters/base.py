@@ -76,7 +76,7 @@ def find_unique_adapter_binding(key: str, val: str, adapter_config: Dict[str, An
     return matches[0]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ProofContext:
     """
     Snapshot of the incoming request visible to adapters.
@@ -110,7 +110,7 @@ class ProofContext:
         return default
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ServiceSubject:
     """
     Canonical non-human principal.
@@ -135,7 +135,7 @@ class ServiceSubject:
         return f"{DEFAULT_SERVICE_AUTH_URN}:{self.provider}:{self.subject_id}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ServiceAuthorization:
     """
     Authorization envelope derived by the adapter mapping for this subject.
@@ -173,7 +173,7 @@ class ServiceAuthorization:
         object.__setattr__(self, "realm", r)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ServicePolicy:
     """Normalized policy knobs provided by the adapter for issuance."""
     default_scopes: List[str] = field(default_factory=list)
@@ -181,7 +181,7 @@ class ServicePolicy:
     absolute_lifetime_seconds: int = DEFAULT_MAX_ABSOLUTE_LIFETIME
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ServiceIssueResult:
     """
     Output from an adapter after verifying the caller's proof.
