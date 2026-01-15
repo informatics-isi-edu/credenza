@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import json
 from copy import deepcopy
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Optional
 
 # Minimal, explicit claim mapper:
 # - Exact keys only (no wildcards, no indexing)
@@ -69,7 +69,7 @@ def load_claim_map(path: str) -> ClaimMap:
         return json.load(f)
 
 
-def _merge_claim_maps(base: ClaimMap, override: ClaimMap | None) -> ClaimMap:
+def _merge_claim_maps(base: ClaimMap, override: Optional[ClaimMap]) -> ClaimMap:
     """Shallow merge: list for a key is fully replaced by override."""
     merged = deepcopy(base)
     if not override:
@@ -79,7 +79,7 @@ def _merge_claim_maps(base: ClaimMap, override: ClaimMap | None) -> ClaimMap:
     return merged
 
 
-def _find_preset_for_realm(realm: str) -> str | None:
+def _find_preset_for_realm(realm: str) -> Optional[str]:
     """Return preset key if a known preset name is a substring of realm (case-insensitive).
     If multiple match, choose the longest (most specific) name.
     """
@@ -121,7 +121,7 @@ def build_realm_claim_maps(profiles: Dict[str, dict]) -> Dict[str, ClaimMap]:
     return realm_maps
 
 
-def get_claim_map_for_realm(realm: str | None, realm_maps: Dict[str, ClaimMap]) -> ClaimMap:
+def get_claim_map_for_realm(realm: Optional[str], realm_maps: Dict[str, ClaimMap]) -> ClaimMap:
     """Pick the map for a realm with fallback to 'default' (or empty dict if absent)."""
     if not realm_maps:
         return {}

@@ -360,7 +360,7 @@ def get_cookie_domain():
     - If COOKIE_DOMAIN is a non-IP-address string (e.g. 'example.org'): use it as-is.
 
     Returns:
-        str | None: The cookie domain to use, or None to omit the 'domain' attribute.
+        Optional[str]: The cookie domain to use, or None to omit the 'domain' attribute.
     """
     configured = current_app.config.get("COOKIE_DOMAIN")
 
@@ -576,7 +576,7 @@ def ip_rate_limited(unknown_bucket="10_per_min", normal_bucket="30_per_min"):
     return _decorator
 
 
-def perf_logged(*, warn_ms: int | None = None, logger=None, include_query=False):
+def perf_logged(*, warn_ms: Optional[int] = None, logger=None, include_query=False):
     """
     Log total handler time with endpoint + rule inferred from the request.
 
