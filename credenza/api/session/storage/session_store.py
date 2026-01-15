@@ -295,7 +295,7 @@ class SessionStore:
     def set_usercode_mapping(self, user_code, device_code, ttl) -> None:
         self.backend.setex(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}", device_code, ttl)
 
-    def get_device_code_for_usercode(self, user_code) -> str | None:
+    def get_device_code_for_usercode(self, user_code) -> Optional[str]:
         code = self.backend.get(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}")
         if code:
             return code.decode()
