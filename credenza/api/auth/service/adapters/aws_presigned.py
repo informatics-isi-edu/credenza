@@ -109,7 +109,7 @@ class AwsPresignedAdapter(ServiceAuthAdapter):
 
         url = ctx.get("subject_token")
         if not url:
-            logger.warning("aws_gci: missing subject_token", extra={"rid": rid, "ip": ip})
+            logger.warning(f"get_caller_identity: missing subject_token rid={rid} ip={ip}")
             abort(401)
 
         sess = retrying_requests_session(
@@ -122,14 +122,10 @@ class AwsPresignedAdapter(ServiceAuthAdapter):
             # (connect, read) timeouts: fail fast on hung connects
             resp = sess.get(url, timeout=(2.0, 3.0))
         except requests.Timeout:
-            logger.warning("aws_gci: timeout after retries", extra={"rid": rid, "ip": ip})
+            logger.warning(f"get_caller_identity: timeout after retries rid={rid} ip={ip}")
             abort(401)
         except requests.RequestException as ex:
-            logger.warning(
-                "aws_gci: request error after retries: %s",
-                str(ex),
-                extra={"rid": rid, "ip": ip},
-            )
+            logger.warning(f"get_caller_identity: request error after retries: {ex} rid={rid} ip={ip}")
             abort(401)
         finally:
             try:
@@ -139,34 +135,24 @@ class AwsPresignedAdapter(ServiceAuthAdapter):
 
         if resp.status_code != 200:
             # Common 4xx from presigned URLs: SignatureDoesNotMatch / RequestExpired
-            logger.warning(
-                "aws_gci: http %d after retries",
-                resp.status_code,
-                extra={"rid": rid, "ip": ip},
-            )
+            logger.warning(f"get_caller_identity: http {resp.status_code} after retries rid={rid} ip={ip}")
             abort(401)
 
         #  Parse XML, derive role, map
         caller_arn = _extract_arn_from_xml(resp.text)
         if not caller_arn:
-            logger.warning("aws_gci: arn not found in xml", extra={"rid": rid, "ip": ip})
+            logger.warning(f"get_caller_identity: arn not found in xml rid={rid} ip={ip}")
             abort(401)
 
         role_arn = _derive_role_arn_from_caller(caller_arn)
         if not role_arn:
-            logger.warning(
-                "aws_gci: caller not assumed-role (unsupported)",
-                extra={"rid": rid, "ip": ip, "caller_arn": caller_arn},
-            )
+            logger.warning(f"get_caller_identity: caller not assumed-role (unsupported) rid={rid} ip={ip} caller_arn={caller_arn}")
             abort(401)
 
         # Find role binding
         binding = find_unique_adapter_binding("role_arn", role_arn, config)
         if not binding:
-            logger.warning(
-                "aws_gci: role not allowed by config",
-                extra={"rid": rid, "ip": ip, "role_arn": role_arn},
-            )
+            logger.warning(f"get_caller_identity: role not allowed by config rid={rid} ip={ip} role_arn={role_arn}")
             abort(403)
 
         # Build subject & authz
@@ -192,15 +178,8 @@ class AwsPresignedAdapter(ServiceAuthAdapter):
             absolute_lifetime_seconds=int(binding.get("absolute_lifetime_seconds", DEFAULT_MAX_ABSOLUTE_LIFETIME))
         )
 
-        logger.info(
-            "aws:get_caller_identity verified",
-            extra={
-                "rid": rid,
-                "ip": ip,
-                "role_arn": role_arn,
-                "account": role_arn.split(":")[4],
-            },
-        )
+        account = role_arn.split(":")[4]
+        logger.info(f"aws:get_caller_identity verified rid={rid} ip={ip} role_arn={role_arn} account={account}")
 
         return ServiceIssueResult(
             subject=subject,
