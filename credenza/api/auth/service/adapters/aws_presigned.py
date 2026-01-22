@@ -24,7 +24,7 @@ from typing import Optional, List
 from xml.etree import ElementTree as ET
 from flask import abort, request
 from .base import ProofContext, ServiceAuthAdapter, ServiceIssueResult, ServiceSubject, ServiceAuthorization, \
-    ServicePolicy, find_unique_adapter_binding, DEFAULT_MAX_TTL, DEFAULT_MAX_ABSOLUTE_LIFETIME
+    ServicePolicy, DEFAULT_MAX_TTL, DEFAULT_MAX_ABSOLUTE_LIFETIME
 from .....api.common.util import client_ip, get_correlation_id, retrying_requests_session
 
 """
@@ -50,6 +50,52 @@ logger = logging.getLogger(__name__)
 ASSUMED_ROLE_RE = re.compile(
     r"^arn:aws:sts::(?P<acct>\d{12}):assumed-role/(?P<role>[^/]+)/(?P<session>[^/]+)$"
 )
+# Matches IAM role ARNs like:
+#   arn:aws:iam::<acct>:role/<path>/<role-name>
+#   arn:aws:iam::<acct>:role/<role-name>
+IAM_ROLE_RE = re.compile(
+    r"^arn:aws:iam::(?P<acct>\d{12}):role/(?P<path_and_role>.+)$"
+)
+
+def _extract_assumed_role_identity(caller_arn: str) -> Optional[tuple[str, str]]:
+    """
+    Extract (acct, role_name) from STS assumed-role ARN.
+    """
+    m = ASSUMED_ROLE_RE.match(caller_arn or "")
+    if not m:
+        return None
+    return m.group("acct"), m.group("role")
+
+def _extract_iam_role_identity(role_arn: str) -> Optional[tuple[str, str]]:
+    """
+    Extract (acct, role_name) from IAM role ARN, ignoring any path.
+    """
+    m = IAM_ROLE_RE.match(role_arn or "")
+    if not m:
+        return None
+    acct = m.group("acct")
+    role_name = m.group("path_and_role").split("/")[-1]
+    return acct, role_name
+
+def _find_unique_binding_for_role_identity(acct: str, role_name: str, adapter_config: dict) -> Optional[dict]:
+    """
+    Find a unique binding whose role_arn matches the given (acct, role_name),
+    ignoring IAM path differences.
+    """
+    matches = []
+    for b in (adapter_config or {}).get("bindings", []):
+        if not isinstance(b, dict):
+            continue
+        ident = _extract_iam_role_identity(b.get("role_arn", ""))
+        if ident == (acct, role_name):
+            matches.append(b)
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ValueError(f"Multiple bindings matched acct={acct} role_name={role_name}")
+    return matches[0]
+
 
 def _extract_arn_from_xml(xml_text: str) -> Optional[str]:
     """
@@ -169,18 +215,23 @@ class AwsPresignedAdapter(ServiceAuthAdapter):
             logger.warning(f"get_caller_identity: arn not found in xml rid={rid} ip={ip}")
             abort(401)
 
-        role_arn = _derive_role_arn_from_caller(caller_arn)
-        if not role_arn:
-            logger.warning(f"get_caller_identity: caller not assumed-role (unsupported) rid={rid} ip={ip} caller_arn={caller_arn}")
+        ident = _extract_assumed_role_identity(caller_arn)
+        if not ident:
+            logger.warning(
+                f"get_caller_identity: caller not assumed-role (unsupported) rid={rid} ip={ip} caller_arn={caller_arn}"
+            )
             abort(401)
+        acct, role_name = ident
 
-        # Find role binding
-        binding = find_unique_adapter_binding("role_arn", role_arn, config)
+        binding = _find_unique_binding_for_role_identity(acct, role_name, config)
         if not binding:
-            logger.warning(f"get_caller_identity: role not allowed by config rid={rid} ip={ip} role_arn={role_arn}")
+            logger.warning(
+                f"get_caller_identity: role not allowed by config rid={rid} ip={ip} acct={acct} role_name={role_name}"
+            )
             abort(403)
 
         # Build subject & authz
+        role_arn = binding.get("role_arn")
         subject = ServiceSubject(provider="aws", subject_id=role_arn)
         authz = ServiceAuthorization(
             scopes=binding["scopes"],
@@ -202,9 +253,7 @@ class AwsPresignedAdapter(ServiceAuthAdapter):
             max_ttl_seconds=int(binding.get("max_ttl_seconds", DEFAULT_MAX_TTL)),
             absolute_lifetime_seconds=int(binding.get("absolute_lifetime_seconds", DEFAULT_MAX_ABSOLUTE_LIFETIME))
         )
-
-        account = role_arn.split(":")[4]
-        logger.info(f"aws:get_caller_identity verified rid={rid} ip={ip} role_arn={role_arn} account={account}")
+        logger.info(f"aws:get_caller_identity verified rid={rid} ip={ip} role_arn={role_arn} account={acct}")
 
         return ServiceIssueResult(
             subject=subject,
