@@ -19,6 +19,7 @@ import logging
 import re
 import time
 import requests
+from urllib.parse import urlparse
 from typing import Optional, List
 from xml.etree import ElementTree as ET
 from flask import abort, request
@@ -65,6 +66,21 @@ def _extract_arn_from_xml(xml_text: str) -> Optional[str]:
             if arn:
                 return arn
     return None
+
+
+def _extract_error_from_xml(xml_text: str) -> tuple[Optional[str], Optional[str]]:
+    try:
+        root = ET.fromstring(xml_text or "")
+    except ET.ParseError:
+        return None, None
+    code = msg = None
+    for elem in root.iter():
+        tag = elem.tag.rsplit("}", 1)[-1] if "}" in elem.tag else elem.tag
+        if tag == "Code":
+            code = (elem.text or "").strip() or code
+        elif tag == "Message":
+            msg = (elem.text or "").strip() or msg
+    return code, msg
 
 
 def _derive_role_arn_from_caller(caller_arn: str) -> Optional[str]:
@@ -134,8 +150,17 @@ class AwsPresignedAdapter(ServiceAuthAdapter):
                 pass
 
         if resp.status_code != 200:
-            # Common 4xx from presigned URLs: SignatureDoesNotMatch / RequestExpired
-            logger.warning(f"get_caller_identity: http {resp.status_code} after retries rid={rid} ip={ip}")
+            err_code, err_msg = _extract_error_from_xml(getattr(resp, "text", "") or "")
+            hdrs = getattr(resp, "headers", {}) or {}
+            req_id = hdrs.get("x-amzn-RequestId") or "-"
+            ext_req_id = hdrs.get("X-Amz-Sts-Extended-Request-Id") or "-"
+            final_url = getattr(resp, "url", None) or url
+            aws_host = urlparse(final_url).netloc if final_url else "-"
+            logger.warning(
+                f"get_caller_identity: http {resp.status_code} rid={rid} ip={ip} "
+                f"aws_request_id={req_id} aws_ext_req_id={ext_req_id} aws_host={aws_host} "
+                f"aws_error_code={err_code or '-'} aws_error_msg={err_msg or '-'}"
+            )
             abort(401)
 
         #  Parse XML, derive role, map
