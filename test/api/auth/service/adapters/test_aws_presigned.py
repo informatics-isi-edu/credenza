@@ -85,6 +85,41 @@ def test_extract_arn_from_xml_missing_or_bad_xml_returns_none():
     assert ap._extract_arn_from_xml("<Root><NoArn/></Root>") is None
 
 
+def test_extract_error_from_xml_success_and_namespace_tolerant():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+      <Error>
+        <Code> SignatureDoesNotMatch </Code>
+        <Message> The request signature we calculated does not match </Message>
+      </Error>
+    </ErrorResponse>
+    """
+    code, msg = ap._extract_error_from_xml(xml)
+
+    assert code == "SignatureDoesNotMatch"
+    assert msg == "The request signature we calculated does not match"
+
+
+def test_extract_error_from_xml_missing_or_bad_xml_returns_none_tuple():
+    assert ap._extract_error_from_xml("") == (None, None)
+    assert ap._extract_error_from_xml("<not-xml") == (None, None)
+
+    xml = "<Root><SomethingElse>nope</SomethingElse></Root>"
+    assert ap._extract_error_from_xml(xml) == (None, None)
+
+
+def test_extract_error_from_xml_partial_error_fields():
+    xml_code_only = "<Error><Code>AccessDenied</Code></Error>"
+    code, msg = ap._extract_error_from_xml(xml_code_only)
+    assert code == "AccessDenied"
+    assert msg is None
+
+    xml_msg_only = "<Error><Message>Denied</Message></Error>"
+    code, msg = ap._extract_error_from_xml(xml_msg_only)
+    assert code is None
+    assert msg == "Denied"
+
+
 def test_derive_role_arn_from_caller_success_and_failure():
     caller = "arn:aws:sts::123456789012:assumed-role/MyRole/MySession"
     role = ap._derive_role_arn_from_caller(caller)
@@ -110,14 +145,13 @@ def test_matches_requires_subject_token_and_getcalleridentity():
 def test_verify_and_map_missing_subject_token_aborts_401(monkeypatch):
     a = ap.AwsPresignedAdapter()
 
-    # Ensure diagnostics helpers don't require a real request
     monkeypatch.setattr(ap, "get_correlation_id", lambda req: "rid")
     monkeypatch.setattr(ap, "client_ip", lambda req: "1.2.3.4")
 
     with pytest.raises(HTTPException) as excinfo:
         with pytest.MonkeyPatch().context() as _mp:
             # need a request context because adapter references flask.request
-        
+
             app = Flask(__name__)
             with app.test_request_context("/authn/service/token", method="POST"):
                 a.verify_and_map(_ctx(None), config={})
@@ -133,7 +167,6 @@ def test_verify_and_map_timeout_aborts_401_and_closes_session(monkeypatch):
 
     sess = _SessionRaises(requests.Timeout("t"))
     monkeypatch.setattr(ap, "retrying_requests_session", lambda **kwargs: sess)
-
 
     app = Flask(__name__)
     with app.test_request_context("/authn/service/token", method="POST"):
@@ -153,7 +186,6 @@ def test_verify_and_map_request_exception_aborts_401_and_closes_session(monkeypa
     sess = _SessionRaises(requests.RequestException("boom"))
     monkeypatch.setattr(ap, "retrying_requests_session", lambda **kwargs: sess)
 
-
     app = Flask(__name__)
     with app.test_request_context("/authn/service/token", method="POST"):
         with pytest.raises(HTTPException) as excinfo:
@@ -172,7 +204,6 @@ def test_verify_and_map_non_200_aborts_401(monkeypatch):
     sess = _SessionOK(_Resp(status_code=403, text="SignatureDoesNotMatch"))
     monkeypatch.setattr(ap, "retrying_requests_session", lambda **kwargs: sess)
 
-
     app = Flask(__name__)
     with app.test_request_context("/authn/service/token", method="POST"):
         with pytest.raises(HTTPException) as excinfo:
@@ -187,11 +218,9 @@ def test_verify_and_map_xml_missing_arn_aborts_401(monkeypatch):
     monkeypatch.setattr(ap, "get_correlation_id", lambda req: "rid")
     monkeypatch.setattr(ap, "client_ip", lambda req: "1.2.3.4")
 
-    # 200 but no <Arn>
     xml = "<GetCallerIdentityResponse><GetCallerIdentityResult></GetCallerIdentityResult></GetCallerIdentityResponse>"
     sess = _SessionOK(_Resp(status_code=200, text=xml))
     monkeypatch.setattr(ap, "retrying_requests_session", lambda **kwargs: sess)
-
 
     app = Flask(__name__)
     with app.test_request_context("/authn/service/token", method="POST"):
@@ -207,11 +236,9 @@ def test_verify_and_map_caller_not_assumed_role_aborts_401(monkeypatch):
     monkeypatch.setattr(ap, "get_correlation_id", lambda req: "rid")
     monkeypatch.setattr(ap, "client_ip", lambda req: "1.2.3.4")
 
-    # Valid ARN but not assumed-role shape
     xml = "<R><Arn>arn:aws:iam::123456789012:user/Bob</Arn></R>"
     sess = _SessionOK(_Resp(status_code=200, text=xml))
     monkeypatch.setattr(ap, "retrying_requests_session", lambda **kwargs: sess)
-
 
     app = Flask(__name__)
     with app.test_request_context("/authn/service/token", method="POST"):
@@ -227,7 +254,6 @@ def test_verify_and_map_role_not_allowed_aborts_403(monkeypatch):
     monkeypatch.setattr(ap, "get_correlation_id", lambda req: "rid")
     monkeypatch.setattr(ap, "client_ip", lambda req: "1.2.3.4")
 
-    # Assumed role ARN -> role ARN
     xml = "<R><Arn>arn:aws:sts::123456789012:assumed-role/MyRole/MySession</Arn></R>"
     sess = _SessionOK(_Resp(status_code=200, text=xml))
     monkeypatch.setattr(ap, "retrying_requests_session", lambda **kwargs: sess)
@@ -248,11 +274,8 @@ def test_verify_and_map_success_maps_subject_authz_policy_and_proof(monkeypatch)
 
     monkeypatch.setattr(ap, "get_correlation_id", lambda req: "rid")
     monkeypatch.setattr(ap, "client_ip", lambda req: "1.2.3.4")
-
-    # Make issued_at deterministic
     monkeypatch.setattr(ap.time, "time", lambda: 1700000000.0)
 
-    # Successful STS response containing an assumed-role ARN
     xml = "<R><Arn>arn:aws:sts::123456789012:assumed-role/MyRole/MySession</Arn></R>"
     sess = _SessionOK(_Resp(status_code=200, text=xml))
     monkeypatch.setattr(ap, "retrying_requests_session", lambda **kwargs: sess)
@@ -277,11 +300,9 @@ def test_verify_and_map_success_maps_subject_authz_policy_and_proof(monkeypatch)
     with app.test_request_context("/authn/service/token", method="POST"):
         res = a.verify_and_map(_ctx("https://sts/?Action=GetCallerIdentity"), config=cfg)
 
-    # Subject derived from role ARN
     assert res.subject.provider == "aws"
     assert res.subject.subject_id == role_arn
 
-    # Authz mapped from binding
     assert res.authz.scopes == ["openid", "email"]
     assert res.authz.audiences == ["rest-api"]
     assert res.authz.groups == ["g1"]
@@ -289,23 +310,16 @@ def test_verify_and_map_success_maps_subject_authz_policy_and_proof(monkeypatch)
     assert res.authz.name == "svc-myrole"
     assert res.authz.realm == "credenza"  # default in ServiceAuthorization
 
-    # Proof fields
     assert res.proof["type"] == "aws_presigned_gci"
     assert res.proof["principal"] == role_arn
     assert res.proof["issued_at"] == 1700000000
     assert res.proof["caller_arn"].startswith("arn:aws:sts::123456789012:assumed-role/")
 
-    # Policy hints
     assert res.policy.default_scopes == ["openid"]
     assert res.policy.max_ttl_seconds == 900
 
 
 def test_verify_and_map_policy_defaults_when_missing(monkeypatch):
-    """
-    If default_scopes/max_ttl_seconds are omitted, adapter should:
-      - default_scopes => []
-      - max_ttl_seconds => DEFAULT_MAX_TTL
-    """
     a = ap.AwsPresignedAdapter()
 
     monkeypatch.setattr(ap, "get_correlation_id", lambda req: "rid")
@@ -318,7 +332,6 @@ def test_verify_and_map_policy_defaults_when_missing(monkeypatch):
 
     role_arn = "arn:aws:iam::123456789012:role/MyRole"
     cfg = {"bindings": [{"role_arn": role_arn, "scopes": ["s1"], "audiences": ["a1"]}]}
-
 
     app = Flask(__name__)
     with app.test_request_context("/authn/service/token", method="POST"):

@@ -19,6 +19,8 @@ import logging
 from logging import StreamHandler
 from logging.handlers import SysLogHandler, TimedRotatingFileHandler
 from pythonjsonlogger import json
+from flask import has_request_context, request
+from ...api.common import client_ip
 
 logger = logging.getLogger(__name__)
 svc_logger = logging.getLogger("credenza")
@@ -53,9 +55,17 @@ def init_audit_logger(filename="credenza-audit.log", use_syslog=False):
     logger.setLevel(logging.INFO)
 
 def audit_event(event, **kwargs):
+    extra = {}
+
+    if has_request_context():
+        ip = client_ip(request)
+        if ip is not None:
+            extra["client"] = ip
+
     log_entry = {
         "event": event,
-        "timestamp": datetime.datetime.now().astimezone().isoformat(), # ISO 8601 timestamp with offset
+        "timestamp": datetime.datetime.now().astimezone().isoformat(),
+        **extra,
         **kwargs
     }
     logger.info(log_entry)
