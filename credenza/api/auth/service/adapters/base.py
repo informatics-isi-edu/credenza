@@ -140,14 +140,14 @@ class ServiceAuthorization:
     """
     Authorization envelope derived by the adapter mapping for this subject.
     - `scopes`    : list of OAuth-like scope tokens
-    - `audiences` : list of intended audiences (IDs or URN/URI-ish strings)
+    - `resources` : list of intended resources (IDs or URN/URI-ish strings)
     - `groups`    : optional list of group identifiers for downstream ACLs
     - `name`      : optional free-form service account identifier (no strict validation here)
     - `email`     : optional contact/owner email (no strict validation here)
     - `realm`     : tenant/env/namespace for isolation (NOT an OP/issuer); defaults to "credenza"
     """
     scopes: List[str] = field(default_factory=list)
-    audiences: List[str] = field(default_factory=list)
+    resources: List[str] = field(default_factory=list)
     groups: List[str] = field(default_factory=list)
     name: Optional[str] = None
     email: Optional[str] = None
@@ -155,7 +155,7 @@ class ServiceAuthorization:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "scopes", _check_tokens("scopes", self.scopes))
-        object.__setattr__(self, "audiences", _check_tokens("audiences", self.audiences))
+        object.__setattr__(self, "resources", _check_tokens("resources", self.resources))
         object.__setattr__(self, "groups", _check_tokens("groups", self.groups) if self.groups else [])
         # name validation (lightweight label: bounded)
         if self.name:
@@ -187,7 +187,7 @@ class ServiceIssueResult:
     Output from an adapter after verifying the caller's proof.
 
     - `subject`     : normalized non-human principal
-    - `authz`       : scopes/audiences/groups/owner/email/realm for downstream authz
+    - `authz`       : scopes/resources/groups/owner/email/realm for downstream authz
     - `proof`       : minimal, non-secret record of what was verified (e.g., {"type": "...", "principal": "...", "issued_at": ...})
     - `policy`      : normalized issuance policy (default_scopes, max_ttl_seconds) supplied by adapter
     - `realm`       : tenant/env/namespace for the issued session (defaults to "credenza" if adapter didn't override)

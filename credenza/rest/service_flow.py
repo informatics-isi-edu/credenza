@@ -14,15 +14,19 @@
 # limitations under the License.
 #
 import time
+import logging
 from dataclasses import asdict
 from typing import Dict, Tuple, Optional, List
 from flask import Blueprint, request, jsonify, abort, current_app
 from ..api.session.storage.session_store import SessionStore, SessionType
-from ..api.common.util import get_current_session, client_ip, limit_or_429, route_label, perf_logged, ip_rate_limited
+from ..api.common.util import get_current_session, limit_or_429, route_label, perf_logged, ip_rate_limited, \
+    rate_limit_principal_key
 from ..api.auth.service.adapters.base import ProofContext, ServicePolicy, DEFAULT_SERVICE_AUTH_URN
 from ..api.auth.service.adapters.aws_presigned import AwsPresignedAdapter
 from ..api.auth.service.adapters.client_secret import ClientSecretAdapter
 from ..telemetry import audit_event
+
+logger = logging.getLogger(__name__)
 
 """
 REST handler for service token issuance and revocation.
@@ -62,27 +66,36 @@ def issue_service_token():
         if not adapter.matches(ctx):
             continue
 
-        adapter_cfg = (config or {}).get("adapters", {}).get(adapter.name(), {}) or {}
+        adapter_name = adapter.name()
+        adapter_cfg = (config or {}).get("adapters", {}).get(adapter_name, {}) or {}
         res = adapter.verify_and_map(ctx, adapter_cfg)
 
-        # Post-adapter per-principal limit
-        principal = str(res.proof.get("principal") or res.subject.subject_id)
-        pr_key = f"principal:{principal}"
-        detail = f"Too many requests: {route_label(request)} from: {pr_key}"
-        resp, rem_pr, reset_pr = limit_or_429(limits["60_per_min"], pr_key, detail)
+        # Post-adapter per principal/subject limit
+        sub = res.subject.to_sub()
+        p = res.proof.get("principal")
+        principal = str(p).strip() if isinstance(p, str) and p.strip() else res.subject.subject_id
+        pr_key = rate_limit_principal_key(principal, realm=res.realm, adapter=adapter_name)
+        resp, _, _ = limit_or_429(limits["60_per_min"], pr_key, f"Too many requests: {route_label(request)}")
         if resp is not None:
-            resp.headers.update(limits["60_per_min"].headers(rem_pr, reset_pr))
+            logger.warning(
+                "service_token_rate_limited: realm=%s adapter=%s sub=%s principal=%s key=%s",
+                res.realm,
+                adapter_name,
+                sub,
+                principal,
+                pr_key,
+            )
             return resp
 
         # Validate scopes
         allowed_scopes = set(res.authz.scopes or [])
-        default_scopes = norm_str_list(res.policy.default_scopes)
+        default_scopes = sorted(set(norm_str_list(res.policy.default_scopes)))
         scope_raw = ctx.get("scope")
 
         if not scope_raw or not str(scope_raw).strip():
             if not default_scopes:
                 audit_event("service_token_missing_scope",
-                            adapter=adapter.name(), principal=principal, reason="no_scope_and_no_local_defaults")
+                            adapter=adapter_name, subject=sub, reason="no_scope_and_no_local_defaults")
                 abort(400, description="scope is required unless default_scopes is configured.")
             req_scopes = default_scopes
         else:
@@ -90,48 +103,55 @@ def issue_service_token():
 
         if not set(req_scopes).issubset(allowed_scopes):
             audit_event("service_token_scope_violation",
-                        adapter=adapter.name(), principal=principal, requested_scopes=req_scopes,
+                        adapter=adapter_name, subject=sub, requested_scopes=req_scopes,
                         allowed_scopes=sorted(allowed_scopes))
             abort(403, description="one or more requested scopes are not permitted.")
 
-        # Validate audiences
-        allowed_aud = set(res.authz.audiences or [])
-        if not allowed_aud:
+        # Validate resources
+        allowed_res = set(res.authz.resources or [])
+        if not allowed_res:
             audit_event("service_token_issue_misconfig",
-                        reason="no_allowed_audiences",
-                        adapter=adapter.name(), principal=principal)
-            abort(500, description="server misconfiguration: no audiences for this principal.")
+                        reason="no_allowed_resources",
+                        adapter=adapter_name,
+                        subject=sub)
+            abort(500, description="server misconfiguration: no resources for this principal.")
 
-        req_aud = sorted(set(norm_str_list(ctx.getlist("audience"))))  # dedupe & order
-        audit_event("service_token_audience_requested",
-                    requested_audiences=req_aud,
-                    allowed_audiences=sorted(allowed_aud),
-                    adapter=adapter.name(), principal=principal)
+        req_res = sorted(set(norm_str_list(ctx.getlist("resource"))))  # dedupe & order
+        audit_event("service_token_resource_requested",
+                    requested_resources=req_res,
+                    allowed_resources=sorted(allowed_res),
+                    adapter=adapter_name,
+                    subject=sub)
 
-        final_aud = req_aud or sorted(allowed_aud)
-        disallowed = set(final_aud) - allowed_aud
+        final_res = req_res or sorted(allowed_res)
+        disallowed = set(final_res) - allowed_res
         if disallowed:
-            audit_event("service_token_audience_escalation_attempt",
-                        requested_audiences=final_aud,
-                        disallowed_audiences=sorted(disallowed),
-                        allowed_audiences=sorted(allowed_aud),
-                        adapter=adapter.name(), principal=principal)
-            abort(403, description="one or more requested audiences are not permitted.")
-        if not final_aud:
-            abort(403, description="no effective audience available for token issuance.")
-        if len(final_aud) > 32:
-            audit_event("service_token_audience_excessive",
-                        requested_count=len(final_aud),
-                        adapter=adapter.name(), principal=principal)
-            abort(400, description="too many audience values; reduce the list.")
-        if not req_aud:
-            audit_event("service_token_audience_defaulted",
-                        final_audiences=final_aud,
-                        adapter=adapter.name(), principal=principal)
-        elif set(req_aud) < allowed_aud:
-            audit_event("service_token_audience_narrowed",
-                        requested=req_aud, allowed=sorted(allowed_aud),
-                        adapter=adapter.name(), principal=principal)
+            audit_event("service_token_resource_escalation_attempt",
+                        requested_resources=final_res,
+                        disallowed_resources=sorted(disallowed),
+                        allowed_resources=sorted(allowed_res),
+                        adapter=adapter_name,
+                        subject=sub)
+            abort(403, description="one or more requested resources are not permitted.")
+        if not final_res:
+            abort(403, description="no effective resource available for token issuance.")
+        if len(final_res) > 32:
+            audit_event("service_token_resource_excessive",
+                        requested_count=len(final_res),
+                        adapter=adapter_name,
+                        subject=sub)
+            abort(400, description="too many resource values; reduce the list.")
+        if not req_res:
+            audit_event("service_token_resource_defaulted",
+                        final_resources=final_res,
+                        adapter=adapter_name,
+                        subject=sub)
+        elif set(req_res) < allowed_res:
+            audit_event("service_token_resource_narrowed",
+                        requested=req_res,
+                        allowed=sorted(allowed_res),
+                        adapter=adapter_name,
+                        subject=sub)
 
         # Validate requested TTL and clamp if necessary
         requested_ttl_raw = ctx.get("requested_ttl_seconds")
@@ -140,7 +160,8 @@ def issue_service_token():
         except ValueError:
             audit_event("service_token_bad_ttl",
                         raw_value=requested_ttl_raw,
-                        adapter=adapter.name(), principal=principal)
+                        adapter=adapter_name,
+                        subject=sub)
             abort(400, description="requested_ttl_seconds must be an integer.")
 
         ttl = clamp_ttl(res.policy.max_ttl_seconds, requested_ttl)
@@ -148,19 +169,20 @@ def issue_service_token():
             audit_event("service_token_clamped_ttl",
                         requested_ttl=requested_ttl,
                         clamped_ttl=ttl,
-                        adapter=adapter.name(), principal=principal)
+                        adapter=adapter_name,
+                        subject=sub)
 
         token, ttl = issue(
             store=store,
-            subject=res.subject.to_sub(),
+            subject=sub,
             authz={
                 "scopes": req_scopes,
-                "audiences": final_aud,
+                "resources": final_res,
                 "groups": res.authz.groups,
                 "email": getattr(res.authz, "email", None),
-                "name": getattr(res.authz, "name", None),
-                "realm": res.realm,
+                "name": getattr(res.authz, "name", None)
             },
+            realm=res.realm,
             ttl=ttl,
             proof=res.proof,
             policy=res.policy
@@ -169,9 +191,9 @@ def issue_service_token():
         out = jsonify({"access_token": token, "expires_in": ttl})
         audit_event(
             "service_token_issued",
-            sub=res.subject.to_sub(),
-            audiences=final_aud,
-            requested_audiences=req_aud,
+            sub=sub,
+            resources=final_res,
+            requested_resources=req_res,
             scopes=req_scopes,
             ttl=ttl,
             proof_type=res.proof.get("type"),
@@ -226,6 +248,7 @@ def issue(
     store: SessionStore,
     subject: str,
     authz: Dict,
+    realm: str,
     ttl: int,
     proof: Dict[str, object],
     *,
@@ -234,13 +257,45 @@ def issue(
 
     now = int(time.time())
 
+    resources = authz.get("resources")
+    if not isinstance(resources, list) or not resources:
+        audit_event(
+            "service_token_issue_contract_violation",
+            reason="resources_missing_or_not_list",
+            realm=realm,
+            sub=subject,
+        )
+        abort(500, description="server misconfiguration: invalid resources")
+
+    scopes = authz.get("scopes")
+    if not isinstance(scopes, list) or not scopes:
+        audit_event(
+            "service_token_issue_contract_violation",
+            reason="scopes_missing_or_not_list",
+            realm=realm,
+            sub=subject,
+        )
+        abort(500, description="server misconfiguration: invalid scopes")
+
+    groups = authz.get("groups") or []
+    if not isinstance(groups, list):
+        audit_event(
+            "service_token_issue_contract_violation",
+            reason="groups_not_list",
+            realm=realm,
+            sub=subject,
+        )
+        abort(500, description="server misconfiguration: invalid groups")
+
     userinfo = {
         "sub": subject,
-        "aud": authz["audiences"],
-        "groups": authz["groups"],
+        "resources": resources,
+        "groups": groups,
         "name": authz.get("name"),
         "email": authz.get("email"),
     }
+    if len(resources) == 1:
+        userinfo["resource"] = resources[0]
 
     metadata = {"proof": proof}
     if policy is not None:
@@ -251,8 +306,8 @@ def issue(
         session_id=sid,
         session_type=SessionType.service,
         access_token=store.generate_session_key(),
-        scopes=authz["scopes"],
-        realm=authz["realm"],
+        scopes=scopes,
+        realm=realm,
         userinfo=userinfo,
         expires_at=now + ttl,
         session_ttl=ttl,

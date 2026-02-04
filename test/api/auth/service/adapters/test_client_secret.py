@@ -137,7 +137,7 @@ def test_verify_and_map_client_secret_post_success(monkeypatch):
                 "client_id": "cid1",
                 "client_secret": "s1",
                 "scopes": ["openid", "email"],
-                "audiences": ["rest-api"],
+                "resources": ["rest-api"],
                 "groups": ["g1"],
                 "email": "owner@example.org",
                 "name": "svc-cid1",
@@ -162,7 +162,7 @@ def test_verify_and_map_client_secret_post_success(monkeypatch):
     assert res.subject.subject_id == "cid1"
 
     assert res.authz.scopes == ["openid", "email"]
-    assert res.authz.audiences == ["rest-api"]
+    assert res.authz.resources == ["rest-api"]
     assert res.authz.groups == ["g1"]
     assert res.authz.email == "owner@example.org"
     assert res.authz.name == "svc-cid1"
@@ -185,7 +185,7 @@ def test_verify_and_map_basic_success(monkeypatch):
                 "client_id": "cid1",
                 "client_secret": "s1",
                 "scopes": ["s1"],
-                "audiences": ["a1"],
+                "resources": ["a1"],
             }
         ]
     }
@@ -199,14 +199,14 @@ def test_verify_and_map_basic_success(monkeypatch):
     assert res.subject.provider == "client_secret"
     assert res.subject.subject_id == "cid1"
     assert res.authz.scopes == ["s1"]
-    assert res.authz.audiences == ["a1"]
+    assert res.authz.resources == ["a1"]
     assert res.proof["issued_at"] == 1700000000
 
 
 def test_verify_and_map_unknown_client_aborts_401():
     a = cs.ClientSecretAdapter()
 
-    cfg = {"bindings": [{"client_id": "cid1", "client_secret": "s1", "scopes": ["s"], "audiences": ["a"]}]}
+    cfg = {"bindings": [{"client_id": "cid1", "client_secret": "s1", "scopes": ["s"], "resources": ["a"]}]}
 
     ctx = _ctx(
         form={"auth_method": "client_secret_post", "client_id": "nope", "client_secret": "s1"},
@@ -221,7 +221,7 @@ def test_verify_and_map_unknown_client_aborts_401():
 def test_verify_and_map_secret_mismatch_aborts_401():
     a = cs.ClientSecretAdapter()
 
-    cfg = {"bindings": [{"client_id": "cid1", "client_secret": "s1", "scopes": ["s"], "audiences": ["a"]}]}
+    cfg = {"bindings": [{"client_id": "cid1", "client_secret": "s1", "scopes": ["s"], "resources": ["a"]}]}
 
     ctx = _ctx(
         form={"auth_method": "client_secret_post", "client_id": "cid1", "client_secret": "WRONG"},
@@ -248,7 +248,7 @@ def test_verify_and_map_defaults_policy_fields_when_missing(monkeypatch):
                 "client_id": "cid1",
                 "client_secret": "s1",
                 "scopes": ["s1"],
-                "audiences": ["a1"],
+                "resources": ["a1"],
             }
         ]
     }

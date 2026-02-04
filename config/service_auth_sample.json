@@ -9,7 +9,7 @@
 
           "scopes":           ["etl:ingest", "etl:read"],
           "default_scopes":   ["etl:read"],
-          "audiences":        ["urn:deriva:rest:service:all"],
+          "resources":        ["urn:deriva:rest:service:all"],
           "groups":           ["etl-writers"],
 
           "max_ttl_seconds":  7200,
@@ -27,7 +27,7 @@
 
           "scopes":           ["etl:read"],
           "default_scopes":   ["etl:read"],
-          "audiences":        ["urn:deriva:rest:service:all"],
+          "resources":        ["urn:deriva:rest:service:all"],
           "groups":           ["etl-readers"],
 
           "max_ttl_seconds":  14400,

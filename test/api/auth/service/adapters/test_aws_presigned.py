@@ -286,7 +286,7 @@ def test_verify_and_map_success_maps_subject_authz_policy_and_proof(monkeypatch)
             {
                 "role_arn": role_arn,
                 "scopes": ["openid", "email"],
-                "audiences": ["rest-api"],
+                "resources": ["rest-api"],
                 "groups": ["g1"],
                 "email": "owner@example.org",
                 "name": "svc-myrole",
@@ -304,7 +304,7 @@ def test_verify_and_map_success_maps_subject_authz_policy_and_proof(monkeypatch)
     assert res.subject.subject_id == role_arn
 
     assert res.authz.scopes == ["openid", "email"]
-    assert res.authz.audiences == ["rest-api"]
+    assert res.authz.resources == ["rest-api"]
     assert res.authz.groups == ["g1"]
     assert res.authz.email == "owner@example.org"
     assert res.authz.name == "svc-myrole"
@@ -331,7 +331,7 @@ def test_verify_and_map_policy_defaults_when_missing(monkeypatch):
     monkeypatch.setattr(ap, "retrying_requests_session", lambda **kwargs: sess)
 
     role_arn = "arn:aws:iam::123456789012:role/MyRole"
-    cfg = {"bindings": [{"role_arn": role_arn, "scopes": ["s1"], "audiences": ["a1"]}]}
+    cfg = {"bindings": [{"role_arn": role_arn, "scopes": ["s1"], "resources": ["a1"]}]}
 
     app = Flask(__name__)
     with app.test_request_context("/authn/service/token", method="POST"):

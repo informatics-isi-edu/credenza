@@ -37,21 +37,33 @@ class SessionMetadata:
     system: Dict[str, Any] = field(default_factory=dict)
     user: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        # Coerce None -> {} and reject non-dict
+        if self.system is None:
+            self.system = {}
+        if self.user is None:
+            self.user = {}
+        if not isinstance(self.system, dict):
+            raise ValueError("session_metadata.system must be a dict")
+        if not isinstance(self.user, dict):
+            raise ValueError("session_metadata.user must be a dict")
+
     def to_dict(self) -> dict:
         return asdict(self)
 
+
 @dataclass
 class SessionData:
-    id_token: str
     access_token: str
-    refresh_token: str
-    scopes: str
     userinfo: dict
     expires_at: float
     created_at: float
     updated_at: float
     realm: str
-    session_type: str
+    session_type: SessionType
+    id_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    scopes: Optional[str] = None
     session_ttl: Optional[int] = None
     session_metadata: SessionMetadata = field(default_factory=SessionMetadata)
     additional_tokens: Dict[str, Any] = field(default_factory=dict)
@@ -63,7 +75,12 @@ class SessionData:
 
     @staticmethod
     def from_dict(data: dict) -> "SessionData":
-        data["session_metadata"] = SessionMetadata(**data.get("session_metadata", {}))
+        md = data.get("session_metadata")
+        if md is None:
+            md = {}
+        if not isinstance(md, dict):
+            raise ValueError("session_metadata must be an object")
+        data["session_metadata"] = SessionMetadata(**md)
         return SessionData(**data)
 
 
@@ -101,14 +118,18 @@ class SessionStore:
     def unmap_session(self, session_id: str = None, session_key: str = None) -> None:
         if not (session_key or session_id):
             logger.debug("No session key or session id provided")
+            return
 
-        # clean up both directions
-        if not session_id:
+        if session_id is None and session_key is not None:
             session_id = self.get_session_id_for_session_key(session_key)
-        if not session_key:
+
+        if session_key is None and session_id is not None:
             session_key = self.get_session_key_for_session_id(session_id)
-        self.backend.delete(f"{self.prefix}{self.key_prefix}skey:{session_key}")
-        self.backend.delete(f"{self.prefix}{self.key_prefix}sid:{session_id}")
+
+        if session_key:
+            self.backend.delete(f"{self.prefix}{self.key_prefix}skey:{session_key}")
+        if session_id:
+            self.backend.delete(f"{self.prefix}{self.key_prefix}sid:{session_id}")
 
     def get_session_id_for_session_key(self, session_key: str) -> Optional[str]:
         val = self.backend.get(f"{self.prefix}{self.key_prefix}skey:{session_key}")
@@ -140,6 +161,11 @@ class SessionStore:
         if expires_at is None:
             expires_at = (now + self.ttl)
 
+        sys_md = {} if metadata is None else metadata
+        if not isinstance(sys_md, dict):
+            raise ValueError("metadata must be a dict")
+        session_metadata = SessionMetadata(system=sys_md, user={})
+
         session_data = SessionData(
             id_token=id_token,
             access_token=access_token,
@@ -151,8 +177,8 @@ class SessionStore:
             updated_at=now,
             realm=realm,
             session_type=session_type,
-            session_ttl=session_ttl if session_ttl else self.ttl,
-            session_metadata=SessionMetadata(system=metadata or {}, user={}),
+            session_ttl=self.ttl if session_ttl is None else int(session_ttl),
+            session_metadata=session_metadata,
             additional_tokens=additional_tokens or {},
         )
 
@@ -162,6 +188,8 @@ class SessionStore:
 
         session_key = access_token if use_access_token_as_session_key else self.generate_session_key()
         ttl = int(expires_at - now)
+        if ttl < 0:
+            ttl = 0
         self.map_session(session_key, session_id, ttl)
         self.backend.setex(self._key(session_id), session_json, ttl)
 
@@ -169,18 +197,27 @@ class SessionStore:
         return session_key, session_data
 
     def get_session_data(self, session_id) -> Optional[SessionData]:
-        data = self.backend.get(self._key(session_id))
-        if not data:
+        raw = self.backend.get(self._key(session_id))
+        if not raw:
             return None
         try:
+            # Normalize backend value to str for codec/json
+            if isinstance(raw, (bytes, bytearray)):
+                raw_s = raw.decode("utf-8")
+            elif isinstance(raw, str):
+                raw_s = raw
+            else:
+                raise ValueError(f"Unexpected session blob type: {type(raw)!r}")
+
             if self.crypto_codec:
-                data = self.crypto_codec.decrypt(data.decode())
-                if data is None:
+                raw_s = self.crypto_codec.decrypt(raw_s)
+                if raw_s is None:
                     raise ValueError("Failed to decrypt data")
-            return SessionData.from_dict(json.loads(data))
-        except (ValueError, json.JSONDecodeError):
+
+            return SessionData.from_dict(json.loads(raw_s))
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as e:
             self.backend.delete(self._key(session_id))
-            logger.debug(f"Deleted corrupted or un-parseable session data for session {session_id}")
+            logger.debug("Deleted corrupted/unparseable session %s: %s", session_id, e)
             return None
 
     def get_session_by_session_key(self, session_key) -> Tuple[Optional[str], Optional[SessionData]]:
@@ -194,7 +231,7 @@ class SessionStore:
         now = time.time()
         session_data.updated_at = now
 
-        # Only extend expires_at if session_ttl is explicitly provided
+        # Extend expires_at unless session_ttl is 0; if session_ttl is None, use store default ttl
         if session_data.session_ttl is not None:
             if session_data.session_ttl > 0 and session_data.expires_at < (now + session_data.session_ttl):
                 session_data.expires_at = (now + session_data.session_ttl)
@@ -206,21 +243,25 @@ class SessionStore:
             ttl = 0
 
         session_key = self.get_session_key_for_session_id(session_id)
+        if not session_key:
+            # mapping missing
+            logger.warning("Missing session key mapping for session_id=%s; not remapping", session_id)
+        else:
+            self.map_session(session_key, session_id, ttl)
+
         if self.crypto_codec:
             session_json = self.crypto_codec.encrypt(json.dumps(session_data.to_dict(), separators=(",", ":")))
         else:
             session_json = json.dumps(session_data.to_dict(), separators=(",", ":"))
 
-        self.map_session(session_key, session_id, ttl)
         self.backend.setex(self._key(session_id), session_json, ttl)
 
         logger.debug(f"Updated session {session_id}")
         return session_key, session_data
 
     def delete_session(self, session_id) -> None:
-        session = self.get_session_data(session_id)
-        if session:
-            self.unmap_session(session_id)
+        session_key = self.get_session_key_for_session_id(session_id)
+        self.unmap_session(session_id=session_id, session_key=session_key)
         self.backend.delete(self._key(session_id))
 
         logger.debug(f"Deleted session {session_id}")

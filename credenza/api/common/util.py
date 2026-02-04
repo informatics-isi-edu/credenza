@@ -17,6 +17,7 @@ import json
 import time
 import uuid
 import base64
+import hashlib
 import logging
 import ipaddress
 import requests
@@ -387,13 +388,39 @@ def get_cookie_domain():
     return None
 
 
-def is_browser_client(request): # pragma: no cover
-    has_cookie = current_app.config["COOKIE_NAME"] in request.cookies
-    accept_html = "text/html" in request.headers.get("Accept", "")
-    ua = request.headers.get("User-Agent", "").lower()
-    ua_looks_browser = any(x in ua for x in ["mozilla", "chrome", "safari", "edge", "firefox"])
+def is_browser_client(req):  # pragma: no cover
+    accept = (req.headers.get("Accept") or "").lower()
+    content_type = (req.headers.get("Content-Type") or "").lower()
 
-    return has_cookie and (accept_html or ua_looks_browser)
+    # If the client is clearly asking for JSON, treat as API
+    if "application/json" in accept or content_type.startswith("application/json"):
+        return False
+
+    # Classic XHR signal (some libs still set this)
+    if (req.headers.get("X-Requested-With") or "").lower() == "xmlhttprequest":
+        return False
+
+    # Modern browser fetch/navigation signals:
+    # - navigate/document => likely real browser page load
+    # - cors/no-cors/same-origin + not document => likely fetch/xhr
+    sfm = (req.headers.get("Sec-Fetch-Mode") or "").lower()
+    sfd = (req.headers.get("Sec-Fetch-Dest") or "").lower()
+
+    if sfm:
+        if sfm == "navigate" and (sfd == "document" or not sfd):
+            return True
+        # Anything else is usually fetch/xhr/subresource
+        return False
+
+    # Fallback when Sec-Fetch-* is absent:
+    # Only treat as browser when HTML is *specifically* acceptable.
+    # (Still keep JSON as the safer default.)
+    if "text/html" in accept or "application/xhtml+xml" in accept:
+        return True
+
+    return False
+
+
 
 # copied (and modded) from distutils so we don't have to depend on it
 def strtobool (val):  # pragma: no cover
@@ -534,6 +561,14 @@ def ip_rate_limited(unknown_bucket="10_per_min", normal_bucket="30_per_min"):
 
         return _wrapped
     return _decorator
+
+
+def rate_limit_principal_key(principal: str, *, realm: str = "", adapter: str = "") -> str:
+    # Normalize for stability
+    p = (principal or "").strip()
+    material = "\n".join([realm or "", adapter or "", p]).encode("utf-8", errors="surrogatepass")
+    digest = hashlib.sha256(material).hexdigest()[:24]  # short, bounded
+    return f"principal:{digest}"
 
 
 def perf_logged(*, warn_ms: Optional[int] = None, logger=None, include_query=False):

@@ -14,6 +14,7 @@
 #
 import pytest
 from types import SimpleNamespace
+from werkzeug.exceptions import HTTPException
 from credenza.rest import service_flow as sf
 from credenza.api.session.storage.session_store import SessionType
 from credenza.api.auth.service.adapters.base import ProofContext
@@ -98,7 +99,7 @@ def _mk_result(
     principal="p1",
     subject="svc-subject",
     scopes=None,
-    audiences=None,
+    resources=None,
     groups=None,
     default_scopes=None,
     max_ttl_seconds=1800,
@@ -109,7 +110,7 @@ def _mk_result(
     We use SimpleNamespace to avoid coupling to adapter dataclasses while keeping shape.
     """
     scopes = scopes if scopes is not None else ["s1"]
-    audiences = audiences if audiences is not None else ["a1"]
+    resources = resources if resources is not None else ["a1"]
     groups = groups if groups is not None else []
 
     return SimpleNamespace(
@@ -118,7 +119,7 @@ def _mk_result(
         subject=StubSubject(subject),
         authz=SimpleNamespace(
             scopes=scopes,
-            audiences=audiences,
+            resources=resources,
             groups=groups,
             email="svc@example.com",
             name="Service Principal",
@@ -139,7 +140,8 @@ def test_proof_context_get_getlist_header():
     assert ctx.header("x-test") == "y"
 
 
-def test_issue_creates_service_session_with_expected_fields(monkeypatch):
+@pytest.mark.parametrize("multi_resource", [True, False])
+def test_issue_creates_service_session_with_expected_fields(monkeypatch, multi_resource):
     now = 1_700_000_000
     ttl = 1234
 
@@ -150,11 +152,10 @@ def test_issue_creates_service_session_with_expected_fields(monkeypatch):
     proof = {"type": "client_secret", "principal": "p1"}
     authz = {
         "scopes": ["s1", "s2"],
-        "audiences": ["a1", "a2"],
+        "resources": ["a1", "a2"] if multi_resource else ["a1"],
         "groups": ["g1"],
         "email": "svc@example.com",
-        "name": "Service Principal",
-        "realm": "test",
+        "name": "Service Principal"
     }
 
     calls = {}
@@ -176,8 +177,9 @@ def test_issue_creates_service_session_with_expected_fields(monkeypatch):
         store=store,
         subject=subject,
         authz=authz,
+        realm="credenza-test",
         ttl=ttl,
-        proof=proof,
+        proof=proof
     )
 
     assert session_key == "SESSION-KEY-1"
@@ -188,16 +190,21 @@ def test_issue_creates_service_session_with_expected_fields(monkeypatch):
     assert calls["session_type"] == SessionType.service
     assert calls["access_token"] == "AT-1"
     assert calls["scopes"] == ["s1", "s2"]
-    assert calls["realm"] == "test"
+    assert calls["realm"] == "credenza-test"
 
     # userinfo mapping
-    assert calls["userinfo"] == {
+    expected = {
         "sub": subject,
-        "aud": ["a1", "a2"],
         "groups": ["g1"],
         "name": "Service Principal",
         "email": "svc@example.com",
     }
+    if multi_resource:
+        expected["resources"] = ["a1", "a2"]
+    else:
+        expected["resources"] = ["a1"]
+        expected["resource"] = "a1"
+    assert calls["userinfo"] == expected
 
     # expiry + ttl
     assert calls["expires_at"] == now + ttl
@@ -232,7 +239,7 @@ def test_issue_service_token_no_adapter_match_400(client, audit_calls, monkeypat
 
 
 def test_issue_service_token_missing_scope_no_defaults_400(client, audit_calls, monkeypatch, app):
-    res = _mk_result(scopes=["s1"], default_scopes=[], audiences=["a1"])
+    res = _mk_result(scopes=["s1"], default_scopes=[], resources=["a1"])
     adapter = StubAdapter(matches=True, result=res)
     monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
 
@@ -248,7 +255,7 @@ def test_issue_service_token_missing_scope_no_defaults_400(client, audit_calls, 
 
 
 def test_issue_service_token_missing_scope_uses_defaults_200(client, audit_calls, monkeypatch, app):
-    res = _mk_result(scopes=["s1", "s2"], default_scopes=["s1"], audiences=["a1"])
+    res = _mk_result(scopes=["s1", "s2"], default_scopes=["s1"], resources=["a1"])
     adapter = StubAdapter(matches=True, result=res)
     monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
 
@@ -275,7 +282,7 @@ def test_issue_service_token_missing_scope_uses_defaults_200(client, audit_calls
 
 
 def test_issue_service_token_scope_violation_403(client, audit_calls, monkeypatch, app):
-    res = _mk_result(scopes=["s1"], default_scopes=[], audiences=["a1"])
+    res = _mk_result(scopes=["s1"], default_scopes=[], resources=["a1"])
     adapter = StubAdapter(matches=True, result=res)
     monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
 
@@ -293,8 +300,8 @@ def test_issue_service_token_scope_violation_403(client, audit_calls, monkeypatc
     assert "service_token_scope_violation" in events, audit_calls
 
 
-def test_issue_service_token_no_allowed_audiences_misconfig_500(client, audit_calls, monkeypatch, app):
-    res = _mk_result(scopes=["s1"], default_scopes=["s1"], audiences=[])
+def test_issue_service_token_no_allowed_resources_misconfig_500(client, audit_calls, monkeypatch, app):
+    res = _mk_result(scopes=["s1"], default_scopes=["s1"], resources=[])
     adapter = StubAdapter(matches=True, result=res)
     monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
 
@@ -311,33 +318,33 @@ def test_issue_service_token_no_allowed_audiences_misconfig_500(client, audit_ca
     assert "service_token_issue_misconfig" in events, audit_calls
 
 
-def test_issue_service_token_audience_escalation_attempt_403(client, audit_calls, monkeypatch, app):
-    res = _mk_result(scopes=["s1"], default_scopes=["s1"], audiences=["a1"])
+def test_issue_service_token_resources_escalation_attempt_403(client, audit_calls, monkeypatch, app):
+    res = _mk_result(scopes=["s1"], default_scopes=["s1"], resources=["a1"])
     adapter = StubAdapter(matches=True, result=res)
     monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
 
     with app.app_context():
         app.config["SERVICE_AUTH"] = {"adapters": {adapter.name(): {}}}
 
-    # Request disallowed audience
+    # Request disallowed resources
     resp = client.post(
         "/service/token",
         data={
             "grant_type": sf.DEFAULT_SERVICE_AUTH_URN,
             "scope": "s1",
-            "audience": ["a2"],
+            "resource": ["a2"],
         },
     )
     assert resp.status_code == 403
 
     events = [ev for ev, _ in audit_calls]
-    assert "service_token_audience_escalation_attempt" in events, audit_calls
+    assert "service_token_resource_escalation_attempt" in events, audit_calls
 
 
-def test_issue_service_token_audience_excessive_400(client, audit_calls, monkeypatch, app):
-    # More than 32 allowed audiences; no requested audiences -> defaults to allowed -> should 400
+def test_issue_service_token_resources_excessive_400(client, audit_calls, monkeypatch, app):
+    # More than 32 allowed resources; no requested resources -> defaults to allowed -> should 400
     allowed = [f"a{i}" for i in range(40)]
-    res = _mk_result(scopes=["s1"], default_scopes=["s1"], audiences=allowed)
+    res = _mk_result(scopes=["s1"], default_scopes=["s1"], resources=allowed)
     adapter = StubAdapter(matches=True, result=res)
     monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
 
@@ -351,11 +358,11 @@ def test_issue_service_token_audience_excessive_400(client, audit_calls, monkeyp
     assert resp.status_code == 400
 
     events = [ev for ev, _ in audit_calls]
-    assert "service_token_audience_excessive" in events, audit_calls
+    assert "service_token_resource_excessive" in events, audit_calls
 
 
 def test_issue_service_token_bad_ttl_400(client, audit_calls, monkeypatch, app):
-    res = _mk_result(scopes=["s1"], default_scopes=["s1"], audiences=["a1"])
+    res = _mk_result(scopes=["s1"], default_scopes=["s1"], resources=["a1"])
     adapter = StubAdapter(matches=True, result=res)
     monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
 
@@ -377,7 +384,7 @@ def test_issue_service_token_bad_ttl_400(client, audit_calls, monkeypatch, app):
 
 
 def test_issue_service_token_clamped_ttl_audited_200(client, audit_calls, monkeypatch, app):
-    res = _mk_result(scopes=["s1"], default_scopes=["s1"], audiences=["a1"], max_ttl_seconds=100)
+    res = _mk_result(scopes=["s1"], default_scopes=["s1"], resources=["a1"], max_ttl_seconds=100)
     adapter = StubAdapter(matches=True, result=res)
     monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
 
@@ -407,7 +414,7 @@ def test_issue_service_token_success_200(client, audit_calls, monkeypatch, app):
     res = _mk_result(
         scopes=["s1", "s2"],
         default_scopes=["s1"],
-        audiences=["a1", "a2"],
+        resources=["a1", "a2"],
         max_ttl_seconds=1800,
         principal="principal-1",
         subject="svc-123",
@@ -432,7 +439,7 @@ def test_issue_service_token_success_200(client, audit_calls, monkeypatch, app):
         data={
             "grant_type": sf.DEFAULT_SERVICE_AUTH_URN,
             "scope": "s1 s2",
-            "audience": ["a1"],  # narrowed request
+            "resource": ["a1"],  # narrowed request
             "requested_ttl_seconds": "1200",
         },
     )
@@ -443,12 +450,12 @@ def test_issue_service_token_success_200(client, audit_calls, monkeypatch, app):
     # Verify issue() got what we expect
     assert issued["subject"] == "svc-123"
     assert issued["authz"]["scopes"] == ["s1", "s2"]
-    assert issued["authz"]["audiences"] == ["a1"]
+    assert issued["authz"]["resources"] == ["a1"]
     assert issued["ttl"] == 1200
 
     events = [ev for ev, _ in audit_calls]
-    assert "service_token_audience_requested" in events, audit_calls
-    assert "service_token_audience_narrowed" in events, audit_calls
+    assert "service_token_resource_requested" in events, audit_calls
+    assert "service_token_resource_narrowed" in events, audit_calls
     assert "service_token_issued" in events, audit_calls
 
 
@@ -514,3 +521,108 @@ def test_clamp_ttl_basic():
     # clamp to cap
     assert sf.clamp_ttl(100, 200) == 100
     assert sf.clamp_ttl(100, 50) == 50
+
+
+def test_issue_service_token_rate_limited_returns_429(client, audit_calls, monkeypatch, app):
+    res = _mk_result(scopes=["s1"], default_scopes=["s1"], resources=["a1"])
+    adapter = StubAdapter(matches=True, result=res)
+    monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
+
+    with app.app_context():
+        app.config["SERVICE_AUTH"] = {"adapters": {adapter.name(): {}}}
+
+    monkeypatch.setattr(
+        sf,
+        "limit_or_429",
+        lambda *_a, **_k: (sf.current_app.response_class(status=429), None, None),
+    )
+
+    resp = client.post(
+        "/service/token",
+        data={"grant_type": sf.DEFAULT_SERVICE_AUTH_URN, "scope": "s1"},
+    )
+    assert resp.status_code == 429
+
+
+def test_issue_service_token_resource_defaulted_audited(client, audit_calls, monkeypatch, app):
+    res = _mk_result(scopes=["s1"], default_scopes=["s1"], resources=["a1", "a2"])
+    adapter = StubAdapter(matches=True, result=res)
+    monkeypatch.setattr(sf, "ADAPTERS", [adapter], raising=False)
+
+    with app.app_context():
+        app.config["SERVICE_AUTH"] = {"adapters": {adapter.name(): {}}}
+
+    monkeypatch.setattr(sf, "issue", lambda **kw: ("tok", kw["ttl"]))
+
+    resp = client.post(
+        "/service/token",
+        data={"grant_type": sf.DEFAULT_SERVICE_AUTH_URN, "scope": "s1"},
+    )
+    assert resp.status_code == 200
+
+    events = [ev for ev, _ in audit_calls]
+    assert "service_token_resource_defaulted" in events, audit_calls
+
+
+def test_issue_contract_violation_resources_not_list_500():
+    class StubStore:
+        def generate_session_id(self): return "SID"
+        def generate_session_key(self): return "AT"
+        def create_session(self, **kwargs): return ("K", None)
+
+    store = StubStore()
+    with pytest.raises(HTTPException) as ei:
+        sf.issue(
+            store=store,
+            subject="s",
+            authz={"scopes": ["s1"], "resources": "a1", "groups": []},
+            realm="r",
+            ttl=10,
+            proof={"type": "t"},
+        )
+    assert ei.value.code == 500
+
+
+def test_issue_contract_violation_scopes_not_list_500():
+    class StubStore:
+        def generate_session_id(self): return "SID"
+        def generate_session_key(self): return "AT"
+        def create_session(self, **kwargs): return ("K", None)
+
+    store = StubStore()
+    with pytest.raises(HTTPException) as ei:
+        sf.issue(
+            store=store,
+            subject="s",
+            authz={"scopes": "s1", "resources": ["a1"], "groups": []},
+            realm="r",
+            ttl=10,
+            proof={"type": "t"},
+        )
+    assert ei.value.code == 500
+
+
+def test_issue_contract_violation_groups_not_list_500():
+    class StubStore:
+        def generate_session_id(self): return "SID"
+        def generate_session_key(self): return "AT"
+        def create_session(self, **kwargs): return ("K", None)
+
+    store = StubStore()
+    with pytest.raises(HTTPException) as ei:
+        sf.issue(
+            store=store,
+            subject="s",
+            authz={"scopes": ["s1"], "resources": ["a1"], "groups": "g1"},
+            realm="r",
+            ttl=10,
+            proof={"type": "t"},
+        )
+    assert ei.value.code == 500
+
+
+def test_clamp_ttl_type_error_path():
+    class X:
+        def __int__(self):  # pragma: no cover
+            raise TypeError("nope")
+    assert sf.clamp_ttl(100, X()) == 100

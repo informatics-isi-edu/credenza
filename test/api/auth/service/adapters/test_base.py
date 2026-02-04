@@ -131,56 +131,56 @@ def test_service_subject_validation_and_to_sub():
 def test_service_authorization_valid_and_optional_fields():
     a = b.ServiceAuthorization(
         scopes=["openid", "email"],
-        audiences=["aud1"],
+        resources=["aud1"],
         groups=["g1", "g2"],
         name="svc-name",
         email="svc@example.org",
         realm="test",
     )
     assert a.scopes == ["openid", "email"]
-    assert a.audiences == ["aud1"]
+    assert a.resources == ["aud1"]
     assert a.groups == ["g1", "g2"]
     assert a.name == "svc-name"
     assert a.email == "svc@example.org"
     assert a.realm == "test"
 
 
-def test_service_authorization_requires_scopes_and_audiences():
+def test_service_authorization_requires_scopes_and_resources():
     with pytest.raises(ValueError, match="scopes must not be empty"):
-        b.ServiceAuthorization(scopes=[], audiences=["aud1"])
+        b.ServiceAuthorization(scopes=[], resources=["aud1"])
 
-    with pytest.raises(ValueError, match="audiences must not be empty"):
-        b.ServiceAuthorization(scopes=["s1"], audiences=[])
+    with pytest.raises(ValueError, match="resources must not be empty"):
+        b.ServiceAuthorization(scopes=["s1"], resources=[])
 
 
 def test_service_authorization_groups_optional_but_validated_when_present():
-    a = b.ServiceAuthorization(scopes=["s1"], audiences=["a1"], groups=[])
+    a = b.ServiceAuthorization(scopes=["s1"], resources=["a1"], groups=[])
     assert a.groups == []
 
     with pytest.raises(ValueError, match="groups entry must not contain whitespace"):
-        b.ServiceAuthorization(scopes=["s1"], audiences=["a1"], groups=["bad group"])
+        b.ServiceAuthorization(scopes=["s1"], resources=["a1"], groups=["bad group"])
 
 
 def test_service_authorization_email_and_realm_validation():
     with pytest.raises(ValueError, match="email must not contain whitespace"):
-        b.ServiceAuthorization(scopes=["s1"], audiences=["a1"], email="a b@example.org")
+        b.ServiceAuthorization(scopes=["s1"], resources=["a1"], email="a b@example.org")
 
     with pytest.raises(ValueError, match=f"email exceeds {b._MAX_EMAIL_LEN} characters"):
-        b.ServiceAuthorization(scopes=["s1"], audiences=["a1"], email=("a" * (b._MAX_EMAIL_LEN + 1)))
+        b.ServiceAuthorization(scopes=["s1"], resources=["a1"], email=("a" * (b._MAX_EMAIL_LEN + 1)))
 
     with pytest.raises(ValueError, match="realm must not contain whitespace"):
-        b.ServiceAuthorization(scopes=["s1"], audiences=["a1"], realm="bad realm")
+        b.ServiceAuthorization(scopes=["s1"], resources=["a1"], realm="bad realm")
 
     with pytest.raises(ValueError, match=f"realm exceeds {b._MAX_REALM_LEN} characters"):
-        b.ServiceAuthorization(scopes=["s1"], audiences=["a1"], realm=("r" * (b._MAX_REALM_LEN + 1)))
+        b.ServiceAuthorization(scopes=["s1"], resources=["a1"], realm=("r" * (b._MAX_REALM_LEN + 1)))
 
     with pytest.raises(ValueError, match="realm is required"):
-        b.ServiceAuthorization(scopes=["s1"], audiences=["a1"], realm="")  # empty
+        b.ServiceAuthorization(scopes=["s1"], resources=["a1"], realm="")  # empty
 
 
 def test_service_issue_result_requires_proof_type_and_valid_realm():
     subj = b.ServiceSubject(provider="aws", subject_id="id")
-    authz = b.ServiceAuthorization(scopes=["s1"], audiences=["a1"])
+    authz = b.ServiceAuthorization(scopes=["s1"], resources=["a1"])
 
     # proof must be dict with non-empty 'type'
     with pytest.raises(ValueError, match="proof must include a non-empty 'type'"):

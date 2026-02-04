@@ -31,7 +31,7 @@ Accepts either:
 - HTTP Basic Authorization: Basic base64(client_id:client_secret)
 
 Principal policy is looked up in adapter_cfg["principals"][client_id].
-Requires: config values 'scopes', 'audiences' (lists), optional 'groups' (list).
+Requires: config values 'scopes', 'resources' (lists), optional 'groups' (list).
 """
 
 class ClientSecretAdapter(ServiceAuthAdapter):
@@ -84,14 +84,20 @@ class ClientSecretAdapter(ServiceAuthAdapter):
             abort(401)
 
         # Build subject & authz
-        subject = ServiceSubject(provider="client_secret", subject_id=cid)
-        authz = ServiceAuthorization(
-            scopes=binding["scopes"],
-            audiences=binding["audiences"],
-            groups=binding.get("groups", []),
-            email=binding.get("email"),
-            name=binding.get("name")
-        )
+        try:
+            subject = ServiceSubject(provider="client_secret", subject_id=cid)
+            authz = ServiceAuthorization(
+                scopes=binding.get("scopes", []),
+                resources=binding.get("resources", []),
+                groups=binding.get("groups", []),
+                email=binding.get("email"),
+                name=binding.get("name")
+            )
+        except Exception as e:
+            logger.warning(f"Exception while constructing service subject/authorization for adapter binding "
+                           f"(check config file for errors): {e}")
+            abort(500, "service_adapter_configuration_error")
+
         # Establish proof
         proof = {
             "type": "client_secret",

@@ -59,65 +59,70 @@ def get_session():
 
     realm = session.realm
     sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email") if session.session_type == SessionType.user else session.userinfo.get("name")
-
-    # Normalize token 'aud' claim (could be str or list from the session store/userinfo)
-    aud_raw = session.userinfo.get("aud") or []
-    if isinstance(aud_raw, str):
-        aud = [aud_raw]
-    elif isinstance(aud_raw, (list, tuple, set)):
-        aud = aud_raw
-    else:
-        aud = []
-    aud_claim = {s for a in aud if isinstance(a, str) and (s := a.strip())}
+    user = session.userinfo.get("email") \
+        if session.session_type == SessionType.user else session.userinfo.get("name","service")
 
     if session.session_type == SessionType.service:
-        # Audience binding for service/M2M tokens at introspection.
+        # Resource binding for service/M2M tokens at introspection.
         # - Accept multiple resource hints via repeated query params: ?resource=A&resource=B
-        # - Enforce ONLY for service sessions; user sessions skip audience checks entirely, as these have already been
+        # - Enforce ONLY for service sessions; user sessions skip resource checks entirely, as these have already been
         #   validated by the OIDC OP/RP flow.
         # - Rationale: issuance != proper use. This prevents cross-service replay by requiring that
-        #   at least one requested resource matches the token's declared audiences.
-        resources = [s for r in request.args.getlist("resource") if isinstance(r, str) and (s := r.strip())][:64]
+        #   at least one requested resource matches the token's declared resources.
 
-        if not aud_claim:
+        # Normalize and dedupe resource args
+        req_resources = sorted({
+            s for r in request.args.getlist("resource")
+            if isinstance(r, str) and (s := r.strip())
+        })[:64]
+        # Normalize token 'resource' claim (could be str or list from the session store/userinfo)
+        resources = session.userinfo.get("resources", session.userinfo.get("resource"))
+        if isinstance(resources, str):
+            res = [resources]
+        elif isinstance(resources, (list, tuple, set)):
+            res = list(resources)
+        else:
+            res = []
+        res_claim = {s for x in res if isinstance(x, str) and (s := x.strip())}
+
+        if not res_claim:
             audit_event(
-                "service_session_audience_misconfig",
+                "service_session_resource_misconfig",
                 session_id=sid,
                 realm=realm,
-                reason="empty_aud_in_session",
+                reason="empty_resource_in_session",
             )
-            abort(403)
+            abort(403, "empty_resource_in_session")
 
-        if not resources:
+        if not req_resources:
             audit_event(
-                "service_session_audience_denied",
+                "service_session_resource_denied",
                 session_id=sid,
                 realm=realm,
                 requested_resources=[],
-                token_audiences=sorted(aud_claim),
+                token_resources=sorted(res_claim),
                 reason="missing_resource_param",
             )
-            abort(403)
+            abort(403, "missing_resource_param")
 
-        if not (set(resources) & aud_claim):
+        if not (set(req_resources) & res_claim):
             audit_event(
-                "service_session_audience_denied",
+                "service_session_resource_denied",
                 session_id=sid,
                 realm=realm,
-                requested_resources=resources,
-                token_audiences=sorted(aud_claim),
-                reason="no_intersection",
+                requested_resources=req_resources,
+                token_resources=sorted(res_claim),
+                reason="no_resource_intersection",
             )
-            abort(403)
+            abort(403, "no_resource_intersection")
 
-        # Successful service audience check
+        # Successful service resource check
         audit_event(
-            "service_session_audience_ok",
+            "service_session_resource_ok",
             session_id=sid,
             realm=realm,
-            requested_resources=resources,
-            token_audiences=sorted(aud_claim),
+            requested_resources=req_resources,
+            token_resources=sorted(res_claim),
         )
 
     if request.method == "PUT":
@@ -132,7 +137,7 @@ def get_session():
                 cap = now_i + max_ttl
                 if session.expires_at > cap:
                     session.expires_at = cap
-                    session.session_ttl = 0
+                    session.session_ttl = 0  # do not extend expires_at in update_session()
                     audit_event(
                         "service_session_ttl_clamped",
                         session_id=sid,
@@ -142,12 +147,12 @@ def get_session():
         else:
             # enforce max refreshable lifetime for user sessions
             session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
-            refresh_expires_at = session.session_metadata.system.get("refresh_expires_at")
+            refresh_expires_at = (session.session_metadata.system or {}).get("refresh_expires_at")
             if refresh_expires_at and now > (refresh_expires_at - session_expiry_threshold):
                 revoke_tokens(sid, session)
                 store.delete_session(sid)
                 audit_event("refresh_expired", session_id=sid)
-                abort(401, "Session has expired and can no longer be refreshed")
+                abort(401, "refresh_expired")
 
             if upstream:
                 # Potentially refresh our access token from upstream, if we've got a refresh token to do so
@@ -173,10 +178,13 @@ def get_session():
 @session_blueprint.route("/session", methods=["PATCH"])
 @perf_logged(warn_ms=1000)
 def patch_session():
-    sid, _ = get_current_session()
+    sid, session = get_current_session()
     patch = request.get_json()
     if not isinstance(patch, dict):
         abort(400, "Expected JSON object")
+
+    if session.session_type != SessionType.user:
+        abort(403, "Only user sessions are allowed to PATCH")
 
     store = current_app.config["SESSION_STORE"]
     store.tag_session_metadata(sid, patch, scope="user")

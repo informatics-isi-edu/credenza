@@ -232,14 +232,20 @@ class AwsPresignedAdapter(ServiceAuthAdapter):
 
         # Build subject & authz
         role_arn = binding.get("role_arn")
-        subject = ServiceSubject(provider="aws", subject_id=role_arn)
-        authz = ServiceAuthorization(
-            scopes=binding["scopes"],
-            audiences=binding["audiences"],
-            groups=binding.get("groups", []),
-            email=binding.get("email"),
-            name=binding.get("name")
-        )
+        try:
+            subject = ServiceSubject(provider="aws", subject_id=role_arn)
+            authz = ServiceAuthorization(
+                scopes=binding.get("scopes", []),
+                resources=binding.get("resources", []),
+                groups=binding.get("groups", []),
+                email=binding.get("email"),
+                name=binding.get("name")
+            )
+        except Exception as e:
+            logger.warning(f"Exception while constructing service subject/authorization for adapter binding "
+                           f"(check config file for errors): {e}")
+            abort(500, "service_adapter_configuration_error")
+
         # Establish proof
         proof = {
             "type": "aws_presigned_gci",
