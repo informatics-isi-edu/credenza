@@ -14,7 +14,6 @@
 # limitations under the License.
 #
 import pytest
-import uuid
 import time
 from unittest.mock import Mock
 from flask import g
@@ -56,8 +55,10 @@ def test_start_device_flow_defaults(client, app, store, frozen_time):
     resp = client.post("/device/start")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert "device_code" in data and uuid.UUID(data["device_code"])
-    assert "user_code" in data and len(data["user_code"]) == 8
+    assert "device_code" in data and len(data["device_code"]) == 32  # 128-bit hex
+    assert all(c in "0123456789abcdef" for c in data["device_code"])
+    assert "user_code" in data and len(data["user_code"]) == 8  # 32-bit hex uppercase
+    assert all(c in "0123456789ABCDEF" for c in data["user_code"])
     assert data["interval"] == 3
     assert data["expires_in"] == df.DEVICE_TTL
     assert data["verification_uri"].endswith(f"/device/verify/{data['user_code']}")
@@ -81,7 +82,8 @@ def test_verify_device_invalid_user_code(client, app, store):
 def test_verify_device_expired_flow(client, app, store):
     store.set_usercode_mapping("UC", "DC", ttl=10)
     resp = client.get("/device/verify/UC")
-    assert resp.status_code == 404
+    assert resp.status_code == 410  # Gone - flow expired
+    assert "expired" in resp.get_json()["message"].lower()
 
 def test_verify_device_redirect(client, app, store, monkeypatch):
     device_code = "DCODE"
@@ -207,7 +209,7 @@ def test_device_callback_success(client, app, store, monkeypatch, frozen_time):
 
     resp = client.get("/device/callback", query_string={"code":"c","state":state})
     assert resp.status_code == 200
-    assert b"Device authorization complete" in resp.data
+    assert b"Device Authorized" in resp.data
 
     new_flow = store.get_device_flow(device_code)
     assert new_flow["verified"] is True
@@ -351,7 +353,7 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
         g.session_key = session_key
         resp = device_callback()
 
-    assert resp == "Device authorization complete. You may return to the device."
+    assert "Device Authorized" in resp
     assert call_count["count"] == 2
     update_mock.assert_called_once()
     updated_sid, updated_session = update_mock.call_args[0]

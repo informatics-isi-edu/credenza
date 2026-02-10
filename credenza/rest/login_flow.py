@@ -38,7 +38,9 @@ def login():
     try:
         client = factory.get_client(realm)
     except Exception as e:
-        abort(502, description=f"OIDC client init failed: {e}")
+        msg = "OIDC client init failed"
+        logger.error(f"{msg}: {e}")
+        abort(502, description=msg)
 
     referrer = safe_referrer(request.args.get('referrer')) or current_app.config.get("POST_LOGIN_REDIRECT", "/")
     logger.debug("Login referrer: %s", referrer)
@@ -97,7 +99,9 @@ def callback():
     try:
         client = factory.get_client(realm)
     except Exception as e:
-        abort(502, description=f"OIDC client init failed: {e}")
+        msg = "OIDC client init failed"
+        logger.error(f"{msg}: {e}")
+        abort(502, description=msg)
 
     preserve_ctx = False
     try:
@@ -113,6 +117,8 @@ def callback():
             redirect_uri = authn_request_ctx.get("redirect_uri")
             tokens = client.exchange_code_for_tokens(code, redirect_uri, code_verifier)
         except Exception as e:
+            msg = "Token exchange failed"
+            logger.error(f"{msg}: {e}")
             if is_transient_request_error(e):
                 preserve_ctx = True
                 # keep context briefly so user can retry
@@ -121,8 +127,8 @@ def callback():
                 if remaining == 0:
                     abort(400, description="State expired")
                 store.store_authn_request_ctx(state, authn_request_ctx, ttl=min(60, remaining))
-                abort(502, description=f"Token exchange failed (temporary): {e}")
-            abort(400, description=f"Token exchange failed: {e}")  # non-transient -> delete in finally
+                abort(502, description=f"{msg} (temporary)")
+            abort(400, description=msg)  # non-transient -> delete in finally
 
         scopes_granted = tokens.get('scope', authn_request_ctx.get("scope"))
 
@@ -137,7 +143,9 @@ def callback():
         try:
             userinfo = client.validate_id_token(tokens["id_token"], nonce)
         except Exception as e:
-            abort(400, description=f"Unable to validate id_token: {e}")
+            msg = "Unable to validate id_token"
+            logger.error(f"{msg}: {e}")
+            abort(400, description=msg)
 
         # Augment the session, if applicable
         userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
@@ -170,7 +178,6 @@ def callback():
             userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
             metadata.pop("augmentation_deferred", None)
             session_data.userinfo = userinfo
-            session_data.metadata = metadata
             session_data.additional_tokens = additional_tokens
             store.update_session(sid, session_data)
 
@@ -211,7 +218,9 @@ def logout():
     try:
         client = factory.get_client(realm)
     except Exception as e:
-        abort(502, description=f"OIDC client init failed: {e}")
+        msg = "OIDC client init failed"
+        logger.error(f"{msg}: {e}")
+        abort(502, description=msg)
 
     logout_url = client.logout_url
     logout_url_params = profile.get("logout_url_params")

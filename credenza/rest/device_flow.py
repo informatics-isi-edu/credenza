@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import uuid
 import time
 import logging
 from datetime import datetime, timezone
-from flask import Blueprint, request, jsonify, redirect, abort, current_app, g
+from flask import Blueprint, request, jsonify, redirect, abort, current_app, g, render_template_string
+from secrets import token_hex
 from ..api.common.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, augment_session, \
     revoke_tokens, strtobool, perf_logged
 from ..telemetry import audit_event
@@ -36,8 +36,8 @@ def start_device_flow():
     refresh = request.args.get("refresh")
     refresh = bool(strtobool(refresh)) if refresh is not None else False
 
-    device_code = str(uuid.uuid4().hex)
-    user_code = str(uuid.uuid4())[:8].upper()
+    device_code = token_hex(16)  # 128 bits
+    user_code = token_hex(4).upper()  # 32 bits, 8 hex chars
     poll_interval = current_app.config.get("DEVICE_POLL_INTERVAL", 3)
     redirect_uri = f"{current_app.config['BASE_URL']}/device/callback"
     flow = {
@@ -68,11 +68,18 @@ def verify_device(user_code):
     device_code = store.get_device_code_for_usercode(user_code)
     if not device_code:
         abort(404, description="Invalid user code")
-    store.delete_usercode_mapping(user_code)
 
     flow = store.get_device_flow(device_code)
     if not flow:
-        abort(404, description="Expired or invalid flow")
+        # Defensive: user_code and device_flow are created with the same TTL, so both
+        # should expire together. This branch is unlikely but guards against race
+        # conditions, storage inconsistencies, or manual deletion of the device_flow.
+        logger.warning(f"Device flow missing for valid user_code: user_code={user_code}, device_code={device_code}")
+        store.delete_usercode_mapping(user_code)
+        abort(410, description="Device authorization expired. Please restart the device flow.")
+
+    # Flow is valid - consume the user_code so it can't be reused
+    store.delete_usercode_mapping(user_code)
 
     realm = flow.get("realm", "default")
     redirect_uri = flow.get("redirect_uri")
@@ -84,7 +91,9 @@ def verify_device(user_code):
     try:
         client = factory.get_client(realm, native_client=True)
     except Exception as e:
-        abort(502, description=f"OIDC client init failed: {e}")
+        msg = "OIDC client init failed"
+        logger.error(f"{msg}: {e}")
+        abort(502, description=msg)
 
     request_offline_access_scope = profile.get("request_offline_access_scope_in_device_flow", True)
     auth_url, auth_state, code_verifier = client.create_authorization_url(
@@ -132,7 +141,9 @@ def device_callback():
     try:
         client = factory.get_client(realm, native_client=True)
     except Exception as e:
-        abort(502, description=f"OIDC client init failed: {e}")
+        msg = "OIDC client init failed"
+        logger.error(f"{msg}: {e}")
+        abort(502, description=msg)
 
     code_verifier = flow.get("code_verifier")
     if current_app.config.get("ENABLE_PKCE", True) and not code_verifier:
@@ -142,7 +153,9 @@ def device_callback():
     try:
         tokens = client.exchange_code_for_tokens(code, redirect_uri, code_verifier)
     except Exception as e:
-        abort(502, description=f"Token exchange failed: {e}")
+        msg = "Token exchange failed"
+        logger.error(f"{msg}: {e}")
+        abort(502, description=msg)
     scopes_granted = tokens.get("scope", flow.get("scope"))
     offline_granted = "refresh_token" in tokens
 
@@ -154,7 +167,9 @@ def device_callback():
         userinfo = client.validate_id_token(tokens["id_token"], nonce)
     except Exception as e:
         store.set_device_flow(device_code, flow, ttl=60)  # shorten TTL
-        abort(400, description=f"Unable to validate id_token: {e}")
+        msg = "Unable to validate id_token"
+        logger.error(f"{msg}: {e}")
+        abort(400, description=msg)
 
     # Determine refresh expiration
     now = time.time()
@@ -199,7 +214,6 @@ def device_callback():
         userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
         metadata.pop("augmentation_deferred", None)
         session_data.userinfo = userinfo
-        session_data.metadata = metadata
         session_data.additional_tokens = additional_tokens
         store.update_session(session_id, session_data)
 
@@ -215,7 +229,28 @@ def device_callback():
                 refresh_expires_at=datetime.fromtimestamp(refresh_expires_at, timezone.utc).isoformat())
     logger.info(f"Device login successful for user {user} ({sub}) with session id {session_id} on realm {realm}")
 
-    return "Device authorization complete. You may return to the device."
+    return render_template_string("""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Device Authorized</title>
+    <style>
+        body { font-family: system-ui, sans-serif; display: flex;
+               justify-content: center; align-items: center;
+               min-height: 100vh; margin: 0; background: #f5f5f5; }
+        .card { background: white; padding: 2rem; border-radius: 8px;
+                text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #22c55e; margin: 0 0 0.5rem; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Device Authorized</h1>
+        <p>You may close this window and return to your device.</p>
+    </div>
+</body>
+</html>""")
 
 @device_blueprint.route("/device/token", methods=["POST"])
 @perf_logged(warn_ms=1000)
