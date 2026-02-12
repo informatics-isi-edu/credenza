@@ -2,17 +2,20 @@
 
 ## 1. Status
 
-**Proposed**\
+**Proposed**  
 Decision Date: 2026-02-11
 
 ### Review History
 
-| Date       | Status     | Notes                                                              |
-|------------|------------|--------------------------------------------------------------------|
-| 2026-02-11 | Proposed   | Draft including token exchange constraints and acceptance criteria |
-| YYYY-MM-DD | Accepted   | Approved after implementation and security review                  |
-| YYYY-MM-DD | Amended    | Updated exchange constraints / clarifications                      |
-| YYYY-MM-DD | Superseded | Replaced by ADR-00XX                                               |
+| Date       | Status     | Notes                                                                                |
+|------------|------------|--------------------------------------------------------------------------------------|
+| 2026-02-10 | Proposed   | Draft including token exchange constraints and acceptance criteria                   |
+| 2026-02-11 | Amended    | Unified client registry and grant-based session model; clarified lifecycle semantics |
+| 2026-02-11 | Amended    | Added authorization code infrastructure and backend atomicity requirements           |
+| YYYY-MM-DD | Accepted   | Approved after implementation and security review                                    |
+| YYYY-MM-DD | Superseded | Replaced by ADR-00XX                                                                 |
+
+---
 
 ## 2. Context
 
@@ -23,136 +26,314 @@ services.
 
 New requirements from OAuth-native resource servers require:
 
--   OAuth 2.1 Authorization Code + PKCE support
--   RFC 8414 Authorization Server Metadata
--   RFC 7662 Token Introspection
--   RFC 8707 Resource Indicators
--   RFC 8693 Token Exchange
--   Audience-bound access tokens
--   Standards-compliant discovery and validation flows
+- OAuth 2.1 Authorization Code + PKCE support  
+- RFC 8414 Authorization Server Metadata  
+- RFC 7662 Token Introspection  
+- RFC 8707 Resource Indicators  
+- RFC 8693 Token Exchange  
+- RFC 8628 Device Authorization  
+- Audience-bound access tokens  
+- Standards-compliant discovery and validation flows  
 
 Credenza must:
 
--   Remain identity-provider agnostic
--   Avoid duplicating upstream identity policy engines
--   Avoid becoming a full-featured IAM platform
--   Preserve its opaque, resource-bound token model
+- Remain identity-provider agnostic  
+- Avoid duplicating upstream identity policy engines  
+- Avoid becoming a full-featured IAM platform  
+- Preserve its opaque, resource-bound token model  
 
-------------------------------------------------------------------------
+In addition, Credenza previously maintained separate configuration
+surfaces for OAuth clients and machine-to-machine (M2M) bindings.
+As OAuth support expands, this separation introduces duplication
+and inconsistent policy enforcement.
+
+## 2.1 Motivation
+
+The expansion of Credenza into a narrow OAuth 2.1 Authorization Server
+is driven by concrete integration requirements from OAuth-native
+clients and resource servers, particularly within the MCP ecosystem.
+However, these requirements are not MCP-specific; they represent a
+general class of scenarios where:
+
+- A client authenticates via OAuth Authorization Code + PKCE.
+- A resource server validates access tokens via introspection.
+- The resource server must call downstream services on behalf of the user.
+- Audience isolation must be preserved across service boundaries.
+
+### OAuth-Native Clients (Authorization Code + PKCE)
+
+Modern clients (desktop applications, CLI tools, browser-based integrations)
+expect a standards-compliant OAuth Authorization Server supporting:
+
+- Authorization Code + PKCE (OAuth 2.1 profile)
+- Authorization Server metadata discovery (RFC 8414)
+- Resource Indicators (RFC 8707)
+
+These clients:
+
+1. Discover Credenza via OAuth metadata.
+2. Initiate `/authorize` with PKCE.
+3. Receive an authorization code.
+4. Exchange the code at `/token` for an access token.
+5. Present that access token to protected resource servers.
+
+Without a proper `/authorize` and `/token` surface, Credenza cannot
+interoperate with OAuth-native clients using standardized flows.
+
+### Resource Servers (Introspection + Token Exchange)
+
+Resource servers must:
+
+- Validate incoming bearer tokens via introspection (RFC 7662).
+- Enforce audience isolation via resource indicators (RFC 8707).
+- Optionally perform token exchange (RFC 8693) when accessing
+  downstream services on behalf of an authenticated user.
+
+In MCP deployments, for example:
+
+- An MCP client obtains an access token scoped to `mcp:deriva-ml`.
+- The MCP server validates the token via `/introspect`.
+- The MCP server then exchanges the token for a `deriva:*`-scoped token
+  in order to call DERIVA REST APIs on behalf of the user.
+
+This pattern generalizes to any architecture where:
+
+- A front-end service receives user-bound tokens.
+- That service must call one or more downstream services.
+- Audience boundaries must be preserved.
+- Privilege escalation must be prevented.
+
+Supporting this securely requires:
+
+- Default-deny token exchange.
+- Explicit per-client exchange allowlists.
+- Non-transitive derived tokens.
+- Strict preservation of canonical identity claims.
+- Clear separation between identity, audience, and authorization domains.
+
+### Why These Changes Are Necessary
+
+Supporting these patterns requires Credenza to:
+
+- Implement full OAuth AS flows (not just upstream OIDC login).
+- Enforce audience isolation consistently across all grant types.
+- Issue opaque, resource-bound access tokens.
+- Provide reliable introspection for downstream validation.
+- Support secure, policy-driven token exchange.
+- Guarantee single-use authorization codes with atomic replay protection.
+
+The unified client registry enables consistent policy enforcement across:
+
+- OAuth clients (authorization_code, device_code).
+- Machine-to-machine proof-based service clients.
+- Token exchange participants.
+- Introspection clients.
+
+By introducing:
+
+- Grant-type-driven session semantics.
+- Explicit resource binding.
+- Atomic authorization code handling.
+- Declarative client policy.
+
+Credenza can serve as a standards-compliant OAuth Authorization Server
+while preserving its narrow scope:
+
+- Identity remains upstream.
+- Credenza enforces audience boundaries.
+- Resource servers enforce business authorization.
+
+These changes enable secure, interoperable deployments in MCP and in
+any similar architecture where resource servers must act on behalf of
+an authenticated client using OAuth-standard mechanisms.
+
+---
 
 ## 3. Decision
 
 Credenza SHALL operate in two clearly separated roles:
 
-1.  **OpenID Connect Relying Party (RP)**
-2.  **Narrow OAuth 2.1 Authorization Server (AS)**
+1. **OpenID Connect Relying Party (RP)**
+2. **Narrow OAuth 2.1 Authorization Server (AS)**
 
 Credenza SHALL:
 
--   Implement the minimum OAuth surface required to issue and validate
-    opaque, audience-bound access tokens.
--   Delegate identity authentication and user policy evaluation to
-    upstream OpenID Providers.
--   Avoid implementing consent UI, role engines, or rich authorization
-    policy systems.
--   Issue only opaque access tokens validated via introspection.
--   Enforce audience isolation via resource indicators.
--   Require token exchange for cross-resource access.
+- Implement the minimum OAuth surface required to issue and validate
+  opaque, audience-bound access tokens.
+- Delegate identity authentication and user policy evaluation to
+  upstream OpenID Providers.
+- Avoid implementing consent UI, role engines, or rich authorization
+  policy systems.
+- Issue only opaque access tokens validated via introspection.
+- Enforce audience isolation via resource indicators.
+- Require token exchange for cross-resource access.
+- Maintain a unified client registry representing all authenticated
+  entities requesting session issuance.
+- Implement single-use authorization codes with atomic consumption
+  guarantees in supported storage backends.
 
 Credenza SHALL NOT:
 
--   Issue JWT access tokens.
--   Publish a JWKS endpoint.
--   Implement dynamic scope negotiation UI.
--   Act as a general-purpose identity provider.
--   Implement application-level authorization logic.
+- Issue JWT access tokens.
+- Publish a JWKS endpoint.
+- Implement dynamic scope negotiation UI.
+- Act as a general-purpose identity provider.
+- Implement application-level authorization logic.
 
-------------------------------------------------------------------------
+---
 
 ## 4. Architectural Roles
 
 ### 4.1 Credenza as OIDC Relying Party
 
--   Delegates authentication to upstream OpenID Providers.
--   Validates ID tokens and identity assertions.
--   Establishes internal session records.
--   Does not issue ID tokens or act as an OpenID Provider.
+- Delegates authentication to upstream OpenID Providers.
+- Validates ID tokens and identity assertions.
+- Establishes internal session records.
+- Does not issue ID tokens or act as an OpenID Provider.
+
+---
 
 ### 4.2 Credenza as Narrow OAuth Authorization Server
 
--   Issues opaque, audience-bound access tokens.
--   Exposes Authorization Code + PKCE flow (OAuth 2.1 profile).
--   Supports Token Introspection (RFC 7662).
--   Supports Resource Indicators (RFC 8707) for audience-bound access tokens.
--   Supports Token Exchange (RFC 8693).
--   Publishes Authorization Server Metadata (RFC 8414).
+- Issues opaque, audience-bound access tokens.
+- Exposes Authorization Code + PKCE flow (OAuth 2.1 profile).
+- Supports Device Authorization (RFC 8628).
+- Supports Token Introspection (RFC 7662).
+- Supports Resource Indicators (RFC 8707).
+- Supports Token Exchange (RFC 8693).
+- Publishes Authorization Server Metadata (RFC 8414).
 
-## 4.3 Grant Types & Session Profiles
+`/login` remains a first-party interactive login endpoint and is distinct
+from `/authorize`, which implements OAuth 2.1 semantics for registered clients.
+
+---
+
+### 4.3 Unified Client Registry
+
+**Decision:** Credenza SHALL maintain a single declarative client registry
+that subsumes legacy OAuth client configuration and `service_auth.json`
+M2M bindings.
+
+A **Client** represents any entity capable of authenticating to Credenza
+and requesting session issuance.
+
+A client registry entry SHALL define:
+
+- Authentication method (`auth.method`)
+- Allowed grant types
+- Allowed resource bindings
+- Optional redirect URIs (authorization code only)
+- Optional scope restrictions
+- Optional token exchange permissions
+- TTL and lifecycle constraints
+
+Supported authentication methods MAY include:
+
+- `client_secret` (OAuth confidential clients)
+- `none` (public clients using PKCE)
+- `aws_presigned` (role-based M2M proof)
+- Other future proof-context mechanisms (e.g., `mtls`)
+
+Authentication method and grant type are orthogonal:
+
+- Authentication defines how the client proves identity.
+- Grant type defines session lifecycle semantics.
+- Resource binding defines where the resulting token may be used.
+
+No implicit trust bindings SHALL exist outside the unified registry.
+
+Legacy `service_auth.json` SHALL be deprecated and its semantics
+migrated into the unified registry.
+
+---
+
+### 4.4 Authorization Code Infrastructure
+
+Authorization codes SHALL:
+
+- Be short-lived (configurable, typically ~5 minutes).
+- Be single-use.
+- Be atomically consumed at exchange time.
+- Be bound to client_id, redirect_uri, and PKCE challenge at issuance time.
+
+Atomic consumption requirements:
+
+- Redis backend: MUST use `GETDEL`.
+- Postgres backend: MUST use `DELETE ... RETURNING`.
+- Other backends MAY provide best-effort semantics but are NOT
+  recommended for production OAuth usage.
+
+No `used` flag SHALL be relied upon.  
+Consumption SHALL be implemented as atomic fetch-and-delete.
+
+PKCE verification:
+
+- `S256` SHALL be required.
+- `plain` SHALL NOT be supported.
+- PKCE verification SHALL occur during `/token` authorization_code exchange.
+
+---
+
+### 4.5 Session Model
+
+Credenza SHALL represent issued sessions using the following structural invariants:
+
+- `grant_type` defines lifecycle semantics and is immutable.
+- `allowed_resources` defines audience binding.
+- `userinfo` contains canonical identity claims.
+- Session expiration and refresh eligibility are determined by grant profile.
+- Session expiration is governed by both sliding expiration and absolute lifetime constraints.
+
+The legacy `session_type` field SHALL be deprecated in favor of
+`grant_type`.
+
+Audience enforcement SHALL be applied uniformly based on the
+`resource` parameter (RFC 8707), not on legacy session type distinctions.
+
+---
+
+### 4.6 Grant Types & Session Profiles
 
 Credenza supports multiple OAuth grant types.  
 Each grant type maps to a distinct **session profile**, defining token lifetime, refresh behavior, and intended use.
 
-This ensures predictable security semantics while preserving a narrow Authorization Server scope.
+---
+
+#### Supported Grant Types
+
+| Grant Type                | RFC                             | Primary Use Case                        | Upstream Refresh | Typical TTL     | Notes                                                                                      |
+|---------------------------|---------------------------------|-----------------------------------------|------------------|-----------------|--------------------------------------------------------------------------------------------|
+| Authorization Code + PKCE | OAuth 2.1 / RFC 6749 / RFC 7636 | Interactive browser or desktop clients  | No               | Medium          | Sliding expiration via `PUT /session`                                                      |
+| Device Authorization      | RFC 8628                        | Headless / CLI clients                  | Yes              | Long            | Bounded by upstream `offline_access` max TTL or service-configured default (e.g., 14 days) |
+| Token Exchange            | RFC 8693                        | Audience transformation                 | No               | Short           | Derived, non-transitive                                                                    |
+| Service (Proof-Based)     | Internal                        | Machine-to-machine proof-based issuance | No               | Short-to-Medium | Extendable up to configured max TTL                                                        |
+
+Device sessions are intentionally long-lived relative to interactive sessions.  
+Their effective maximum lifetime is bounded by upstream refresh expiration
+or configured policy (commonly 14 days).
 
 ---
 
-### Supported Grant Types
+#### Session Lifetime Model
 
-| Grant Type                | RFC                             | Primary Use Case                                       | Refresh Tokens | Typical TTL                                    | Notes                                                  |
-|---------------------------|---------------------------------|--------------------------------------------------------|----------------|------------------------------------------------|--------------------------------------------------------|
-| Authorization Code + PKCE | OAuth 2.1 / RFC 6749 / RFC 7636 | Interactive browser or desktop clients                 | No             | Medium (e.g., 4–8h)                            | No `offline_access`; fixed session lifetime            |
-| Device Authorization      | RFC 8628                        | Headless / CLI clients requiring long-lived API access | Yes            | Short access token (e.g., 30–60m), refreshable | May request `offline_access`; refresh lifetime bounded |
-| Token Exchange            | RFC 8693                        | Audience transformation between resource servers       | No             | Short (e.g., 15–30m)                           | Derived tokens; no refresh; non-transitive by default  |
+Credenza enforces a two-tier expiration model:
 
----
+1. **Sliding expiration** — Sessions may extend `expires_at` via `PUT /session`
+   when permitted by grant profile.
+2. **Absolute lifetime cap** — Sessions are bounded by an absolute expiration
+   constraint:
+   - Service sessions: `max_ttl_seconds`
+   - Device sessions: `refresh_expires_at`
+   - Interactive sessions: internal TTL policy
 
-### Session Profile Definitions
+Only Device sessions MAY perform upstream token refresh using stored
+refresh tokens. Other grant types SHALL NOT perform upstream refresh.
 
-#### 1. Interactive Session Profile (Authorization Code + PKCE)
-
-- Intended for human-interactive flows.
-- No refresh tokens issued.
-- No `offline_access` requested from upstream IDP.
-- Medium-lived access token.
-- Requires full re-authentication upon expiration.
-- Suitable for browser sessions and OAuth-native applications.
-
-Security Rationale:
-Interactive sessions are expected to be bounded to user work sessions and do not require long-term unattended access.
+Derived (token exchange) sessions SHALL NOT be extended or refreshed.
 
 ---
 
-#### 2. Device Session Profile (RFC 8628)
-
-- Intended for headless or CLI-based clients.
-- Issues refresh tokens.
-- May request `offline_access` from upstream IDP.
-- Access tokens are short-lived.
-- Refresh token lifetime is bounded by explicit maximum policy.
-- Refresh may be revoked centrally.
-
-Security Rationale:
-Device flow enables non-browser clients to obtain API access while preserving user-mediated authorization. Refresh capability is necessary for long-running automation but must remain tightly bounded.
-
----
-
-#### 3. Derived Session Profile (Token Exchange)
-
-- Issued via `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`.
-- No refresh tokens issued.
-- Short-lived access tokens.
-- Non-transitive by default.
-- Must not elevate privileges beyond subject session.
-- Used exclusively for audience transformation.
-
-Security Rationale:
-Derived tokens exist solely to enforce audience isolation. They are intentionally short-lived and non-refreshable to minimize replay and privilege escalation risk.
-
----
-
-### Invariants Across All Grant Types
-
-Regardless of grant type:
+#### Invariants Across All Grant Types
 
 - All access tokens are **opaque**.
 - All access tokens are **audience-bound**.
@@ -160,52 +341,44 @@ Regardless of grant type:
 - Resource servers enforce business-level authorization.
 - Credenza does not embed application-level authorization logic.
 
+Grant type determines session lifecycle semantics.  
+Resource binding determines where a token may be presented.
+
 ---
-
-### Design Constraint
-
-Grant type determines session semantics.
-
-Session lifetime, refresh behavior, and upstream token retention are defined by the grant profile — not by resource type.
-
-This preserves separation of concerns and prevents policy creep.
-
-------------------------------------------------------------------------
 
 ## 5. Token Exchange Policy Constraints
 
 ### 5.1 Default-Deny Model
 
--   All token exchange requests are denied unless explicitly allowed.
--   No implicit trust relationships exist between resources.
+- All token exchange requests are denied unless explicitly allowed.
+- No implicit trust relationships exist between resources.
 
 ### 5.2 Explicit Resource Allowlist
 
--   Exchange targets MUST be explicitly configured per client.
--   Namespace similarity SHALL NOT imply exchange permission.
--   Wildcard patterns SHOULD be avoided.
+- Exchange targets MUST be explicitly configured per client.
+- Namespace similarity SHALL NOT imply exchange permission.
+- Wildcard patterns SHOULD be avoided.
 
 ### 5.3 No Automatic Transitivity
 
--   Token exchange SHALL NOT be transitive by default.
--   Derived tokens are not automatically eligible for further exchange.
--   Chaining depth MAY be restricted.
+- Token exchange SHALL NOT be transitive by default.
+- Derived tokens are not automatically eligible for further exchange.
 
-### 5.4 No Privilege Escalation via Exchange
+### 5.4 No Privilege Escalation
 
--   Exchange SHALL NOT elevate privileges beyond those asserted in the
-    subject session.
--   Exchange transforms audience, not authorization scope.
+- Exchange SHALL NOT elevate privileges beyond those asserted in the
+  subject session.
+- Exchange transforms audience, not authorization scope.
 
 ### 5.5 Declarative Configuration Only
 
--   Exchange policy MUST remain configuration-driven.
--   No embedded policy engine or scripting layer.
+- Exchange policy MUST remain configuration-driven.
+- No embedded policy engine or scripting layer.
 
 ### 5.6 Separation of Authorization Responsibilities
 
--   Credenza enforces audience boundaries.
--   Resource servers enforce application-level authorization.
+- Credenza enforces audience boundaries.
+- Resource servers enforce application-level authorization.
 
 ### 5.7 Canonical Claim Handling and M2M Assertions (Revised)
 
@@ -213,95 +386,64 @@ This preserves separation of concerns and prevents policy creep.
 
 Credenza SHALL NOT introduce a separate protocol-level `"claims"` container. Introspection responses SHALL expose canonical claims as top-level members in accordance with RFC 7662.
 
-**Implementation Details:**
-
-- IDP claims are normalized via `resolve_claim()` using the configured claim map.
-- Machine-to-machine (M2M) assertions SHALL be inserted into `session.userinfo` under canonical claim keys prior to session persistence.
-- No distinction between "idp_claims" and "m2m_claims" SHALL be exposed at the protocol level.
-- Introspection SHALL reuse the same claim resolution logic used by `/session`.
-
-**Behavioral Invariants:**
-
-- All claims exposed via introspection are flattened top-level members.
-- No nested `"claims"` object SHALL appear in RFC 7662 responses.
-- Token exchange SHALL preserve canonical claims unless explicitly configured otherwise.
-- M2M assertions MUST NOT overwrite identity-provider canonical claims for overlapping keys.
-- `claim_mapper.py` serves as the canonical normalization layer and defines the set of claim keys eligible for exposure via introspection.
-
-**Outcomes:**
-
-- Eliminates semantic ambiguity between IDP claims and M2M assertions.
-- Prevents identity forgery semantics previously implied by M2M `groups`.
-- Ensures introspection and `/session` remain behaviorally consistent.
-- Maintains a narrow OAuth surface without introducing new schema layers.
-------------------------------------------------------------------------
+---
 
 ## 6. Acceptance Criteria
 
-This ADR may move from **Proposed** to **Accepted** when the following
-conditions are met:
+This ADR may move from **Proposed** to **Accepted** when:
 
-1.  Authorization Code + PKCE flow is implemented and validated via
-    integration tests.
-2.  OAuth metadata endpoint (`/.well-known/oauth-authorization-server`)
-    is live and standards-compliant.
-3.  Token introspection (`POST /introspect`) is implemented and used by
-    at least one resource server.
-4.  Resource indicator enforcement is verified in authorization and
-    introspection flows.
-5.  Token exchange is implemented with:
-    -   Default-deny policy
-    -   Explicit allowlist enforcement
-    -   No automatic transitivity
-    -   No privilege escalation
-6.  Documentation clearly states scope boundaries and non-goals.
-7.  Security review confirms no unintended IAM expansion.
+1. Authorization Code + PKCE flow is implemented and validated.
+2. OAuth metadata endpoint is standards-compliant.
+3. Token introspection is implemented and used.
+4. Resource indicator enforcement is verified.
+5. Token exchange is implemented with:
+   - Default-deny policy
+   - Explicit allowlist enforcement
+   - No transitivity
+   - No privilege escalation
+6. Unified client registry replaces legacy service bindings.
+7. Authorization codes are atomically single-use across supported backends.
+8. Security review confirms no unintended IAM expansion.
 
-------------------------------------------------------------------------
+---
 
 ## 7. Consequences
 
 ### Positive
 
--   Standards-compliant integration with OAuth-native resource servers.
--   Strong audience isolation.
--   Centralized token lifecycle control.
--   Clear identity vs audience authority separation.
+- Unified security model
+- Elimination of duplicated configuration
+- Cleaner authentication abstraction
+- Strong audience isolation
+- Proper OAuth AS compliance
 
 ### Negative
 
--   Credenza exposes OAuth endpoints.
--   Requires exchange policy governance.
+- Larger configuration surface
+- Broader security review scope
+- Requires careful migration of legacy bindings
+- Requires storage backends that support atomic consume for production OAuth use
 
-------------------------------------------------------------------------
+---
 
 ## 8. Alternatives Considered
 
 ### 8.1 Upstream IDP as Full Authorization Server
 
-Rejected --- breaks opaque token model and tightly couples services to
-IDP semantics.
+Rejected — breaks opaque token model and couples services to IDP semantics.
 
 ### 8.2 Token Passthrough
 
-Rejected --- violates audience binding and enables cross-service replay.
+Rejected — violates audience binding and enables cross-service replay.
 
-### 8.3 Expand Credenza into IAM Platform
+### 8.3 Maintain Separate OAuth and M2M Registries
 
-Rejected --- unnecessary scope expansion.
+Rejected — duplicates policy and increases inconsistency risk.
 
-------------------------------------------------------------------------
+---
 
-## 9. Rationale
+## 9. Summary
 
-Credenza standardizes token issuance and validation while delegating
-identity to upstream providers.
-
-Explicit exchange constraints ensure Credenza remains an audience
-authority, not an identity authority.
-
-Architectural separation of concerns is preserved:
-
--   Identity upstream
--   Audience enforcement in Credenza
--   Business authorization in resource servers
+This ADR formalizes Credenza as a narrow OAuth 2.1 Authorization Server
+while preserving its core design principle: identity upstream, audience
+enforcement in Credenza, and business authorization in resource servers.
