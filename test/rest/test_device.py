@@ -18,9 +18,9 @@ import time
 from unittest.mock import Mock
 from flask import g
 from urllib.parse import urlparse, parse_qs
-from credenza.rest import device_flow as df
-from credenza.api.session.storage.session_store import SessionData
-from credenza.rest.device_flow import device_callback
+from credenza.rest import device as df
+from credenza.api.session.storage.session_store import SessionData, SessionType
+from credenza.rest.device import device_callback
 
 class StubDeviceClient:
     def __init__(self, *, tokens=None, userinfo=None, scope="openid email profile"):
@@ -236,6 +236,7 @@ def test_poll_for_token_success(client, app, store, frozen_time):
     sid = "S10"
     skey, session = store.create_session(
         session_id=sid,
+        session_type=SessionType.DEVICE,
         access_token="acc",
         userinfo={"sub":"u"},
         realm=app.config["DEFAULT_REALM"],
@@ -255,6 +256,7 @@ def test_device_logout_not_device(client, app, store, monkeypatch):
     sid = "S20"
     skey, session = store.create_session(
         session_id=sid,
+        session_type=SessionType.USER,
         access_token="acc",
         userinfo={"sub":"u","email":"e"},
         realm=app.config["DEFAULT_REALM"],
@@ -270,6 +272,7 @@ def test_device_logout_success(client, app, store, monkeypatch):
     sid = "S21"
     skey, session = store.create_session(
         session_id=sid,
+        session_type=SessionType.DEVICE,
         access_token="acc",
         userinfo={"sub":"u","email":"e"},
         realm=app.config["DEFAULT_REALM"],
@@ -344,7 +347,7 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
             return userinfo, {}
         else:
             return dummy_augmented_userinfo, dummy_additional_tokens
-    monkeypatch.setattr("credenza.rest.device_flow.augment_session", mock_augment)
+    monkeypatch.setattr("credenza.rest.device.augment_session", mock_augment)
 
     update_mock = Mock()
     monkeypatch.setattr(store, "update_session", update_mock)

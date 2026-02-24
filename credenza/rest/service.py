@@ -222,7 +222,7 @@ def revoke_service_token():
     store: SessionStore = current_app.config["SESSION_STORE"]
 
     # Only service tokens are revocable here; user sessions should use user logout
-    if session.session_type != SessionType.service:
+    if not session.is_service():
         audit_event(
             "service_token_revoke_denied",
             session_id=sid,
@@ -304,11 +304,12 @@ def issue(
     sid = store.generate_session_id()
     session_key, _session_data = store.create_session(
         session_id=sid,
-        session_type=SessionType.service,
+        session_type=SessionType.SERVICE,
         access_token=store.generate_session_key(),
         scopes=scopes,
         realm=realm,
         userinfo=userinfo,
+        allowed_resources=resources,
         expires_at=now + ttl,
         session_ttl=ttl,
         metadata=metadata,

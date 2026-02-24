@@ -60,9 +60,9 @@ def get_session():
     realm = session.realm
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email") \
-        if session.session_type == SessionType.user else session.userinfo.get("name","service")
+        if not session.is_service() else session.userinfo.get("name","service")
 
-    if session.session_type == SessionType.service:
+    if session.is_service():
         # Resource binding for service/M2M tokens at introspection.
         # - Accept multiple resource hints via repeated query params: ?resource=A&resource=B
         # - Enforce ONLY for service sessions; user sessions skip resource checks entirely, as these have already been
@@ -75,15 +75,7 @@ def get_session():
             s for r in request.args.getlist("resource")
             if isinstance(r, str) and (s := r.strip())
         })[:64]
-        # Normalize token 'resource' claim (could be str or list from the session store/userinfo)
-        resources = session.userinfo.get("resources", session.userinfo.get("resource"))
-        if isinstance(resources, str):
-            res = [resources]
-        elif isinstance(resources, (list, tuple, set)):
-            res = list(resources)
-        else:
-            res = []
-        res_claim = {s for x in res if isinstance(x, str) and (s := x.strip())}
+        res_claim = set(session.allowed_resources)
 
         if not res_claim:
             audit_event(
@@ -127,7 +119,7 @@ def get_session():
 
     if request.method == "PUT":
 
-        if session.session_type == SessionType.service:
+        if session.is_service():
             policy = (session.session_metadata.system or {}).get("service_policy") or {}
             max_ttl = int(policy.get("max_ttl_seconds") or DEFAULT_MAX_TTL)
             now_i = int(now)
@@ -145,6 +137,15 @@ def get_session():
                         clamped_expires_at=datetime.fromtimestamp(cap, timezone.utc).isoformat(),
                         max_session_ttl_seconds=max_ttl)
         else:
+            if not session.can_extend():
+                audit_event("session_not_extendable",
+                            session_id=sid,
+                            user=user,
+                            sub=sub,
+                            realm=realm,
+                            expires_at=datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat())
+                abort(403, "session cannot be extended")
+
             # enforce max refreshable lifetime for user sessions
             session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
             refresh_expires_at = (session.session_metadata.system or {}).get("refresh_expires_at")
@@ -154,7 +155,7 @@ def get_session():
                 audit_event("refresh_expired", session_id=sid)
                 abort(401, "refresh_expired")
 
-            if upstream:
+            if upstream and session.can_refresh_upstream():
                 # Potentially refresh our access token from upstream, if we've got a refresh token to do so
                 refresh_access_token(sid, session)
                 # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
@@ -183,7 +184,7 @@ def patch_session():
     if not isinstance(patch, dict):
         abort(400, "Expected JSON object")
 
-    if session.session_type != SessionType.user:
+    if not session.is_primary():
         abort(403, "Only user sessions are allowed to PATCH")
 
     store = current_app.config["SESSION_STORE"]
@@ -300,6 +301,7 @@ def make_session_response(sid, session: SessionData):
                 "groups":             groups,
                 "roles":              roles,
                 "scopes":             get_effective_scopes(session),
+                "allowed_resources":  session.allowed_resources,
                 "metadata":           session.session_metadata.to_dict(),
                 "created_at":         datetime.fromtimestamp(session.created_at, timezone.utc).isoformat(),
                 "updated_at":         datetime.fromtimestamp(session.updated_at, timezone.utc).isoformat(),

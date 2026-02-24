@@ -278,14 +278,11 @@ PKCE verification:
 
 Credenza SHALL represent issued sessions using the following structural invariants:
 
-- `grant_type` defines lifecycle semantics and is immutable.
+- `session_type` defines lifecycle semantics and is immutable.
 - `allowed_resources` defines audience binding.
 - `userinfo` contains canonical identity claims.
 - Session expiration and refresh eligibility are determined by grant profile.
 - Session expiration is governed by both sliding expiration and absolute lifetime constraints.
-
-The legacy `session_type` field SHALL be deprecated in favor of
-`grant_type`.
 
 Audience enforcement SHALL be applied uniformly based on the
 `resource` parameter (RFC 8707), not on legacy session type distinctions.

@@ -120,6 +120,7 @@ def test_put_session_with_refresh_access_token(client,
 
     # Make a deep‐copy so we don't clobber other tests
     sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.DEVICE
     # Simulate an expired access token, but a still‐valid refresh token
     sess.session_metadata.system.update({
         "token_expires_at":   now - 1,    # already expired
@@ -201,6 +202,7 @@ def test_put_session_with_refresh_access_token_failure(client,
 
     # Copy session and simulate token about to expire, but refresh still valid
     sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.DEVICE
     sess.session_metadata.system.update({
         "token_expires_at":   now - 1,    # already expired
         "refresh_expires_at": now + 600,  # still valid
@@ -271,6 +273,7 @@ def test_put_session_additional_tokens_refresh(client,
 
     # Prepare a session with four additional token blocks:
     sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.DEVICE
     sess.additional_tokens = {
         "good":    {"refresh_token": "rt_good", "expires_at": now - threshold - 1},
         "fail":    {"refresh_token": "rt_fail", "expires_at": now - threshold - 1},
@@ -456,9 +459,9 @@ def test_make_session_response_legacy(app, store, base_session):
 
 
 def test_get_session_service_missing_resource_403(monkeypatch, client, base_session):
-    # Make the base session a service session with an resources
-    base_session.session_type = SessionType.service
-    base_session.userinfo["resource"] = ["rest-api"]
+    # Make the base session a service session with a resource constraint
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-miss", base_session))
 
@@ -467,8 +470,8 @@ def test_get_session_service_missing_resource_403(monkeypatch, client, base_sess
 
 
 def test_get_session_service_wrong_resource_403(monkeypatch, client, base_session):
-    base_session.session_type = SessionType.service
-    base_session.userinfo["resource"] = ["rest-api"]
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-wrong", base_session))
 
@@ -477,8 +480,8 @@ def test_get_session_service_wrong_resource_403(monkeypatch, client, base_sessio
 
 
 def test_get_session_service_multiple_resources_one_matches_200(monkeypatch, client, base_session):
-    base_session.session_type = SessionType.service
-    base_session.userinfo["resource"] = ["rest-api"]
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-ok", base_session))
 
@@ -491,8 +494,8 @@ def test_get_session_service_multiple_resources_one_matches_200(monkeypatch, cli
 
 
 def test_get_session_service_resource_as_string_normalized_200(monkeypatch, client, base_session):
-    base_session.session_type = SessionType.service
-    base_session.userinfo["resource"] = "rest-api"  # single string; handler normalizes
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-str", base_session))
 
@@ -505,8 +508,8 @@ def test_get_session_service_resource_as_string_normalized_200(monkeypatch, clie
 
 
 def test_put_session_service_missing_resource_403(monkeypatch, client, base_session):
-    base_session.session_type = SessionType.service
-    base_session.userinfo["resource"] = ["rest-api"]
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-miss", base_session))
 
@@ -514,10 +517,20 @@ def test_put_session_service_missing_resource_403(monkeypatch, client, base_sess
     assert resp.status_code == 403
 
 
+def test_put_session_disallowed_extend_403(monkeypatch, client, base_session):
+    base_session._session_type = SessionType.DERIVED
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-miss", base_session))
+
+    resp = client.put("/session")
+    assert resp.status_code == 403
+
+
 def test_put_session_service_match_200(monkeypatch, client, base_session, store):
     # Make this a service session whose resource includes the requested resource
-    base_session.session_type = SessionType.service
-    base_session.userinfo["resource"] = ["rest-api"]
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
 
     # Return our session from the handler
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-ok", base_session))
@@ -540,8 +553,8 @@ def test_put_session_service_match_200(monkeypatch, client, base_session, store)
 
 def test_get_session_user_ignores_resource(monkeypatch, client, base_session):
     # Ensure user session path ignores 'resource' entirely
-    base_session.session_type = SessionType.user
-    base_session.userinfo["resource"] = ["some-other-api"]
+    base_session._session_type = SessionType.USER
+    base_session._allowed_resources = ["some-other-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("user-ok", base_session))
 
@@ -557,8 +570,8 @@ def test_put_session_service_ttl_clamped_to_max_ttl_200_and_persisted(
     cap = now + max_ttl
 
     sess = copy.deepcopy(base_session)
-    sess.session_type = SessionType.service
-    sess.userinfo["resource"] = ["rest-api"]
+    sess._session_type = SessionType.SERVICE
+    sess._allowed_resources = ["rest-api"]
     sess.created_at = now - 10
     sess.expires_at = now + 99999  # > cap -> clamp should fire
 
@@ -592,12 +605,10 @@ def test_put_session_service_ttl_clamped_to_max_ttl_200_and_persisted(
 
 
 def test_get_session_service_empty_res_misconfig_403(monkeypatch, client, base_session, audit_calls):
-    # Make a service session with an empty/missing resource claim
+    # Make a service session with empty allowed_resources
     sess = copy.deepcopy(base_session)
-    sess.session_type = SessionType.service
-
-    # Option A: explicit empty list
-    sess.userinfo["resources"] = []
+    sess._session_type = SessionType.SERVICE
+    sess._allowed_resources = []
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-empty-res", sess))
 

@@ -21,7 +21,7 @@ import fakeredis
 import testing.postgresql
 from types import SimpleNamespace
 from credenza.api.common.util import AESGCMCodec
-from credenza.api.session.storage.session_store import SessionStore, SessionData
+from credenza.api.session.storage.session_store import SessionStore, SessionData, SessionType
 from credenza.api.session.storage.backends.memory import MemoryBackend
 from credenza.api.session.storage.backends.redis import RedisBackend
 from credenza.api.session.storage.backends.valkey import ValkeyBackend
@@ -81,6 +81,7 @@ def test_create_and_get_session(store):
     sid = "sess1"
     store.create_session(
         session_id=sid,
+        session_type=SessionType.USER,
         id_token="idtok",
         access_token="atok",
         refresh_token="rtok",
@@ -97,6 +98,7 @@ def test_get_session_by_session_key(store):
     sid = "sess3"
     skey,_  = store.create_session(
         session_id=sid,
+        session_type=SessionType.USER,
         id_token="idtok",
         access_token="token123",
         refresh_token="rtok",
@@ -111,6 +113,7 @@ def test_update_and_delete_session(store):
     sid = "sess4"
     store.create_session(
         session_id=sid,
+        session_type=SessionType.USER,
         id_token="id1",
         access_token="tok1",
         refresh_token="rt1",
@@ -130,8 +133,20 @@ def test_update_and_delete_session(store):
 
 def test_list_session_ids_and_get_ttl(frozen_time, store):
     # Create two sessions
-    store.create_session(session_id="a", id_token="i", access_token="a", refresh_token="r", userinfo={}, realm="realm")
-    store.create_session(session_id="b", id_token="i", access_token="a", refresh_token="r", userinfo={}, realm="realm")
+    store.create_session(session_id="a",
+                         session_type=SessionType.USER,
+                         id_token="i",
+                         access_token="a",
+                         refresh_token="r",
+                         userinfo={},
+                         realm="realm")
+    store.create_session(session_id="b",
+                         session_type=SessionType.USER,
+                         id_token="i",
+                         access_token="a",
+                         refresh_token="r",
+                         userinfo={},
+                         realm="realm")
     ids = store.list_session_ids()
     assert "a" in set(ids)
 

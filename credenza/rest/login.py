@@ -18,7 +18,7 @@ import time
 import uuid
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify, g
-from ..api.session.storage.session_store import TRANSIENT_DATA_TTL
+from ..api.session.storage.session_store import TRANSIENT_DATA_TTL, SessionType
 from ..api.common.util import has_current_session, get_effective_scopes, generate_nonce, augment_session, \
     get_cookie_domain, revoke_tokens, safe_referrer, is_transient_request_error, perf_logged
 from ..telemetry import audit_event
@@ -153,6 +153,7 @@ def callback():
         sid = store.generate_session_id()
         session_key, session_data = store.create_session(
             session_id=sid,
+            session_type=SessionType.USER,
             id_token=tokens.get("id_token"),
             access_token=tokens.get("access_token"),
             refresh_token=tokens.get("refresh_token"),
@@ -260,6 +261,9 @@ def logout():
 @login_blueprint.route("/preauth")
 @perf_logged(warn_ms=1000)
 def preauth():
+    if current_app.config.get("ENABLE_LEGACY_API", False):
+        abort(404)
+
     do_redirect = request.args.get('do_redirect')
     referrer_arg = request.args.get('referrer')
     referer_header = request.environ.get('HTTP_REFERER')

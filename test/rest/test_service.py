@@ -13,9 +13,10 @@
 # limitations under the License.
 #
 import pytest
+import copy
 from types import SimpleNamespace
 from werkzeug.exceptions import HTTPException
-from credenza.rest import service_flow as sf
+from credenza.rest import service as sf
 from credenza.api.session.storage.session_store import SessionType
 from credenza.api.auth.service.adapters.base import ProofContext
 
@@ -187,7 +188,7 @@ def test_issue_creates_service_session_with_expected_fields(monkeypatch, multi_r
 
     # Verify create_session() call contract
     assert calls["session_id"] == "SID-1"
-    assert calls["session_type"] == SessionType.service
+    assert calls["session_type"] == SessionType.SERVICE
     assert calls["access_token"] == "AT-1"
     assert calls["scopes"] == ["s1", "s2"]
     assert calls["realm"] == "credenza-test"
@@ -205,6 +206,12 @@ def test_issue_creates_service_session_with_expected_fields(monkeypatch, multi_r
         expected["resources"] = ["a1"]
         expected["resource"] = "a1"
     assert calls["userinfo"] == expected
+
+    # allowed_resources passed to create_session
+    if multi_resource:
+        assert calls["allowed_resources"] == ["a1", "a2"]
+    else:
+        assert calls["allowed_resources"] == ["a1"]
 
     # expiry + ttl
     assert calls["expires_at"] == now + ttl
@@ -459,9 +466,13 @@ def test_issue_service_token_success_200(client, audit_calls, monkeypatch, app):
     assert "service_token_issued" in events, audit_calls
 
 
-def test_revoke_service_token_denied_non_service_403(client, audit_calls, monkeypatch, app, store):
-    # Handler uses imported get_current_session from util; patch the local symbol
-    sess = SimpleNamespace(session_type=SessionType.user, realm="test", userinfo={"sub": "u"})
+def test_revoke_service_token_denied_non_service_403(client, audit_calls, monkeypatch, app, store, base_session):
+    # Use real SessionData but mark as USER
+    sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.USER
+    sess.realm = "test"
+    sess.userinfo = {"sub": "u"}
+
     monkeypatch.setattr(sf, "get_current_session", lambda: ("sid-user", sess))
 
     with app.app_context():
@@ -478,8 +489,13 @@ def test_revoke_service_token_denied_non_service_403(client, audit_calls, monkey
     assert "service_token_revoke_denied" in events, audit_calls
 
 
-def test_revoke_service_token_success_204(client, audit_calls, monkeypatch, app, store):
-    sess = SimpleNamespace(session_type=SessionType.service, realm="test", userinfo={"sub": "svc-123"})
+def test_revoke_service_token_success_204(client, audit_calls, monkeypatch, app, store, base_session):
+    # Use real SessionData but mark as SERVICE
+    sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.SERVICE
+    sess.realm = "test"
+    sess.userinfo = {"sub": "svc-123"}
+
     monkeypatch.setattr(sf, "get_current_session", lambda: ("sid-svc", sess))
 
     with app.app_context():

@@ -18,6 +18,7 @@ import time
 import logging
 import pytest
 from credenza.api.common import util as um
+from credenza.api.session.storage.session_store import SessionType
 from credenza.refresh import refresh_worker as rw
 from credenza.refresh.refresh_worker import run_refresh_worker
 
@@ -130,6 +131,7 @@ def test_additional_token_refresh_success_and_failure(app,
 
     # Prepare a session with four additional token blocks
     sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.DEVICE
     sess.additional_tokens = {
         "good":    {"refresh_token": "rt1", "expires_at": now + 100},
         "fail":    {"refresh_token": "rt2", "expires_at": now + 100},
@@ -224,6 +226,7 @@ def test_device_access_token_refresh(app,
     app.config["OIDC_IDP_PROFILES"] = profiles
 
     sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.DEVICE
     sess.session_metadata.system.update({
         "device_session":         True,
         "allow_automatic_refresh": True,

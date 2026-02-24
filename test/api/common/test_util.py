@@ -142,7 +142,7 @@ def test_get_current_session_service_absolute_lifetime_exceeded_401_deletes_and_
     now = 1_700_000_000  # deterministic "current" time
 
     sess = copy.deepcopy(base_session)
-    sess.session_type = SessionType.service
+    sess._session_type = SessionType.SERVICE
     sess.created_at = now - 100  # created exactly abs_life seconds ago => hard_stop == now
     sess.expires_at = now + 10_000
 
@@ -279,7 +279,7 @@ def test_get_tokens_by_scope_only_primary(base_session):
         "openid email": {"access_token": "A1", "refresh_token": "R1"}
     }
 
-def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app):
+def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app, base_session):
     """revoke_tokens() revokes access and refresh tokens per scope and emits audit events."""
 
     sid = "session123"
@@ -289,12 +289,12 @@ def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app):
         "email": "user@example.org"
     }
 
-    class DummySession:
-        def __init__(self):
-            self.userinfo = userinfo
-            self.realm = realm
-            self.session_type = SessionType.user
-            self.session_metadata = SessionMetadata()
+    # Use the shared base_session fixture, but copy & override userinfo/realm to match test expectations
+    sess = copy.deepcopy(base_session)
+    sess.userinfo = userinfo
+    sess.realm = realm
+    sess._session_type = SessionType.USER
+    sess.session_metadata = SessionMetadata()
 
     # Fake token map by scope
     token_map = {
@@ -334,7 +334,7 @@ def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app):
     app.config["OIDC_CLIENT_FACTORY"] = factory
 
     with app.app_context():
-        util.revoke_tokens(sid, DummySession())
+        util.revoke_tokens(sid, sess)
 
     # Validate expected tokens revoked
     assert ("scope1", "access1", "access_token") in revoked_tokens

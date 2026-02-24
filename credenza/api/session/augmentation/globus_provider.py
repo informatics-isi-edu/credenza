@@ -18,7 +18,7 @@ import logging
 from flask import current_app, abort
 from .base_provider import DefaultSessionAugmentationProvider
 from ....api.common.util import get_effective_scopes
-from ...session.storage.session_store import SessionData
+from ...session.storage.session_store import SessionData, SessionType
 from ....telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
         return False
 
-    def session_from_bearer_token(self, bearer_token) -> (str, SessionData):
+    def session_from_bearer_token(self, bearer_token) -> tuple[str, SessionData]:
         realm = current_app.config["DEFAULT_REALM"]
         factory = current_app.config["OIDC_CLIENT_FACTORY"]
         store = current_app.config["SESSION_STORE"]
@@ -136,6 +136,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
         session_id = store.generate_session_id()
         session_key, session_data = store.create_session(
             session_id=session_id,
+            session_type=SessionType.USER,
             access_token=bearer_token,
             scopes=scopes,
             userinfo=userinfo,

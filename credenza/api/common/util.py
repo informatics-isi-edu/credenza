@@ -111,7 +111,7 @@ def get_current_session() -> Tuple[Optional[str], Optional[SessionData]]:
 
     store = current_app.config["SESSION_STORE"]
     sid, session = store.get_session_by_session_key(skey)
-    if session and session.session_type == SessionType.service:
+    if session and session.is_service():
         policy = (session.session_metadata.system or {}).get("service_policy") or {}
         abs_life = int(policy.get("absolute_lifetime_seconds") or DEFAULT_MAX_ABSOLUTE_LIFETIME)
         # Absolute lifetime: never extend past created_at + abs_life
@@ -231,9 +231,7 @@ def refresh_access_token(sid, session):
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
     realm = session.realm
-    sys_metadata = session.session_metadata.system or {}
-    is_device_session = sys_metadata.get("device_session", False)
-    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=is_device_session)
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=session.is_device())
     updated = False
 
     now = time.time()
@@ -276,9 +274,7 @@ def refresh_additional_tokens(sid, session):
     user = session.userinfo.get("email")
     realm = session.realm
     tokens = session.additional_tokens or {}
-    sys_metadata = session.session_metadata.system or {}
-    is_device_session = sys_metadata.get("device_session", False)
-    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=is_device_session)
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=session.is_device())
 
     updated = False
     for scope, token in list(tokens.items()):
@@ -291,9 +287,8 @@ def refresh_additional_tokens(sid, session):
         expires_at = token.get("expires_at", 0)
         expiry_threshold = current_app.config.get("TOKEN_EXPIRY_THRESHOLD", 300)
         if now < expires_at - expiry_threshold:
-            # current_time_dt = datetime.fromtimestamp(now, tz=ZoneInfo(get_localzone_name())).isoformat()
-            # expires_at_threshold_dt = datetime.fromtimestamp(expires_at - expiry_threshold,
-            #                                                  tz=ZoneInfo(get_localzone_name())).isoformat()
+            # current_time_dt = datetime.fromtimestamp(now).isoformat()
+            # expires_at_threshold_dt = datetime.fromtimestamp(expires_at - expiry_threshold).isoformat()
             # logger.debug(f"Additional token refresh skipped for [sid={sid}, user={user}, sub={sub}, scope={scope}] "
             #              f"with current time {current_time_dt} not exceeding expiry threshold {expires_at_threshold_dt}")
             continue
@@ -329,14 +324,13 @@ def refresh_additional_tokens(sid, session):
 
 
 def revoke_tokens(sid, session):
-    if session.session_type == SessionType.service:
+    if session.is_service():
         return
+
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
     realm = session.realm
-    sys_metadata = session.session_metadata.system or {}
-    is_device_session = sys_metadata.get("device_session", False)
-    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(realm, native_client=is_device_session)
+    client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(realm, native_client=session.is_device())
     try:
         # try to revoke all tokens associated with the session
         tokens = get_tokens_by_scope(session)
@@ -353,7 +347,7 @@ def revoke_tokens(sid, session):
         logger.warning(f"Exception during token revocation: {e}")
 
 
-def get_cookie_domain():
+def get_cookie_domain() -> Optional[str]:
     """
     Determine which cookie domain to use, based on configuration.
 

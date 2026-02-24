@@ -32,10 +32,10 @@ from .api.session.storage.backends.base import create_storage_backend
 from .api.common.claim_mapper import build_realm_claim_maps
 from .api.common.util import AESGCMCodec, is_browser_client, get_correlation_id
 from .rest.session import session_blueprint
-from .rest.login_flow import login_blueprint
-from .rest.device_flow import device_blueprint
+from .rest.login import login_blueprint
+from .rest.device import device_blueprint
 from .rest.discovery import discovery_blueprint
-from .rest.service_flow import service_blueprint
+from .rest.service import service_blueprint
 from .telemetry.audit.logger import init_audit_logger
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker

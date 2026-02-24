@@ -12,9 +12,8 @@ Each phase should be independently testable and deployable where possible.
 **Goal:** Introduce structural primitives without changing external behavior.
 
 ## 0.1 Session Model Refactor
-- Add immutable `grant_type` to session model.
+- Add immutable `session_type` to session model.
 - Add `allowed_resources` field.
-- Deprecate `session_type` (maintain temporary compatibility).
 - Update resource enforcement to use `allowed_resources`.
 
 ## 0.2 Lifetime Model Clarification
@@ -37,7 +36,7 @@ Each phase should be independently testable and deployable where possible.
 
 Deliverable:
 - No external behavior change.
-- All session issuance paths updated to set `grant_type`.
+- All session issuance paths updated to set `session_type`.
 
 ---
 
@@ -133,7 +132,7 @@ Deliverable:
 ## 3.2 Device Token Polling
 - Enforce client_id consistency.
 - Enforce polling interval.
-- Create session with `grant_type=DEVICE`.
+- Create session with `session_type=DEVICE`.
 - Store upstream refresh token if provided.
 
 Deliverable:

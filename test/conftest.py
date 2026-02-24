@@ -137,7 +137,7 @@ def base_session():
         created_at=now - 100,
         updated_at=now - 50,
         realm="test",
-        session_type=SessionType.user,
+        _session_type=SessionType.USER,
         session_metadata=metadata,
         additional_tokens={}
     )
@@ -148,6 +148,7 @@ def fake_current_session(monkeypatch, store):
     sid = "fake_current_sid"
     skey, session = store.create_session(
         session_id=sid,
+        session_type=SessionType.USER,
         id_token="id",
         access_token="at",
         refresh_token="rt",

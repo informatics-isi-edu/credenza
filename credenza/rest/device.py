@@ -20,6 +20,7 @@ from flask import Blueprint, request, jsonify, redirect, abort, current_app, g, 
 from secrets import token_hex
 from ..api.common.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, augment_session, \
     revoke_tokens, strtobool, perf_logged
+from ..api.session.storage.session_store import SessionType
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ device_blueprint = Blueprint("device", __name__)
 
 DEVICE_TTL = 600  # 10 minutes
 
+@device_blueprint.route("/device_authorization", methods=["POST"]) # RFC 8628
 @device_blueprint.route("/device/start", methods=["POST"])
 @perf_logged(warn_ms=1000)
 def start_device_flow():
@@ -40,6 +42,7 @@ def start_device_flow():
     user_code = token_hex(4).upper()  # 32 bits, 8 hex chars
     poll_interval = current_app.config.get("DEVICE_POLL_INTERVAL", 3)
     redirect_uri = f"{current_app.config['BASE_URL']}/device/callback"
+    allowed_resources = current_app.config.get("DEFAULT_ALLOWED_RESOURCES", [])
     flow = {
         "user_code": user_code,
         "verified": False,
@@ -49,7 +52,8 @@ def start_device_flow():
         "session_key": None,
         "realm": realm,
         "refresh":refresh,
-        "redirect_uri":  redirect_uri
+        "redirect_uri":  redirect_uri,
+        "allowed_resources": allowed_resources
     }
     store.set_device_flow(device_code, flow, ttl=DEVICE_TTL)
     store.set_usercode_mapping(user_code, device_code, ttl=DEVICE_TTL)
@@ -182,7 +186,6 @@ def device_callback():
         refresh_expires_at = now + refresh_expires_in
 
     metadata = {
-        "device_session": True,
         "allow_automatic_refresh": flow.get("refresh", False),
         "offline_access_granted": offline_granted,
         "refresh_expires_at": refresh_expires_at,
@@ -195,12 +198,14 @@ def device_callback():
     session_id = store.generate_session_id()
     session_key, session_data = store.create_session(
         session_id=session_id,
+        session_type=SessionType.DEVICE,
         access_token=tokens.get("access_token"),
         id_token=tokens.get("id_token"),
         refresh_token=tokens.get("refresh_token"),
         scopes=scopes_granted,
         userinfo=userinfo,
         realm=realm,
+        allowed_resources=flow.get("allowed_resources",[]),
         metadata=metadata,
         additional_tokens=additional_tokens,
         expires_at=refresh_expires_at
@@ -224,6 +229,7 @@ def device_callback():
                 user=user,
                 sub=sub,
                 scopes=get_effective_scopes(session_data),
+                allowed_resources=session_data.allowed_resources,
                 realm=realm,
                 offline_access=offline_granted,
                 refresh_expires_at=datetime.fromtimestamp(refresh_expires_at, timezone.utc).isoformat())
@@ -295,8 +301,7 @@ def device_logout():
     store = current_app.config["SESSION_STORE"]
 
     # Confirm this is a device session
-    is_device = session.session_metadata.system.get("device_session")
-    if not is_device:
+    if not session.is_device():
         abort(403, description="Not a device session")
 
     revoke_tokens(sid, session)

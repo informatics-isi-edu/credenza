@@ -19,11 +19,11 @@ import uuid
 from flask import g
 from unittest.mock import Mock
 from urllib.parse import urlparse, parse_qs, unquote
-from credenza.rest import login_flow as lf
+from credenza.rest import login as lf
 from credenza.api.session.storage.session_store import TRANSIENT_DATA_TTL
 from credenza.api.auth.client.oidc_client import OIDCClient
-from credenza.api.session.storage.session_store import SessionData
-from credenza.rest.login_flow import callback
+from credenza.api.session.storage.session_store import SessionData, SessionType
+from credenza.rest.login import callback
 
 class StubOIDCClient:
     def __init__(self, *, tokens, userinfo, scope="openid email profile"):
@@ -204,6 +204,7 @@ def test_logout_uses_client_logout_and_profile(client, app, store, monkeypatch):
     monkeypatch.setattr(lf, "has_current_session", lambda: sid)
     monkeypatch.setattr(lf, "revoke_tokens", lambda sid, session: None)
     store.create_session(sid,
+                         session_type=SessionType.USER,
                          access_token="at",
                          userinfo={"sub": "u"},
                          realm="test",
@@ -272,7 +273,7 @@ def test_callback_deferred_augmentation(app, base_session, monkeypatch):
         else:
             return {"sub": "123", "email": "u@example.com", "groups": ["g1"]}, {"foo": "bar"}
 
-    monkeypatch.setattr("credenza.rest.login_flow.augment_session", mock_augment)
+    monkeypatch.setattr("credenza.rest.login.augment_session", mock_augment)
     monkeypatch.setattr("credenza.api.common.util.get_augmentation_provider_params",
                         lambda realm: {"defer_augmentation": True})
 

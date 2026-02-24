@@ -19,7 +19,7 @@ import uuid
 import json
 import logging
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Any, Optional
 from .backends.base import StorageBackend
 from .backends.memory import MemoryBackend
 
@@ -28,14 +28,15 @@ logger = logging.getLogger(__name__)
 TRANSIENT_DATA_TTL=900
 
 class SessionType(str, enum.Enum):
-    user = "user"
-    service = "service"
-
+    USER = "user"
+    DEVICE = "device"
+    DERIVED = "derived"
+    SERVICE = "service"
 
 @dataclass
 class SessionMetadata:
-    system: Dict[str, Any] = field(default_factory=dict)
-    user: Dict[str, Any] = field(default_factory=dict)
+    system: dict[str, Any] = field(default_factory=dict)
+    user: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         # Coerce None -> {} and reject non-dict
@@ -60,13 +61,22 @@ class SessionData:
     created_at: float
     updated_at: float
     realm: str
-    session_type: SessionType
+    _session_type: SessionType = field(repr=False) # read only
+    _allowed_resources: list[str] = field(default_factory=list) # read only
     id_token: Optional[str] = None
     refresh_token: Optional[str] = None
     scopes: Optional[str] = None
     session_ttl: Optional[int] = None
     session_metadata: SessionMetadata = field(default_factory=SessionMetadata)
-    additional_tokens: Dict[str, Any] = field(default_factory=dict)
+    additional_tokens: dict = field(default_factory=dict)
+
+    @property
+    def session_type(self) -> SessionType:
+        return self._session_type
+
+    @property
+    def allowed_resources(self) -> list[str]:
+        return self._allowed_resources
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -82,6 +92,24 @@ class SessionData:
             raise ValueError("session_metadata must be an object")
         data["session_metadata"] = SessionMetadata(**md)
         return SessionData(**data)
+
+    def is_primary(self) -> bool:
+        return self.session_type in {SessionType.USER, SessionType.DEVICE}
+
+    def is_derived(self) -> bool:
+        return self.session_type is SessionType.DERIVED
+
+    def is_device(self) -> bool:
+        return self.session_type is SessionType.DEVICE
+
+    def is_service(self) -> bool:
+        return self.session_type is SessionType.SERVICE
+
+    def can_extend(self) -> bool:
+        return self.session_type in {SessionType.USER, SessionType.DEVICE}
+
+    def can_refresh_upstream(self) -> bool:
+        return self.session_type is SessionType.DEVICE
 
 
 class SessionStore:
@@ -145,9 +173,11 @@ class SessionStore:
 
     def create_session(self,
                        session_id,
+                       session_type,
                        access_token,
                        userinfo,
                        realm,
+                       allowed_resources = None,
                        id_token = None,
                        refresh_token = None,
                        scopes = None,
@@ -155,8 +185,10 @@ class SessionStore:
                        additional_tokens=None,
                        use_access_token_as_session_key=False,
                        expires_at=None,
-                       session_ttl=None,
-                       session_type=SessionType.user) -> Tuple[Optional[str], Optional[SessionData]]:
+                       session_ttl=None) -> tuple[Optional[str], Optional[SessionData]]:
+        if session_type is None:
+            raise ValueError("session_type is required")
+
         now = time.time()
         if expires_at is None:
             expires_at = (now + self.ttl)
@@ -176,7 +208,8 @@ class SessionStore:
             created_at=now,
             updated_at=now,
             realm=realm,
-            session_type=session_type,
+            _session_type=session_type,
+            _allowed_resources=allowed_resources,
             session_ttl=self.ttl if session_ttl is None else int(session_ttl),
             session_metadata=session_metadata,
             additional_tokens=additional_tokens or {},
@@ -220,14 +253,14 @@ class SessionStore:
             logger.debug("Deleted corrupted/unparseable session %s: %s", session_id, e)
             return None
 
-    def get_session_by_session_key(self, session_key) -> Tuple[Optional[str], Optional[SessionData]]:
+    def get_session_by_session_key(self, session_key) -> tuple[Optional[str], Optional[SessionData]]:
         session_id = self.get_session_id_for_session_key(session_key)
         if not session_id:
             return None, None
         session = self.get_session_data(session_id)
         return session_id, session
 
-    def update_session(self, session_id, session_data: SessionData) -> Tuple[Optional[str], Optional[SessionData]]:
+    def update_session(self, session_id, session_data: SessionData) -> tuple[Optional[str], Optional[SessionData]]:
         now = time.time()
         session_data.updated_at = now
 
@@ -266,7 +299,7 @@ class SessionStore:
 
         logger.debug(f"Deleted session {session_id}")
 
-    def list_session_ids(self) -> List[str]:
+    def list_session_ids(self) -> list[str]:
         base = f"{self.prefix}{self.sid_prefix}"
         ids = []
         for val in self.backend.scan_iter(f"{base}*"):

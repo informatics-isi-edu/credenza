@@ -16,7 +16,6 @@
 import time
 import logging
 from ..api.common.util import refresh_access_token, refresh_additional_tokens, revoke_tokens
-from ..api.session.storage.session_store import SessionType
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -40,7 +39,7 @@ def run_refresh_worker(app):
                 if not session:
                     continue
 
-                if session.session_type == SessionType.service:
+                if session.is_service():
                     continue
 
                 realm = session.realm
@@ -60,8 +59,7 @@ def run_refresh_worker(app):
                     continue
 
                 # For non-device sessions, don't allow refresh logic to handle session extension or token refresh
-                is_device_session = sys_metadata.get("device_session", False)
-                if not is_device_session:
+                if not session.is_device():
                     continue
 
                 modified = False
