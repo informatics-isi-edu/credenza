@@ -18,10 +18,18 @@ import logging
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, redirect, abort, current_app, g, render_template_string
 from secrets import token_hex
-from ..api.common.util import get_current_session, get_realm, get_effective_scopes, generate_nonce, augment_session, \
-    revoke_tokens, strtobool, perf_logged
-from ..api.session.storage.session_store import SessionType
 from ..telemetry import audit_event
+from ..api.common.crypto import generate_nonce
+from ..api.session.storage.session_store import SessionType
+from ..api.common.util import (
+    get_current_session,
+    get_realm,
+    get_effective_scopes,
+    augment_session,
+    revoke_tokens,
+    strtobool,
+    perf_logged
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +55,8 @@ def start_device_flow():
         "user_code": user_code,
         "verified": False,
         "interval": poll_interval,
-        "issued_at": time.time(),
-        "expires_at": time.time() + DEVICE_TTL,
+        "issued_at": int(time.time()),
+        "expires_at": int(time.time()) + DEVICE_TTL,
         "session_key": None,
         "realm": realm,
         "refresh":refresh,
@@ -69,7 +77,7 @@ def start_device_flow():
 @device_blueprint.route("/device/verify/<user_code>", methods=["GET"])
 def verify_device(user_code):
     store = current_app.config["SESSION_STORE"]
-    device_code = store.get_device_code_for_usercode(user_code)
+    device_code = store.consume_usercode_mapping(user_code)
     if not device_code:
         abort(404, description="Invalid user code")
 
@@ -79,11 +87,7 @@ def verify_device(user_code):
         # should expire together. This branch is unlikely but guards against race
         # conditions, storage inconsistencies, or manual deletion of the device_flow.
         logger.warning(f"Device flow missing for valid user_code: user_code={user_code}, device_code={device_code}")
-        store.delete_usercode_mapping(user_code)
         abort(410, description="Device authorization expired. Please restart the device flow.")
-
-    # Flow is valid - consume the user_code so it can't be reused
-    store.delete_usercode_mapping(user_code)
 
     realm = flow.get("realm", "default")
     redirect_uri = flow.get("redirect_uri")
@@ -176,20 +180,21 @@ def device_callback():
         abort(400, description=msg)
 
     # Determine refresh expiration
-    now = time.time()
-    refresh_expires_in = tokens.get("refresh_expires_in")
+    now = int(time.time())
+    absolute_session_lifetime_secs = tokens.get("refresh_expires_in")
     # 0 generally indicates "no expiry" (dubious) and None isn't helpful, so fall back to the configured value or default
-    if not refresh_expires_in:
-        refresh_expires_at = (
-                now + (current_app.config.get("MAX_REFRESH_TOKEN_LIFETIME", 14) * 86400))  # default to 14 days
+    if not absolute_session_lifetime_secs:
+        # default to 14 days if not configured
+        absolute_session_lifetime_secs = current_app.config.get("MAX_REFRESH_TOKEN_LIFETIME", 14) * 86400
+        absolute_expires_at = now + absolute_session_lifetime_secs
     else:
-        refresh_expires_at = now + refresh_expires_in
+        absolute_expires_at = now + absolute_session_lifetime_secs
 
     metadata = {
-        "allow_automatic_refresh": flow.get("refresh", False),
-        "offline_access_granted": offline_granted,
-        "refresh_expires_at": refresh_expires_at,
-        "token_expires_at": tokens.get("expires_at")
+        "allow_automatic_refresh":  flow.get("refresh", False),
+        "offline_access_granted":   offline_granted,
+        "access_token_expires_at":  tokens.get("expires_at"),
+        "refresh_token_expires_at": absolute_expires_at
     }
 
     # Augment the session, if applicable
@@ -208,7 +213,8 @@ def device_callback():
         allowed_resources=flow.get("allowed_resources",[]),
         metadata=metadata,
         additional_tokens=additional_tokens,
-        expires_at=refresh_expires_at
+        expires_at=absolute_expires_at,
+        absolute_session_lifetime_secs = absolute_session_lifetime_secs
     )
 
     flow.update({"verified": True, "session_key": session_key, "nonce": None, "code_verifier": None})
@@ -232,7 +238,7 @@ def device_callback():
                 allowed_resources=session_data.allowed_resources,
                 realm=realm,
                 offline_access=offline_granted,
-                refresh_expires_at=datetime.fromtimestamp(refresh_expires_at, timezone.utc).isoformat())
+                refresh_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at, timezone.utc).isoformat())
     logger.info(f"Device login successful for user {user} ({sub}) with session id {session_id} on realm {realm}")
 
     return render_template_string("""<!DOCTYPE html>
@@ -271,7 +277,7 @@ def poll_for_token():
     if not flow:
         abort(400, "expired token")
 
-    now = time.time()
+    now = int(time.time())
     last_poll = flow.get("last_poll_at", 0)
     interval = flow.get("interval", 0)
     if now < last_poll + interval:
@@ -282,7 +288,7 @@ def poll_for_token():
     if not flow.get("verified") or not flow.get("session_key"):
         return jsonify({"error": "authorization_pending"}), 403
 
-    sid, session = store.get_session_by_session_key(flow["session_key"])
+    sid, session = store.get_active_session_by_session_key(flow["session_key"])
     if not session:
         abort(400, "session lost (flow timed out or session expired)")
 
@@ -291,7 +297,7 @@ def poll_for_token():
     return jsonify({
         "access_token": flow["session_key"],
         "token_type": "Bearer",
-        "expires_in":  max(0, int(session.expires_at - time.time()))
+        "expires_in":  max(0, session.expires_at - int(time.time()))
     })
 
 @device_blueprint.route("/device/logout", methods=["POST"])

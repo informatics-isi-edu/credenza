@@ -18,10 +18,19 @@ import time
 import uuid
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify, g
-from ..api.session.storage.session_store import TRANSIENT_DATA_TTL, SessionType
-from ..api.common.util import has_current_session, get_effective_scopes, generate_nonce, augment_session, \
-    get_cookie_domain, revoke_tokens, safe_referrer, is_transient_request_error, perf_logged
 from ..telemetry import audit_event
+from ..api.session.storage.session_store import TRANSIENT_DATA_TTL, SessionType
+from ..api.common.crypto import generate_nonce
+from ..api.common.util import (
+    get_current_session,
+    get_effective_scopes,
+    augment_session,
+    get_cookie_domain,
+    revoke_tokens,
+    safe_referrer,
+    is_transient_request_error,
+    perf_logged
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +54,9 @@ def login():
     referrer = safe_referrer(request.args.get('referrer')) or current_app.config.get("POST_LOGIN_REDIRECT", "/")
     logger.debug("Login referrer: %s", referrer)
 
-    sid = has_current_session()
-    if sid is not None:
+    sid, session = get_current_session(dont_abort=True)
+    logger.debug(f"sid: {sid}, session: {session}")
+    if sid and session:
         return redirect(referrer)
 
     state = uuid.uuid4().hex
@@ -70,7 +80,7 @@ def login():
         "redirect_uri": redirect_uri,
         "created_at": int(time.time()),
     }
-    store.store_authn_request_ctx(state, authn_request_ctx, ttl=TRANSIENT_DATA_TTL)
+    store.set_authn_request_ctx(state, authn_request_ctx, ttl=TRANSIENT_DATA_TTL)
 
     return redirect(auth_url)
 
@@ -126,7 +136,7 @@ def callback():
                 remaining = max(0, TRANSIENT_DATA_TTL - age)
                 if remaining == 0:
                     abort(400, description="State expired")
-                store.store_authn_request_ctx(state, authn_request_ctx, ttl=min(60, remaining))
+                store.set_authn_request_ctx(state, authn_request_ctx, ttl=min(60, remaining))
                 abort(502, description=f"{msg} (temporary)")
             abort(400, description=msg)  # non-transient -> delete in finally
 
@@ -204,12 +214,11 @@ def callback():
 @perf_logged(warn_ms=1000)
 def logout():
     post_logout_redirect_uri = current_app.config.get("POST_LOGOUT_REDIRECT_URL", "/")
-    sid = has_current_session()
-    if sid is None:
+    sid, session = get_current_session(dont_abort=True)
+    if sid is None or session is None:
         return redirect(post_logout_redirect_uri)
 
     store = current_app.config["SESSION_STORE"]
-    session = store.get_session_data(sid)
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
     realm = session.realm
@@ -261,7 +270,7 @@ def logout():
 @login_blueprint.route("/preauth")
 @perf_logged(warn_ms=1000)
 def preauth():
-    if current_app.config.get("ENABLE_LEGACY_API", False):
+    if not current_app.config.get("ENABLE_LEGACY_API", False):
         abort(404)
 
     do_redirect = request.args.get('do_redirect')

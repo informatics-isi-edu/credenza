@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 def run_refresh_worker(app):
     store = app.config["SESSION_STORE"]
-    profiles = app.config["OIDC_IDP_PROFILES"]
     interval = app.config.get("REFRESH_WORKER_POLL_INTERVAL", 60)
     session_expiry_threshold = app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
     debug_perf = app.config.get("DEBUG_PERF", False)
@@ -30,32 +29,12 @@ def run_refresh_worker(app):
     while True:
         start = time.perf_counter()
         try:
-            now = time.time()
             session_ids = store.list_session_ids()
-            logger.debug(f"Checking {len(session_ids)} sessions for refresh needs")
+            logger.debug(f"Checking {len(session_ids)} sessions for automatic refresh eligibility")
 
             for sid in session_ids:
-                session = store.get_session_data(sid)
+                session = store.get_active_session_by_session_id(sid)
                 if not session:
-                    continue
-
-                if session.is_service():
-                    continue
-
-                realm = session.realm
-                profile = profiles.get(realm)
-                if not profile:
-                    logger.warning(f"No profile found for realm: {realm}")
-                    continue
-
-                user = session.userinfo.get("email")
-                sub = session.userinfo.get("sub")
-                sys_metadata = session.session_metadata.system or {}
-                refresh_expires_at = sys_metadata.get("refresh_expires_at")
-                if refresh_expires_at and now > (refresh_expires_at - session_expiry_threshold):
-                    audit_event("refresh_expired", session_id=sid)
-                    revoke_tokens(sid, session)
-                    store.delete_session(sid)
                     continue
 
                 # For non-device sessions, don't allow refresh logic to handle session extension or token refresh
@@ -74,8 +53,13 @@ def run_refresh_worker(app):
                     modified = bool(refresh_additional_tokens(sid, session)) or modified
 
                 if modified:
+                    user = session.userinfo.get("email")
+                    sub = session.userinfo.get("sub")
                     store.update_session(sid, session)
-                    audit_event("device_session_updated", session_id=sid, user=user, sub=sub, realm=realm)
+                    audit_event("device_session_updated",
+                                session_id=sid,
+                                user=user,
+                                sub=sub, realm=session.realm)
 
         except Exception:
             # pass-level guard: never let the thread die due to an unhandled exception

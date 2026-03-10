@@ -19,6 +19,7 @@ import time
 import requests
 import logging
 from secrets import token_urlsafe
+from authlib.oauth2.client import OAuth2Client
 from authlib.integrations.requests_client import OAuth2Session
 from authlib.jose import jwt, JsonWebKey
 
@@ -93,7 +94,7 @@ class OIDCClient:
         return response.json()
 
     def _jwks_expired(self, ttl=86400):
-        return not self._jwks_fetched_at or (time.time() - self._jwks_fetched_at > ttl)
+        return not self._jwks_fetched_at or (int(time.time()) - self._jwks_fetched_at > ttl)
 
     def _load_jwks(self):
         if not self.jwks_uri:
@@ -103,7 +104,7 @@ class OIDCClient:
             resp = requests.get(self.jwks_uri)
             resp.raise_for_status()
             self.jwks = JsonWebKey.import_key_set(resp.json())
-            self._jwks_fetched_at = time.time()
+            self._jwks_fetched_at = int(time.time())
             for k in self.jwks.keys:
                 key = k.as_dict()
                 logger.debug(f"Loaded JWK kid={key.get('kid')}, alg={key.get('alg')}")
@@ -274,7 +275,7 @@ class OIDCClient:
         if not claims.get("active"):
             raise ValueError("Inactive or expired access token")
 
-        now = time.time()
+        now = int(time.time())
         exp = claims.get("exp")
         iat = claims.get("iat")
         nbf = claims.get("nbf", iat)

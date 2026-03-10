@@ -21,7 +21,7 @@ from unittest.mock import Mock
 from urllib.parse import urlparse, parse_qs, unquote
 from credenza.rest import login as lf
 from credenza.api.session.storage.session_store import TRANSIENT_DATA_TTL
-from credenza.api.auth.client.oidc_client import OIDCClient
+from credenza.api.auth.oidc_client import OIDCClient
 from credenza.api.session.storage.session_store import SessionData, SessionType
 from credenza.rest.login import callback
 
@@ -58,7 +58,7 @@ class _StubClientRaises:
 def _store_ctx(store, app, state, *, created_at=None):
     """Stores a minimal-but-complete authn_request_ctx the route expects."""
     now = int(time.time())
-    store.store_authn_request_ctx(state, {
+    store.set_authn_request_ctx(state, {
         "nonce": "nonce123",
         "code_verifier": "verif123",
         "scope": "openid email",
@@ -75,7 +75,7 @@ def client(app, monkeypatch):
     return app.test_client()
 
 def test_login_existing(client, monkeypatch):
-    monkeypatch.setattr(lf, "has_current_session", lambda: "existing")
+    monkeypatch.setattr(lf, "get_current_session", lambda dont_abort=True: ("sid-123", object()))
     resp = client.get("/login")
     assert resp.status_code == 302
 
@@ -112,7 +112,7 @@ def test_callback_missing_nonce(client, app, store, monkeypatch):
     state = uuid.uuid4().hex
     realm = app.config["DEFAULT_REALM"]
     redirect_uri = f"{app.config['BASE_URL']}/callback"
-    store.store_authn_request_ctx(state, {
+    store.set_authn_request_ctx(state, {
         "code_verifier": "verif",
         "realm": realm,
         "referrer": "/dest",
@@ -147,7 +147,7 @@ def test_callback_success(client, app, store, monkeypatch, frozen_time):
         "scope": "openid email profile",
         "created_at": int(time.time()),
     }
-    store.store_authn_request_ctx(state, ctx)
+    store.set_authn_request_ctx(state, ctx)
 
     token_dict = {
         "id_token": "idtok",
@@ -186,22 +186,22 @@ def test_callback_success(client, app, store, monkeypatch, frozen_time):
     assert session.access_token == "acc"
 
 def test_logout_no_session(client, monkeypatch):
-    monkeypatch.setattr(lf, "has_current_session", lambda: None)
+    monkeypatch.setattr(lf, "get_current_session", lambda dont_abort=True: (None, None))
     resp = client.get("/logout")
     assert resp.status_code in (302, 303)
     assert urlparse(resp.headers["Location"]).path == "/"
 
 def test_logout_normal(client, app, store, monkeypatch, fake_current_session):
     monkeypatch.setattr(lf, "revoke_tokens", lambda sid, session: None)
-    monkeypatch.setattr(lf, "has_current_session", lambda: "fake_current_sid")
+    monkeypatch.setattr(lf, "get_current_session", lambda dont_abort=True: fake_current_session)
     resp = client.get("/logout")
     assert resp.status_code in (302, 303)
     assert "/" == urlparse(resp.headers["Location"]).path
     assert "Expires=Thu, 01 Jan 1970" in resp.headers["Set-Cookie"]
 
-def test_logout_uses_client_logout_and_profile(client, app, store, monkeypatch):
+def test_logout_uses_client_logout_and_profile(client, app, store, monkeypatch, fake_current_session):
     sid = "sid"
-    monkeypatch.setattr(lf, "has_current_session", lambda: sid)
+    monkeypatch.setattr(lf, "get_current_session", lambda dont_abort=True: fake_current_session)
     monkeypatch.setattr(lf, "revoke_tokens", lambda sid, session: None)
     store.create_session(sid,
                          session_type=SessionType.USER,
@@ -225,6 +225,7 @@ def test_logout_uses_client_logout_and_profile(client, app, store, monkeypatch):
     assert qs["foo"] == ["bar"]
 
 def test_preauth_json_and_redirect(client, app):
+    app.config["ENABLE_LEGACY_API"] = True
     app.config["POST_LOGIN_REDIRECT"] = "/home"
     resp = client.get("/preauth")
     assert resp.status_code == 200
@@ -253,7 +254,7 @@ def test_callback_deferred_augmentation(app, base_session, monkeypatch):
     state = uuid.uuid4().hex
     realm = "test"
     redirect_uri = f"{app.config['BASE_URL']}/callback"
-    store.store_authn_request_ctx(state, {
+    store.set_authn_request_ctx(state, {
         "nonce": "nonce123",
         "code_verifier": "verif123",
         "realm": realm,

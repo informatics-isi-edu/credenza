@@ -67,7 +67,7 @@ def test_start_device_flow_defaults(client, app, store, frozen_time):
     assert flow["realm"] == app.config["DEFAULT_REALM"]
     assert flow["issued_at"] == frozen_time
     assert flow["expires_at"] == frozen_time + df.DEVICE_TTL
-    assert store.get_device_code_for_usercode(data["user_code"]) == data["device_code"]
+    assert store.consume_usercode_mapping(data["user_code"]) == data["device_code"]
 
 def test_start_device_flow_custom_realm(client, app, store):
     resp = client.post("/device/start?realm=test")

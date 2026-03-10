@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from credenza.app import create_app, start_refresh_worker
+from credenza.app import create_app, start_refresh_worker  # pragma: no cover
 
-application = create_app()
-start_refresh_worker(application)
+application = create_app()  # pragma: no cover
+start_refresh_worker(application)  # pragma: no cover

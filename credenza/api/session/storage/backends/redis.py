@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Iterable
+from typing import Iterable, Optional
 from .base import StorageBackend
 
 class RedisBackend(StorageBackend):
@@ -29,8 +29,10 @@ class RedisBackend(StorageBackend):
         self.r.set(k, v)
 
     def get(self, k):
-        v=self.r.get(k)
-        return v
+        return self.r.get(k)
+
+    def consume(self,k):
+        return self.r.getdel(k)
 
     def delete(self, k):
         self.r.delete(k)

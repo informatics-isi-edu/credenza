@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from __future__ import annotations
+import re
 import json
 import time
 import uuid
@@ -22,65 +24,21 @@ import logging
 import ipaddress
 import requests
 import functools
+from enum import Enum
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple, List, Dict, Union, Mapping
 from datetime import datetime, timezone
 from publicsuffix2 import get_sld
-from Cryptodome.Cipher import AES
-from Cryptodome.Random import get_random_bytes
-from flask import current_app, request, make_response, Request, Response, abort, jsonify, g
+from flask import current_app, request, make_response, Response, abort, jsonify, g
 from requests import HTTPError, Timeout, ConnectionError
 from urllib.parse import urlparse
 from ..common import client_ip
 from ..session.storage.session_store import SessionData, SessionType
-from ..auth.service.adapters.base import DEFAULT_MAX_ABSOLUTE_LIFETIME
 from ...telemetry import audit_event
 
 
 logger = logging.getLogger(__name__)
-
-
-class AESGCMCodec:
-    def __init__(self, key: str):
-        if key is None:
-            raise ValueError("Key is required")
-        key_bytes = key.encode()
-        if len(key_bytes) not in (16, 24, 32):
-            raise ValueError(f"Key must be a 16, 24, or 32-byte UTF-8 string. Key length: {len(key_bytes)}")
-        self.key = key_bytes
-
-    def encrypt(self, plaintext: str) -> str:
-        try:
-            nonce = get_random_bytes(12)
-            cipher = AES.new(self.key, AES.MODE_GCM, nonce=nonce)
-            ciphertext, tag = cipher.encrypt_and_digest(plaintext.encode())
-
-            data = {
-                "nonce": base64.urlsafe_b64encode(nonce).decode(),
-                "ciphertext": base64.urlsafe_b64encode(ciphertext).decode(),
-                "tag": base64.urlsafe_b64encode(tag).decode()
-            }
-            return base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
-        except Exception as e:
-            logger.error(f"Encryption failed: {e}")
-            raise
-
-    def decrypt(self, ciphertext: str) -> Optional[str]:
-        try:
-            data_json = base64.urlsafe_b64decode(ciphertext.encode()).decode()
-            data = json.loads(data_json)
-
-            nonce = base64.urlsafe_b64decode(data["nonce"])
-            ciphertext = base64.urlsafe_b64decode(data["ciphertext"])
-            tag = base64.urlsafe_b64decode(data["tag"])
-
-            cipher = AES.new(self.key, AES.MODE_GCM, nonce=nonce)
-            plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-            return plaintext.decode()
-        except Exception as e:
-            logger.error(f"Decryption failed: {e}")
-            return None
 
 
 def extract_session_key() -> Tuple[str, bool]:
@@ -91,46 +49,13 @@ def extract_session_key() -> Tuple[str, bool]:
     return cookie_val, False
 
 
-def has_current_session() -> Optional[str]:
-    skey,_ = extract_session_key()
-    if not skey:
-        return None
-
-    store = current_app.config["SESSION_STORE"]
-    sid, session = store.get_session_by_session_key(skey)
-    if not session:
-        return None
-
-    return sid
-
-
-def get_current_session() -> Tuple[Optional[str], Optional[SessionData]]:
+def get_current_session(dont_abort:bool = False) -> Tuple[Optional[str], Optional[SessionData]]:
     skey, is_bearer_token = extract_session_key()
     if not skey:
-        abort(404)
+        return (None, None) if dont_abort else abort(404)
 
     store = current_app.config["SESSION_STORE"]
-    sid, session = store.get_session_by_session_key(skey)
-    if session and session.is_service():
-        policy = (session.session_metadata.system or {}).get("service_policy") or {}
-        abs_life = int(policy.get("absolute_lifetime_seconds") or DEFAULT_MAX_ABSOLUTE_LIFETIME)
-        # Absolute lifetime: never extend past created_at + abs_life
-        if abs_life > 0:
-            now = int(time.time())
-            hard_stop = int(session.created_at) + abs_life
-            if now >= hard_stop:
-                store.delete_session(sid)
-                audit_event(
-                    "service_session_absolute_lifetime_exceeded",
-                    session_id=sid,
-                    realm=session.realm,
-                    created_at=session.created_at,
-                    absolute_lifetime_seconds=abs_life,
-                )
-                abort(401,
-                      description=
-                      f"Service session exceeded absolute lifetime")
-
+    sid, session = store.get_active_session_by_session_key(skey)
     if sid and session:
         return sid, session
 
@@ -138,9 +63,9 @@ def get_current_session() -> Tuple[Optional[str], Optional[SessionData]]:
     if (current_app.config.get("ENABLE_LEGACY_API", False) and
         hasattr(provider, "session_from_bearer_token") and is_bearer_token):
         skey, session = provider.session_from_bearer_token(skey)
-        return store.get_session_by_session_key(skey)
+        return store.get_active_session_by_session_key(skey)
     else:
-        abort(404)
+        return (None, None) if dont_abort else abort(404)
 
 
 def get_realm(realm=None) -> str:
@@ -174,15 +99,10 @@ def augment_session(tokens, realm, userinfo, metadata):
         return userinfo, {}
 
     # look for additional tokens in the response
-    additional_tokens = provider.process_additional_tokens(tokens, time.time())
+    additional_tokens = provider.process_additional_tokens(tokens, int(time.time()))
     # possibly get additional groups using external tokens or other means
     provider.enrich_userinfo(userinfo, additional_tokens)
     return userinfo, additional_tokens
-
-
-def generate_nonce():
-  nonce = str(time.time()) + '.' + base64.urlsafe_b64encode(get_random_bytes(30)).decode() + '.'
-  return nonce
 
 
 def make_json_response(data):
@@ -234,15 +154,13 @@ def refresh_access_token(sid, session):
     client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=session.is_device())
     updated = False
 
-    now = time.time()
-    token_expires_at = session.session_metadata.system.get("token_expires_at")
-    refresh_expires_at = session.session_metadata.system.get("refresh_expires_at")
-
+    now = int(time.time())
+    token_expires_at = session.session_metadata.system.get("access_token_expires_at")
+    absolute_expires_at = session.absolute_expires_at
     # Refresh access token only when the token is expired or about to expire
     if (token_expires_at and
             token_expires_at < now + current_app.config.get("TOKEN_EXPIRY_THRESHOLD", 300) and
-            refresh_expires_at and
-            refresh_expires_at > now):
+            absolute_expires_at and absolute_expires_at > now):
 
         try:
             refreshed = client.refresh_access_token(refresh_token=session.refresh_token)
@@ -257,10 +175,10 @@ def refresh_access_token(sid, session):
         session.access_token = refreshed["access_token"]
         session.refresh_token = refreshed.get("refresh_token", session.refresh_token)
         session.id_token = refreshed.get("id_token", session.id_token)
-        session.session_metadata.system["token_expires_at"] = refreshed["expires_at"]
-        if "refresh_expires_at" in refreshed:
-            session.session_metadata.system["refresh_expires_at"] = \
-                refreshed["refresh_expires_at"]
+        session.session_metadata.system["access_token_expires_at"] = refreshed["expires_at"]
+        if "refresh_expires_in" in refreshed:
+            session.absolute_expires_at = now + refreshed["refresh_expires_in"]
+            session.session_metadata.system["refresh_token_expires_at"] = session.absolute_expires_at
 
         logger.debug(f"Access token refresh for session {sid} for user {user} ({sub}) on realm {realm} complete")
         audit_event("access_token_refreshed", session_id=sid, user=user, sub=sub, realm=realm)
@@ -283,7 +201,7 @@ def refresh_additional_tokens(sid, session):
             # logger.debug(f"Token for scope '{scope}' does not contain a refresh token and cannot be refreshed")
             continue
 
-        now = time.time()
+        now = int(time.time())
         expires_at = token.get("expires_at", 0)
         expiry_threshold = current_app.config.get("TOKEN_EXPIRY_THRESHOLD", 300)
         if now < expires_at - expiry_threshold:
@@ -345,6 +263,29 @@ def revoke_tokens(sid, session):
                 audit_event("refresh_token_revoked", sid=sid, user=user, sub=sub, realm=realm, scope=k)
     except Exception as e:
         logger.warning(f"Exception during token revocation: {e}")
+
+
+def parse_basic_auth(header_value: str) -> Optional[Dict[str, str]]:
+    """
+    Parse 'Authorization: Basic base64(client_id:client_secret)'.
+    Returns dict {'client_id': ..., 'client_secret': ...} or None on parse failure.
+    """
+    if not header_value:
+        return None
+    parts = header_value.split(None, 1)
+    if len(parts) != 2:
+        return None
+    scheme, b64 = parts
+    if scheme.lower() != "basic":
+        return None
+    try:
+        raw = base64.b64decode(b64.strip()).decode("utf-8")
+    except Exception:
+        return None
+    if ":" not in raw:
+        return None
+    cid, secret = raw.split(":", 1)
+    return {"client_id": cid, "client_secret": secret}
 
 
 def get_cookie_domain() -> Optional[str]:
@@ -414,6 +355,83 @@ def is_browser_client(req):  # pragma: no cover
 
     return False
 
+
+def validate_resource_string(value: str) -> str:
+    """
+    Validate a resource identifier.
+
+    Rules:
+      - Accept 'urn:...' values verbatim.
+      - Otherwise require a full URI with scheme and host.
+      - Disallow userinfo in netloc (no user:pass@host).
+      - Require https scheme for network URIs, except permit http for
+        'localhost' and '127.0.0.1' to allow local development.
+    Returns the cleaned string on success, otherwise raises ValueError.
+    """
+    if value is None:
+        raise ValueError("resource value required")
+
+    v = str(value).strip()
+    if v == "":
+        raise ValueError("empty resource value not allowed")
+
+    if v.lower().startswith("urn:"):
+        return v
+
+    p = urlparse(v)
+    if not p.scheme or not p.netloc:
+        raise ValueError("resource must be an urn or a full URI (scheme and host required)")
+
+    # disallow userinfo (user:pass@host)
+    if "@" in p.netloc:
+        raise ValueError("resource must not contain userinfo")
+
+    scheme = p.scheme.lower()
+    host = (p.hostname or "").lower()
+
+    if scheme == "https":
+        return v
+
+    # permit http only for localhost/127.0.0.1
+    if scheme == "http" and host in ("localhost", "127.0.0.1"):
+        return v
+
+    raise ValueError("network resource URIs must use https (http allowed only for localhost/127.0.0.1)")
+
+
+def normalize_str_list(src: Optional[List[str]]) -> List[str]:
+    """Normalize a list of strings: drop None, strip, lowercase if needed, dedupe and sort."""
+    if not src:
+        return []
+    out: List[str] = []
+    for v in src:
+        if v is None:
+            continue
+        if not isinstance(v, str):
+            raise ValueError("expected string elements in list")
+        s = v.strip()
+        if s == "":
+            continue
+        out.append(s)
+    # dedupe while preserving deterministic order -> sort
+    return sorted(set(out))
+
+
+def collapse_str_list(src: Optional[List[str]]) -> Union[str, List[str]]:
+    """
+    Normalize a list of strings and collapse singleton lists.
+
+    Behavior:
+      - None or empty input -> []
+      - One unique non-empty string -> that string
+      - Multiple unique non-empty strings -> sorted list of strings
+
+    Uses normalize_str_list() for trimming, deduping, sorting.
+    """
+    normalized = normalize_str_list(src)
+    if len(normalized) == 1:
+        return normalized[0]
+    return normalized
 
 
 # copied (and modded) from distutils so we don't have to depend on it
@@ -487,24 +505,63 @@ def retrying_requests_session(
     s.mount("http://", adapter)
     return s
 
-def get_correlation_id(req) -> str:
-    # W3C Trace Context first
-    tp = req.headers.get("traceparent")
+
+_TRACEPARENT_RE = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$", re.IGNORECASE)
+
+
+def get_request_id(headers: Optional[Mapping[str, str]] = None) -> str:
+    """
+    Return a stable request id for the current Flask request.
+
+    - Reuses a cached id stored on flask.g if present.
+    - Prefer W3C `traceparent` (extracts the trace-id portion).
+    - Fall back to common correlation headers.
+    - Last-resort: generate a UUID once and cache it on g.
+    """
+    # use provided headers (test-friendly) or the current request headers
+    if headers is None:
+        headers = request.headers
+
+    # return cached id if already computed for this request
+    cid = getattr(g, "request_id", None)
+    if cid:
+        return cid
+
+    # 1) W3C Trace Context: try to extract the trace-id (more compact & stable)
+    tp = headers.get("traceparent")
     if tp:
-        return tp  # or parse to extract trace-id
+        tp = tp.strip()
+        m = _TRACEPARENT_RE.match(tp)
+        if m:
+            cid = m.group(1)
+        else:
+            # fallback to returning the whole header if it doesn't match expected pattern
+            cid = tp
+        g.request_id = cid
+        return cid
 
-    # Common de-facto headers
-    for h in ("X-Request-Id", "X-Request-ID", "x-request-id",
-              "X-Correlation-Id", "X-Correlation-ID", "x-correlation-id",
-              "X-Amzn-Trace-Id", "x-amzn-trace-id"):
-        v = req.headers.get(h)
+    # 2) common correlation/request id headers (case-insensitive via headers.get)
+    for h in (
+        "X-Request-Id",
+        "X-Request-ID",
+        "x-request-id",
+        "X-Correlation-Id",
+        "X-Correlation-ID",
+        "x-correlation-id",
+        "X-Amzn-Trace-Id",
+        "x-amzn-trace-id",
+    ):
+        v = headers.get(h)
         if v:
-            return v
+            cid = v.strip()
+            g.request_id = cid
+            return cid
 
-    # Last resort: generate one and expose it
-    rid = str(uuid.uuid4())
+    # 3) Last resort: create one, store it and return
+    cid = str(uuid.uuid4())
+    g.request_id = cid
+    return cid
 
-    return rid
 
 def ip_rate_limited(unknown_bucket="10_per_min", normal_bucket="30_per_min"):
     """
@@ -522,11 +579,7 @@ def ip_rate_limited(unknown_bucket="10_per_min", normal_bucket="30_per_min"):
         @functools.wraps(fn)
         def _wrapped(*args, **kwargs):
             # Bypass completely if disabled (default: enabled)
-            try:
-                enabled = current_app.config.get("ENABLE_RATE_LIMITING", True)
-            except Exception:
-                enabled = True
-
+            enabled = current_app.config.get("ENABLE_RATE_LIMITING", True)
             if not enabled:
                 return fn(*args, **kwargs)
 
@@ -549,7 +602,7 @@ def ip_rate_limited(unknown_bucket="10_per_min", normal_bucket="30_per_min"):
             response = current_app.make_response(rv)
             try:
                 response.headers.update(bucket.headers(rem, reset))
-            except Exception:
+            except Exception: # pragma: no cover
                 pass
             return response
 
@@ -588,7 +641,7 @@ def perf_logged(*, warn_ms: Optional[int] = None, logger=None, include_query=Fal
                 # Do NOT return from finally
                 try:
                     enabled = bool(getattr(current_app, "config", {}).get("DEBUG_PERF", False))
-                except Exception:
+                except Exception: # pragma: no cover
                     enabled = False
 
                 if not enabled:
@@ -601,7 +654,7 @@ def perf_logged(*, warn_ms: Optional[int] = None, logger=None, include_query=Fal
                         if "rv" in locals():
                             try:
                                 status = make_response(rv).status_code
-                            except Exception:
+                            except Exception: # pragma: no cover
                                 pass
 
                         # Infer labels from the request
@@ -632,3 +685,38 @@ def perf_logged(*, warn_ms: Optional[int] = None, logger=None, include_query=Fal
                         pass
         return _wrap
     return _decorator
+
+class GrantType(str, Enum):
+    # Core OAuth 2.0
+    AUTHORIZATION_CODE = "authorization_code"
+    CLIENT_CREDENTIALS = "client_credentials"
+    REFRESH_TOKEN = "refresh_token"
+    PASSWORD = "password"  # legacy / currently unsupported
+
+    # Extensions
+    DEVICE_CODE = "urn:ietf:params:oauth:grant-type:device_code"
+    TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
+
+    # Assertions
+    JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+    SAML2_BEARER = "urn:ietf:params:oauth:grant-type:saml2-bearer"
+
+    @classmethod
+    def from_value(cls, value: str) -> GrantType: # pragma: no cover
+        try:
+            return cls(value)
+        except ValueError:
+            raise ValueError(f"Unsupported grant_type: {value}")
+
+
+def map_grant_type_to_session_type(grant_type: GrantType) -> SessionType:
+    try:
+        return {
+            GrantType.CLIENT_CREDENTIALS: SessionType.SERVICE,
+            GrantType.DEVICE_CODE: SessionType.DEVICE,
+            GrantType.TOKEN_EXCHANGE: SessionType.DERIVED,
+            GrantType.AUTHORIZATION_CODE: SessionType.USER,
+          # GrantType.REFRESH_TOKEN: SessionType.USER,  # not currently applicable
+        }[grant_type]
+    except KeyError: # pragma: no cover
+        raise ValueError(f"Unsupported grant type for session mapping: {grant_type}")

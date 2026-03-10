@@ -1,6 +1,6 @@
-from flask import Request
+from flask import request, Request
 
-def client_ip(req: Request) -> str:
+def client_ip(req: Request = None) -> str:
     """
     Return the best-effort client IP for logging, audit, and rate limiting.
 
@@ -36,5 +36,10 @@ def client_ip(req: Request) -> str:
 
     """
     # This relies on the app being configured correctly (ProxyFix or mod_remoteip).
-    ip = (req.remote_addr or "").strip()
-    return ip if ip else "unknown"
+    ip = "unknown"
+    if not req:
+        req = request
+    if req:
+        ip = (req.remote_addr or ip).strip()
+
+    return ip

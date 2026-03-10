@@ -16,6 +16,7 @@
 import time
 import fnmatch
 import logging
+import threading
 from typing import List, Optional, Union
 from .base import StorageBackend
 
@@ -25,47 +26,82 @@ logger = logging.getLogger(__name__)
 class MemoryBackend(StorageBackend):
     """
     An in-memory KV backend with TTL support.
+
+    - Values are stored as bytes internally.
+    - A lock protects concurrent access so `consume()` can be implemented
+      atomically (delete-and-return).
     """
     def __init__(self, **kwargs):
-        # key -> (value, expiration timestamp)
+        # key -> (bytes_value, expiration timestamp|None)
         self._store = {}
+        self._lock = threading.RLock()
 
     def setex(self, key: str, value: Union[str, bytes], ttl: int) -> None:
-        expiration = time.time() + ttl
-        if not value:
+        if value is None:
             raise ValueError("value cannot be None")
-        self._store[key] = (value, expiration)
+        expiration = int(time.time()) + int(ttl)
+        blob = value if isinstance(value, (bytes, bytearray)) else str(value).encode()
+        with self._lock:
+            self._store[key] = (bytes(blob), expiration)
 
     def set(self, key: str, value: Union[str, bytes]) -> None:
-        self._store[key] = (value, None)  # None for expiration means no expiry
+        if value is None:
+            raise ValueError("value cannot be None")
+        blob = value if isinstance(value, (bytes, bytearray)) else str(value).encode()
+        with self._lock:
+            self._store[key] = (bytes(blob), None)  # None for no expiry
 
-    def get(self, key: str) -> Optional[bytes]:
+    def _purge_if_expired_locked(self, key: str) -> None:
+        """Helper: assumes lock is held. Remove key if expired."""
         entry = self._store.get(key)
         if not entry:
-            return None
-        value, expiration = entry
-        # If expiration is None, it's permanent storage
-        if expiration is not None:
-            now = time.time()
-            if now >= expiration:
-                # expired
-                del self._store[key]
+            return
+        _, expiration = entry
+        if expiration is not None and int(time.time()) >= expiration:
+            # expired -> remove
+            self._store.pop(key, None)
+
+    def get(self, key: str) -> Optional[bytes]:
+        with self._lock:
+            self._purge_if_expired_locked(key)
+            entry = self._store.get(key)
+            if not entry:
                 return None
-        return value if isinstance(value, bytes) else value.encode()
+            value, _ = entry
+            return bytes(value)
+
+    def consume(self, key: str) -> Optional[bytes]:
+        """
+        Atomically delete-and-return the value for `key`.
+        Returns bytes or None if missing/expired.
+        """
+        with self._lock:
+            entry = self._store.get(key)
+            if not entry:
+                return None
+            value, expiration = entry
+            if expiration is not None and int(time.time()) >= expiration:
+                # expired -> remove and behave as missing
+                self._store.pop(key, None)
+                return None
+            # present and not expired -> remove and return
+            self._store.pop(key, None)
+            return bytes(value)
 
     def delete(self, key: str) -> None:
-        self._store.pop(key, None)
+        with self._lock:
+            self._store.pop(key, None)
 
     def keys(self, pattern: str) -> List[str]:
-        now = time.time()
-        # purge expired keys first
-        for k in list(self._store.keys()):
-            _, expiration = self._store[k]
-            # Only check expiration if it's not None (permanent storage)
-            if expiration is not None and now >= expiration:
-                del self._store[k]
-        # fnmatch for glob pattern matching
-        return fnmatch.filter(list(self._store.keys()), pattern)
+        now = int(time.time())
+        with self._lock:
+            # purge expired keys first
+            for k in list(self._store.keys()):
+                _, expiration = self._store[k]
+                if expiration is not None and now >= expiration:
+                    self._store.pop(k, None)
+            # fnmatch for glob pattern matching
+            return fnmatch.filter(list(self._store.keys()), pattern)
 
     def scan_iter(self, pattern: str):
         for key in self.keys(pattern):
@@ -75,17 +111,17 @@ class MemoryBackend(StorageBackend):
         return self.get(key) is not None
 
     def ttl(self, key: str) -> int:
-        entry = self._store.get(key)
-        if not entry:
-            return -2  # key missing
-        _, expiration = entry
-        # If expiration is None, it's permanent storage
-        if expiration is None:
-            return -1  # no expiration
-        now = time.time()
-        remaining = expiration - now
-        if remaining < 0:
-            # expired; clean up
-            del self._store[key]
-            return -2
-        return int(remaining)
+        with self._lock:
+            entry = self._store.get(key)
+            if not entry:
+                return -2  # key missing
+            _, expiration = entry
+            if expiration is None:
+                return -1  # no expiration
+            now = int(time.time())
+            remaining = expiration - now
+            if remaining < 0:
+                # expired; clean up
+                self._store.pop(key, None)
+                return -2
+            return int(remaining)

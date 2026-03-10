@@ -14,12 +14,14 @@
 # limitations under the License.
 #
 import copy
+import json
 import time
 import logging
 import pytest
 from credenza.api.common import util as um
-from credenza.api.session.storage.session_store import SessionType
 from credenza.refresh import refresh_worker as rw
+from credenza.api.session.storage import session_store as ss
+from credenza.api.session.storage.session_store import SessionType
 from credenza.refresh.refresh_worker import run_refresh_worker
 
 
@@ -80,10 +82,11 @@ def audit_calls(monkeypatch):
         calls.append((event, kwargs))
     monkeypatch.setattr(rw, "audit_event", _audit)
     monkeypatch.setattr(um, "audit_event", _audit)
+    monkeypatch.setattr(ss, "audit_event", _audit)
     return calls
 
 
-def test_expired_refresh_removes_session(app,
+def test_absolute_expiry_removes_session(app,
                                          store,
                                          base_session,
                                          factory,
@@ -96,9 +99,11 @@ def test_expired_refresh_removes_session(app,
     app.config["OIDC_CLIENT_FACTORY"] = factory
     app.config["OIDC_IDP_PROFILES"] = profiles
 
-    # make the refresh_expires_at in the past
-    sess.session_metadata.system["refresh_expires_at"] = frozen_time - 10
+    # make the absolute_expires_at in the past
+    sess.absolute_expires_at = frozen_time - 10
     sess.expires_at = frozen_time + 100
+    # patch module time used by store implementation
+    monkeypatch.setattr(time, "time", lambda: frozen_time)
 
     # patch the store to return exactly this one session
     monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
@@ -112,9 +117,15 @@ def test_expired_refresh_removes_session(app,
         with pytest.raises(StopIteration):
             run_refresh_worker(app)
 
-    # we should have audited "refresh_expired" and deleted the session
-    assert ("refresh_expired", {"session_id": sid}) in audit_calls
+    # we should have audited "session_absolute_lifetime_expired" and deleted the session
+    logging.debug(audit_calls)
+    assert ("session_deleted_absolute_lifetime_expired",
+            {"session_id": sid,
+             "realm": sess.realm,
+             "sub": sess.userinfo.get("sub"),
+             "absolute_expires_at": sess.absolute_expires_at}) in audit_calls
     assert sid in deleted
+
 
 def test_additional_token_refresh_success_and_failure(app,
                                                       store,
@@ -228,10 +239,10 @@ def test_device_access_token_refresh(app,
     sess = copy.deepcopy(base_session)
     sess._session_type = SessionType.DEVICE
     sess.session_metadata.system.update({
-        "device_session":         True,
-        "allow_automatic_refresh": True,
-        "refresh_expires_at":      now + 1000,
-        "token_expires_at":        now + 100,   # will trigger refresh
+        "device_session":           True,
+        "allow_automatic_refresh":  True,
+        "refresh_token_expires_at": now + 1000,
+        "access_token_expires_at":  now + 100,   # will trigger refresh
     })
     sess.refresh_token = "rt_device"
     sess.access_token  = "old_at"
@@ -265,7 +276,7 @@ def test_device_access_token_refresh(app,
                 "refresh_token":      "new_device_rt",
                 "id_token":           "new_device_idt",
                 "expires_at":         self.now + 3600,
-                "refresh_expires_at": self.now + 7200,
+                "refresh_expires_in": 7200,
             }
 
     monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: DummyClient(now))
@@ -292,8 +303,9 @@ def test_device_access_token_refresh(app,
     assert new_sess.id_token      == "new_device_idt"
 
     sm = new_sess.session_metadata.system
-    assert sm["token_expires_at"]   == now + 3600
-    assert sm["refresh_expires_at"] == now + 7200
+    assert sm["access_token_expires_at"]    == now + 3600
+    assert sm["refresh_token_expires_at"]   == now + 7200
+    assert new_sess.absolute_expires_at     == now + 7200
 
     # Finally, the session TTL was bumped by update_session
     assert new_sess.expires_at == frozen_time + store.ttl

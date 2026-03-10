@@ -31,6 +31,9 @@ class ValkeyBackend(StorageBackend):
     def get(self, k):
         return self.r.get(k)
 
+    def consume(self,k):
+        return self.r.getdel(k)
+
     def delete(self, k):
         self.r.delete(k)
 

@@ -1,4 +1,3 @@
-#
 # Copyright 2025 University of Southern California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,15 +16,18 @@ import time
 import enum
 import uuid
 import json
+import secrets
 import logging
 from dataclasses import dataclass, field, asdict
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 from .backends.base import StorageBackend
 from .backends.memory import MemoryBackend
+from ....telemetry import audit_event
 
 logger = logging.getLogger(__name__)
 
 TRANSIENT_DATA_TTL=900
+SESSION_DEFAULT_ABSOLUTE_LIFETIME_SECONDS = 86400 # 24 hours
 
 class SessionType(str, enum.Enum):
     USER = "user"
@@ -57,9 +59,9 @@ class SessionMetadata:
 class SessionData:
     access_token: str
     userinfo: dict
-    expires_at: float
-    created_at: float
-    updated_at: float
+    created_at: int
+    updated_at: int
+    expires_at: int
     realm: str
     _session_type: SessionType = field(repr=False) # read only
     _allowed_resources: list[str] = field(default_factory=list) # read only
@@ -67,6 +69,7 @@ class SessionData:
     refresh_token: Optional[str] = None
     scopes: Optional[str] = None
     session_ttl: Optional[int] = None
+    absolute_expires_at: Optional[int] = None
     session_metadata: SessionMetadata = field(default_factory=SessionMetadata)
     additional_tokens: dict = field(default_factory=dict)
 
@@ -97,19 +100,19 @@ class SessionData:
         return self.session_type in {SessionType.USER, SessionType.DEVICE}
 
     def is_derived(self) -> bool:
-        return self.session_type is SessionType.DERIVED
+        return self.session_type == SessionType.DERIVED
 
     def is_device(self) -> bool:
-        return self.session_type is SessionType.DEVICE
+        return self.session_type == SessionType.DEVICE
 
     def is_service(self) -> bool:
-        return self.session_type is SessionType.SERVICE
+        return self.session_type == SessionType.SERVICE
 
     def can_extend(self) -> bool:
         return self.session_type in {SessionType.USER, SessionType.DEVICE}
 
     def can_refresh_upstream(self) -> bool:
-        return self.session_type is SessionType.DEVICE
+        return self.session_type == SessionType.DEVICE
 
 
 class SessionStore:
@@ -127,8 +130,12 @@ class SessionStore:
         return str(uuid.uuid4())
 
     @staticmethod
-    def generate_session_key() -> str:
-        return str(uuid.uuid4().hex)
+    def generate_session_key(nbytes: int = 32) -> str:
+        """
+        Generate a URL-safe, base64-like secret token with `nbytes` of entropy, suitable for cookies / bearer tokens.
+        Default nbytes=32 => 256 bits of entropy.
+        """
+        return secrets.token_urlsafe(nbytes)
 
     def _key(self, session_id) -> str:
         return f"{self.prefix}{self.sid_prefix}{session_id}"
@@ -185,13 +192,19 @@ class SessionStore:
                        additional_tokens=None,
                        use_access_token_as_session_key=False,
                        expires_at=None,
-                       session_ttl=None) -> tuple[Optional[str], Optional[SessionData]]:
+                       session_ttl=None,
+                       absolute_session_lifetime_secs=None) -> tuple[Optional[str], Optional[SessionData]]:
         if session_type is None:
             raise ValueError("session_type is required")
 
-        now = time.time()
+        now = int(time.time())
+        ttl = self.ttl if session_ttl is None else int(session_ttl)
         if expires_at is None:
-            expires_at = (now + self.ttl)
+            expires_at = (now + ttl)
+        if absolute_session_lifetime_secs is not None:
+            absolute_expires_at = now + absolute_session_lifetime_secs
+        else:
+            absolute_expires_at = now + SESSION_DEFAULT_ABSOLUTE_LIFETIME_SECONDS
 
         sys_md = {} if metadata is None else metadata
         if not isinstance(sys_md, dict):
@@ -205,12 +218,13 @@ class SessionStore:
             scopes=scopes,
             userinfo=userinfo,
             expires_at=expires_at,
+            absolute_expires_at=absolute_expires_at,
             created_at=now,
             updated_at=now,
             realm=realm,
             _session_type=session_type,
             _allowed_resources=allowed_resources,
-            session_ttl=self.ttl if session_ttl is None else int(session_ttl),
+            session_ttl=ttl,
             session_metadata=session_metadata,
             additional_tokens=additional_tokens or {},
         )
@@ -229,25 +243,30 @@ class SessionStore:
         logger.debug(f"Created session {session_id} (realm={realm})")
         return session_key, session_data
 
+    def _decode_backend_value(self, input_data: Any) -> Optional[str]:
+        if input_data is None:
+            return None
+        if isinstance(input_data, (bytes, bytearray)):
+            input_str = input_data.decode("utf-8")
+        elif isinstance(input_data, str):
+            input_str = input_data
+        else:
+            raise ValueError(f"Unexpected backend value type: {type(input_data)!r}")
+
+        if self.crypto_codec:
+            input_str = self.crypto_codec.decrypt(input_str)
+            if input_str is None:
+                raise ValueError("Failed to decrypt data")
+
+        return input_str
+
     def get_session_data(self, session_id) -> Optional[SessionData]:
-        raw = self.backend.get(self._key(session_id))
-        if not raw:
+        backend_value = self.backend.get(self._key(session_id))
+        if not backend_value:
             return None
         try:
-            # Normalize backend value to str for codec/json
-            if isinstance(raw, (bytes, bytearray)):
-                raw_s = raw.decode("utf-8")
-            elif isinstance(raw, str):
-                raw_s = raw
-            else:
-                raise ValueError(f"Unexpected session blob type: {type(raw)!r}")
-
-            if self.crypto_codec:
-                raw_s = self.crypto_codec.decrypt(raw_s)
-                if raw_s is None:
-                    raise ValueError("Failed to decrypt data")
-
-            return SessionData.from_dict(json.loads(raw_s))
+            input_str = self._decode_backend_value(backend_value)
+            return SessionData.from_dict(json.loads(input_str))
         except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as e:
             self.backend.delete(self._key(session_id))
             logger.debug("Deleted corrupted/unparseable session %s: %s", session_id, e)
@@ -260,8 +279,38 @@ class SessionStore:
         session = self.get_session_data(session_id)
         return session_id, session
 
+    def get_active_session_by_session_id(self, sid: str) -> Optional[SessionData]:
+        """
+        Retrieve only an `active` session by enforcing absolute cap (delete if expired).
+        Returns (sid, session) or (None, None) if session expired or missing.
+        """
+        session = self.get_session_data(sid)
+
+        cap = session.absolute_expires_at
+        now = int(time.time())
+        if cap is not None and now >= int(cap):
+            try:
+                self.delete_session(sid)
+                audit_event("session_deleted_absolute_lifetime_expired",
+                            session_id=sid,
+                            realm=session.realm,
+                            sub=session.userinfo.get("sub"),
+                            absolute_expires_at=cap)
+            except Exception:
+                logger.exception(f"failed deleting session after absolute expiry for sid={sid}")
+            return None
+
+        return session
+
+    def get_active_session_by_session_key(self, skey: str) -> Tuple[Optional[str], Optional[SessionData]]:
+        sid = self.get_session_id_for_session_key(skey)
+        if not sid:
+            return None, None
+
+        return sid, self.get_active_session_by_session_id(sid)
+
     def update_session(self, session_id, session_data: SessionData) -> tuple[Optional[str], Optional[SessionData]]:
-        now = time.time()
+        now = int(time.time())
         session_data.updated_at = now
 
         # Extend expires_at unless session_ttl is 0; if session_ttl is None, use store default ttl
@@ -337,28 +386,44 @@ class SessionStore:
         self.update_session(session_id, session)
         logger.debug(f"Tagged session {session_id} metadata[{scope}]: {metadata}")
 
-    def store_authn_request_ctx(self, state, authn_request_ctx, ttl=TRANSIENT_DATA_TTL) -> None:
-        self.backend.setex(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}",
-                           json.dumps(authn_request_ctx, separators=(",", ":")), ttl)
+    def set_authn_request_ctx(self, state, authn_request_ctx, ttl=TRANSIENT_DATA_TTL) -> None:
+        ctx = json.dumps(authn_request_ctx, separators=(",", ":"))
+        if self.crypto_codec:
+            ctx = self.crypto_codec.encrypt(ctx)
+
+        self.backend.setex(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}", ctx, ttl)
 
     def get_authn_request_ctx(self, state) -> Any:
-        authn_request_ctx = self.backend.get(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}")
+        authn_request_ctx = self._decode_backend_value(
+            self.backend.get(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}"))
         if not authn_request_ctx:
             return None
-        return json.loads(authn_request_ctx.decode())
+
+        return json.loads(authn_request_ctx)
+
+    def consume_authn_request_ctx(self, state) -> Any:
+        key = f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}"
+        authn_request_ctx = self._decode_backend_value(self.backend.consume(key))
+
+        return json.loads(authn_request_ctx)
 
     def delete_authn_request_ctx(self, state) -> None:
         self.backend.delete(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}")
 
     def set_device_flow(self, device_code, flow_data, ttl) -> None:
-        self.backend.setex(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}",
-                           json.dumps(flow_data, separators=(",", ":")), ttl)
+        data = json.dumps(flow_data, separators=(",", ":"))
+        if self.crypto_codec:
+            data = self.crypto_codec.encrypt(data)
+
+        self.backend.setex(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}", data, ttl)
 
     def get_device_flow(self, device_code) -> Any:
-        flow_data = self.backend.get(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}")
+        flow_data = self._decode_backend_value(
+            self.backend.get(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}"))
         if not flow_data:
             return None
-        return json.loads(flow_data.decode())
+
+        return json.loads(flow_data)
 
     def get_device_flow_ttl(self, device_code) -> int:
         return self.backend.ttl(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}")
@@ -367,13 +432,23 @@ class SessionStore:
         self.backend.delete(f"{self.prefix}{self.oidc_prefix}device_code:{device_code}")
 
     def set_usercode_mapping(self, user_code, device_code, ttl) -> None:
+        if self.crypto_codec:
+            device_code = self.crypto_codec.encrypt(device_code)
+
         self.backend.setex(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}", device_code, ttl)
 
-    def get_device_code_for_usercode(self, user_code) -> Optional[str]:
-        code = self.backend.get(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}")
-        if code:
-            return code.decode()
-        return None
+    def consume_usercode_mapping(self, user_code) -> Optional[str]:
+        key = f"{self.prefix}{self.oidc_prefix}user_code:{user_code}"
+        code = self._decode_backend_value(self.backend.consume(key))
+
+        return code
 
     def delete_usercode_mapping(self, user_code) -> None:
         self.backend.delete(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}")
+
+    def consume_authorization_code(self, code: str) -> Any:
+        # Note: authorization-code storage key is 'authz_code:<code>' if used elsewhere.
+        key = f"{self.prefix}{self.oidc_prefix}authz_code:{code}"
+        code = self._decode_backend_value(self.backend.consume(key))
+
+        return json.loads(code)

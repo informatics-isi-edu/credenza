@@ -25,17 +25,21 @@ from requests import RequestException, ConnectionError, Timeout
 from werkzeug.utils import import_string
 from werkzeug.exceptions import HTTPException, BadGateway, ServiceUnavailable
 from werkzeug.middleware.proxy_fix import ProxyFix
-from .api.common.rate_limit import FixedWindowJitterLimiter
-from .api.auth.client.oidc_client import OIDCClientFactory
+from .api.auth.client.adapters.adapter import list_adapters
+from .api.auth.client.client_registry import load_client_registry
+from .api.auth.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
 from .api.common.claim_mapper import build_realm_claim_maps
-from .api.common.util import AESGCMCodec, is_browser_client, get_correlation_id
+from .api.common.rate_limit import FixedWindowJitterLimiter
+from .api.common.crypto import AESGCMCodec
+from .api.common.crypto import register_default_hashers
+from .api.common.util import is_browser_client, get_request_id
 from .rest.session import session_blueprint
 from .rest.login import login_blueprint
 from .rest.device import device_blueprint
 from .rest.discovery import discovery_blueprint
-from .rest.service import service_blueprint
+from .rest.token import token_blueprint
 from .telemetry.audit.logger import init_audit_logger
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker
@@ -119,6 +123,11 @@ def load_config(app):
     else:
         app.config["SERVICE_AUTH"] = {}
 
+    # Optional client registry (OAuth2/RS/M2M) config
+    logger.debug(f"Registered client authentication adapters: {set(list_adapters().keys())}")
+    client_auth_path = app.config.get("CLIENT_AUTH_FILE", "config/client_auth.json")
+    app.config["CLIENT_AUTH_REGISTRY"] = load_client_registry(client_auth_path)
+
     # Optional trusted issuers
     trusted_path = app.config.get("TRUSTED_ISSUERS_FILE", "config/oidc_idp_trusted_issuers.json")
     if os.path.exists(trusted_path):
@@ -130,7 +139,7 @@ def load_config(app):
     # Load the claim map
     app.config["IDP_CLAIM_MAPS"] = build_realm_claim_maps(app.config.get("OIDC_IDP_PROFILES"))
 
-    # create session augmentation provider map
+    # Create session augmentation provider map
     provider_map = {}
     default_provider = "credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider"
     for realm, prof in app.config["OIDC_IDP_PROFILES"].items():
@@ -139,6 +148,9 @@ def load_config(app):
             cls_path = default_provider
         provider_map[realm] = import_string(cls_path)()
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = provider_map
+
+    # Load secrets hashers
+    register_default_hashers()
 
 def init_logging(app):
     log_handler = logging.StreamHandler()
@@ -169,13 +181,10 @@ def load_serialized_kwargs(raw):
 
    try:
       parsed = json.loads(raw)
-
       if not isinstance(parsed, dict):
          logger.warning(f"Serialized kwargs should be a JSON object; got {type(parsed).__name__}; using empty dict")
          return {}
-
       return parsed
-
    except Exception as e:
       logger.warning(f"Invalid JSON in serialized kwargs={raw!r}; using empty dict: {e}")
       return {}
@@ -216,7 +225,7 @@ def create_app():
 
     @app.after_request
     def add_rid(resp):
-        rid = getattr(g, "rid", None) or get_correlation_id(request)
+        rid = getattr(g, "rid", None) or get_request_id(request.headers)
         resp.headers.setdefault("X-Request-Id", rid)
         return resp
 
@@ -267,7 +276,7 @@ def create_app():
     app.register_blueprint(session_blueprint)
     app.register_blueprint(login_blueprint)
     app.register_blueprint(device_blueprint)
-    app.register_blueprint(service_blueprint)
+    app.register_blueprint(token_blueprint)
     app.register_blueprint(metrics_blueprint)
     if app.config.get("ENABLE_LEGACY_API", False):
         app.register_blueprint(discovery_blueprint)

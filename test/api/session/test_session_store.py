@@ -20,7 +20,7 @@ import valkey
 import fakeredis
 import testing.postgresql
 from types import SimpleNamespace
-from credenza.api.common.util import AESGCMCodec
+from credenza.api.common.crypto import AESGCMCodec
 from credenza.api.session.storage.session_store import SessionStore, SessionData, SessionType
 from credenza.api.session.storage.backends.memory import MemoryBackend
 from credenza.api.session.storage.backends.redis import RedisBackend
@@ -156,7 +156,7 @@ def test_list_session_ids_and_get_ttl(frozen_time, store):
 
 def test_nonce_lifecycle(store):
     # store_nonce and get_nonce should round-trip the JSON-able object
-    store.store_authn_request_ctx("n1", {"nonce":"abc123"})
+    store.set_authn_request_ctx("n1", {"nonce":"abc123"})
     assert store.get_authn_request_ctx("n1") == {"nonce":"abc123"}
     store.delete_authn_request_ctx("n1")
     assert store.get_authn_request_ctx("n1") is None
@@ -166,7 +166,7 @@ def test_device_flow_mappings(store):
     assert store.get_device_flow("dev1") == "abc123"
 
     store.set_usercode_mapping("user1", "dev1", 600)
-    assert store.get_device_code_for_usercode("user1") == "dev1"
+    assert store.consume_usercode_mapping("user1") == "dev1"
 
 def test_get_session_data_corrupted_json(monkeypatch, store):
     bad_id = "badjson"

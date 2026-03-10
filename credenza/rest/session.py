@@ -17,17 +17,25 @@ import time
 import logging
 from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
-from ..api.common.util import get_current_session, get_effective_scopes, make_json_response, refresh_access_token, \
-    refresh_additional_tokens, revoke_tokens, get_augmentation_provider, strtobool, perf_logged
-from ..api.common.claim_mapper import resolve_claim
-from ..api.auth.service.adapters.base import DEFAULT_MAX_TTL
-from ..api.session.storage.session_store import SessionData, SessionType
 from ..telemetry import audit_event
+from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
+from ..api.session.storage.session_store import SessionData, SessionType
+from ..api.common.util import (
+    get_current_session,
+    get_effective_scopes,
+    make_json_response,
+    refresh_access_token,
+    refresh_additional_tokens,
+    revoke_tokens,
+    get_augmentation_provider,
+    strtobool,
+    perf_logged,
+)
+
 
 logger = logging.getLogger(__name__)
 
 session_blueprint = Blueprint("session", __name__)
-
 
 @session_blueprint.route("/whoami", methods=["GET"])
 @perf_logged(warn_ms=1000)
@@ -55,7 +63,7 @@ def get_session():
 
     sid, session = get_current_session()
     store = current_app.config["SESSION_STORE"]
-    now = time.time()
+    now = int(time.time())
 
     realm = session.realm
     sub = session.userinfo.get("sub")
@@ -120,11 +128,10 @@ def get_session():
     if request.method == "PUT":
 
         if session.is_service():
-            policy = (session.session_metadata.system or {}).get("service_policy") or {}
-            max_ttl = int(policy.get("max_ttl_seconds") or DEFAULT_MAX_TTL)
+            max_ttl = session.session_ttl
             now_i = int(now)
 
-            # Clamp final expiry to max_ttl_seconds if configured
+            # Clamp final expiry to session.session_ttl if configured
             if max_ttl > 0:
                 cap = now_i + max_ttl
                 if session.expires_at > cap:
@@ -148,12 +155,12 @@ def get_session():
 
             # enforce max refreshable lifetime for user sessions
             session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
-            refresh_expires_at = (session.session_metadata.system or {}).get("refresh_expires_at")
-            if refresh_expires_at and now > (refresh_expires_at - session_expiry_threshold):
+            absolute_expires_at = session.absolute_expires_at
+            if absolute_expires_at and now > (absolute_expires_at - session_expiry_threshold):
                 revoke_tokens(sid, session)
                 store.delete_session(sid)
-                audit_event("refresh_expired", session_id=sid)
-                abort(401, "refresh_expired")
+                audit_event("session_absolute_lifetime_expired", session_id=sid)
+                abort(401, "session_absolute_lifetime_expired")
 
             if upstream and session.can_refresh_upstream():
                 # Potentially refresh our access token from upstream, if we've got a refresh token to do so
@@ -176,21 +183,21 @@ def get_session():
     return make_json_response(response)
 
 
-@session_blueprint.route("/session", methods=["PATCH"])
-@perf_logged(warn_ms=1000)
-def patch_session():
-    sid, session = get_current_session()
-    patch = request.get_json()
-    if not isinstance(patch, dict):
-        abort(400, "Expected JSON object")
-
-    if not session.is_primary():
-        abort(403, "Only user sessions are allowed to PATCH")
-
-    store = current_app.config["SESSION_STORE"]
-    store.tag_session_metadata(sid, patch, scope="user")
-    audit_event("session_metadata_patch", session_id=sid, metadata=patch)
-    return jsonify({"status": "updated", "patched": patch})
+# @session_blueprint.route("/session", methods=["PATCH"])
+# @perf_logged(warn_ms=1000)
+# def patch_session():
+#     sid, session = get_current_session()
+#     patch = request.get_json()
+#     if not isinstance(patch, dict):
+#         abort(400, "Expected JSON object")
+#
+#     if not session.is_primary():
+#         abort(403, "Only user sessions are allowed to PATCH")
+#
+#     store = current_app.config["SESSION_STORE"]
+#     store.tag_session_metadata(sid, patch, scope="user")
+#     audit_event("session_metadata_patch", session_id=sid, metadata=patch)
+#     return jsonify({"status": "updated", "patched": patch})
 
 
 @session_blueprint.route("/session", methods=["DELETE"])
@@ -215,11 +222,26 @@ def delete_session():
     resp.set_cookie(current_app.config["COOKIE_NAME"], "", expires=0)
     return resp
 
+
 def _claim(session, key, fallback=None, *, listify=False):
     realm = session.realm or "default"
-    maps = current_app.config.get("IDP_CLAIM_MAPS") or {}
-    claim_map = maps.get(realm) or maps.get("default") or {}
+    claim_map = get_claim_map_for_realm(realm=realm, realm_maps= current_app.config.get("IDP_CLAIM_MAPS"))
     return resolve_claim(session.userinfo, claim_map, key, fallback, listify=listify)
+
+
+def _format_attributes(claim_names: list, attributes: list, session: SessionData) -> list:
+    for claim_name in claim_names:
+        claim = _claim(session, claim_name, session.userinfo.get(claim_name, []), listify=True)
+        attrs = []
+        for attr in claim:
+            if isinstance(attr, dict):
+                attrs.append(attr)
+            elif isinstance(attr, str):
+                attrs.append({"id": attr, "display_name": attr})
+        attributes.extend(attrs)
+
+    return attributes
+
 
 def make_session_response(sid, session: SessionData):
     response = {}
@@ -252,14 +274,7 @@ def make_session_response(sid, session: SessionData):
 
         # format "attributes" array
         attributes = [client]
-        groups_claim = _claim(session, "groups", session.userinfo.get("groups", []), listify=True)
-        groups = []
-        for group in groups_claim:
-            if isinstance(group, dict):
-                groups.append(group)
-            elif isinstance(group, str):
-                groups.append({"id": group, "display_name": group})
-        attributes.extend(groups)
+        _format_attributes(["groups", "roles", "resources", "scopes", "claims"], attributes, session)
         response["attributes"] = attributes
 
         response["since"] = datetime.fromtimestamp(session.created_at, timezone.utc).isoformat()
@@ -301,7 +316,7 @@ def make_session_response(sid, session: SessionData):
                 "groups":             groups,
                 "roles":              roles,
                 "scopes":             get_effective_scopes(session),
-                "allowed_resources":  session.allowed_resources,
+                "resources":          session.allowed_resources,
                 "metadata":           session.session_metadata.to_dict(),
                 "created_at":         datetime.fromtimestamp(session.created_at, timezone.utc).isoformat(),
                 "updated_at":         datetime.fromtimestamp(session.updated_at, timezone.utc).isoformat(),

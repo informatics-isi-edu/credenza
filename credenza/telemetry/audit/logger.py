@@ -60,7 +60,7 @@ def audit_event(event, **kwargs):
     if has_request_context():
         ip = client_ip(request)
         if ip is not None:
-            extra["client"] = ip
+            extra["client_ip"] = ip
 
     log_entry = {
         "event": event,

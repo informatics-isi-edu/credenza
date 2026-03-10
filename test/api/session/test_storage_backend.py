@@ -1,4 +1,3 @@
-#
 # Copyright 2025 University of Southern California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -123,3 +122,43 @@ def test_backend_unicode_keys_and_values(backend):
     val = "🚀🔥"
     backend.set(key, val)
     assert backend.get(key).decode("utf-8") == val
+
+def test_backend_consume_returns_value_once(backend):
+    """
+    consume(key) should return the stored value exactly once and remove it from store.
+    After consume, get(key) must be None and subsequent consume(key) must return None.
+    """
+    key = f"consume:{uuid.uuid4()}"
+    value = b"one-time"
+
+    # set value
+    backend.set(key, value)
+
+    # Prefer to call consume if available; if not, fail the test early to make missing impl obvious.
+    if not hasattr(backend, "consume"):
+        pytest.fail(f"Backend {type(backend).__name__} missing required 'consume' method")
+
+    first = backend.consume(key)
+    assert first == value, "first consume() must return the stored bytes value"
+
+    # ensure it's removed
+    assert backend.get(key) is None, "value must be removed after consume()"
+
+    # second consume should be None
+    second = backend.consume(key)
+    assert second is None, "consume() on already-consumed key must return None"
+
+def test_backend_consume_type_and_empty_value(backend):
+    """
+    consume should preserve empty bytes and return bytes type for bytes-stored values.
+    """
+    key_empty = f"consume-empty:{uuid.uuid4()}"
+    backend.set(key_empty, b"")
+    if not hasattr(backend, "consume"):
+        pytest.fail(f"Backend {type(backend).__name__} missing required 'consume' method")
+
+    val = backend.consume(key_empty)
+    assert isinstance(val, (bytes, type(None))), "consume() should return bytes or None"
+    assert val == b"", "consume() should return the empty bytes value that was stored"
+    # subsequent operations confirm removal
+    assert backend.get(key_empty) is None

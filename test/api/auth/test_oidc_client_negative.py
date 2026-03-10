@@ -18,7 +18,7 @@ import time
 import pytest
 import requests
 from requests import HTTPError
-from credenza.api.auth.client.oidc_client import OIDCClientFactory, OIDCClient
+from credenza.api.auth.oidc_client import OIDCClientFactory, OIDCClient
 
 #
 # Helper stub for requests responses

@@ -15,66 +15,20 @@
 #
 import pytest
 import copy
-import json
 import uuid
 import base64
 from flask import Flask, jsonify, g
 from werkzeug.http import dump_cookie
 from werkzeug.exceptions import HTTPException, NotFound
 from credenza.api.common import util
-from credenza.api.common.util import get_tokens_by_scope, get_cookie_domain
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
 from credenza.api.session.storage.session_store import SessionData, SessionMetadata, SessionType
-
-
-def test_decrypt_invalid_ciphertext_returns_none():
-    codec = util.AESGCMCodec("supersecretvalue")
-    assert codec.decrypt("not-a-valid-token") is None
-
-
-def test_decrypt_tampered_ciphertext_returns_none():
-    codec = util.AESGCMCodec("supersecretvalue")
-    plaintext = json.dumps({"k": "v"})
-
-    token = codec.encrypt(plaintext)
-
-    # Outer layer is base64(urlsafe) encoded JSON bytes
-    raw = base64.urlsafe_b64decode(token.encode())
-    assert raw, "expected non-empty decoded payload"
-
-    # Flip one byte deterministically (not the first/last to avoid trivial decode issues)
-    b = bytearray(raw)
-    idx = min(5, len(b) - 1)
-    b[idx] ^= 0x01
-    tampered = base64.urlsafe_b64encode(bytes(b)).decode()
-
-    # GCM integrity should fail => decrypt() returns None
-    assert codec.decrypt(tampered) is None
-
-
-
-def test_has_current_session_no_sid(monkeypatch, app):
-    """When extract_session_key yields no SID, we get None."""
-    with app.app_context():
-        monkeypatch.setattr(util, "extract_session_key", lambda: (None, False))
-        assert util.has_current_session() is None
-
-
-def test_has_current_session_not_found(monkeypatch, app, store):
-    """When SID exists but store.get_session_data returns None, we get None."""
-    with app.app_context():
-        monkeypatch.setattr(util, "extract_session_key", lambda: ("S1", False))
-        monkeypatch.setattr(store, "get_session_data", lambda sid: None)
-        assert util.has_current_session() is None
-
-
-def test_has_current_session_exists(monkeypatch, app, store, base_session):
-    """When SID exists and store.get_session_data returns a session, we get that SID."""
-    with app.app_context():
-        monkeypatch.setattr(util, "extract_session_key", lambda: ("foo", False))
-        monkeypatch.setattr(store, "get_session_by_session_key", lambda skey: ("S2", copy.deepcopy(base_session)))
-        assert util.has_current_session() == "S2"
-
+from credenza.api.common.util import (
+    get_tokens_by_scope,
+    get_cookie_domain,
+    parse_basic_auth,
+    collapse_str_list,
+    validate_resource_string)
 
 def test_get_current_session_no_skey(monkeypatch, app):
     """No SID -> abort(404)."""
@@ -82,6 +36,14 @@ def test_get_current_session_no_skey(monkeypatch, app):
         monkeypatch.setattr(util, "extract_session_key", lambda: (None, False))
         with pytest.raises(NotFound):
             util.get_current_session()
+
+
+def test_get_current_session_no_skey_no_abort(monkeypatch, app):
+    with app.app_context():
+        monkeypatch.setattr(util, "extract_session_key", lambda: (None, False))
+        sid, session = util.get_current_session(dont_abort=True)
+        assert sid is None
+        assert session is None
 
 
 def test_get_current_session_not_found_no_legacy(monkeypatch, app, store):
@@ -93,12 +55,22 @@ def test_get_current_session_not_found_no_legacy(monkeypatch, app, store):
         with pytest.raises(NotFound):
             util.get_current_session()
 
+def test_get_current_session_not_found_no_legacy_no_abort(monkeypatch, app, store):
+    with app.app_context():
+        monkeypatch.setattr(util, "extract_session_key", lambda: ("S4", False))
+        monkeypatch.setattr(store, "get_session_data", lambda sid: None)
+        app.config["ENABLE_LEGACY_API"] = False
+        sid, session = util.get_current_session(dont_abort=True)
+        assert sid is None
+        assert session is None
+
 
 def test_get_current_session_success(monkeypatch, app, store, base_session):
     """Valid SID in store -> returns (sid, session)."""
     with app.app_context():
         monkeypatch.setattr(util, "extract_session_key", lambda: ("foo", False))
-        monkeypatch.setattr(store, "get_session_by_session_key", lambda skey: ("S5", copy.deepcopy(base_session)))
+        monkeypatch.setattr(store, "get_active_session_by_session_key",
+                            lambda skey: ("S5", copy.deepcopy(base_session)))
         sid, sess = util.get_current_session()
         assert sid == "S5"
         assert isinstance(sess, SessionData)
@@ -123,7 +95,7 @@ def test_get_current_session_legacy_bearer(monkeypatch, app, store, base_session
                 pytest.skip(f"Unexpected session_key lookup: {key_arg!r}")
                 return None, None
 
-        monkeypatch.setattr(store, "get_session_by_session_key", fake_get_by_key)
+        monkeypatch.setattr(store, "get_active_session_by_session_key", fake_get_by_key)
         monkeypatch.setattr(util, "get_augmentation_provider",
                             lambda realm: app.config["SESSION_AUGMENTATION_PROVIDERS"]["globus"])
         monkeypatch.setattr(
@@ -135,57 +107,6 @@ def test_get_current_session_legacy_bearer(monkeypatch, app, store, base_session
         sid, sess = util.get_current_session()
         assert sid == "SID"
         assert sess is new_sess
-
-def test_get_current_session_service_absolute_lifetime_exceeded_401_deletes_and_audits(
-    monkeypatch, app, store, base_session):
-    sid = "svc-abs-life"
-    now = 1_700_000_000  # deterministic "current" time
-
-    sess = copy.deepcopy(base_session)
-    sess._session_type = SessionType.SERVICE
-    sess.created_at = now - 100  # created exactly abs_life seconds ago => hard_stop == now
-    sess.expires_at = now + 10_000
-
-    sess.session_metadata.system = dict(sess.session_metadata.system or {})
-    sess.session_metadata.system["service_policy"] = {
-        "absolute_lifetime_seconds": 100,  # hard stop at created_at + 100 == now
-    }
-
-    audit_calls = []
-    monkeypatch.setattr(util, "audit_event", lambda ev, **kw: audit_calls.append((ev, kw)))
-
-    deleted = []
-    monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
-
-    with app.app_context():
-        app.config["SESSION_STORE"] = store
-        app.config["ENABLE_LEGACY_API"] = False
-
-        # Drive get_current_session() down the "service session hard-stop" branch
-        monkeypatch.setattr(util, "extract_session_key", lambda: ("SKEY", False))
-        monkeypatch.setattr(store, "get_session_by_session_key", lambda skey: (sid, sess))
-
-        # Freeze util's time source (get_current_session imports time in util module)
-        monkeypatch.setattr(util.time, "time", lambda: float(now))
-
-        with pytest.raises(HTTPException) as excinfo:
-            util.get_current_session()
-
-        assert excinfo.value.code == 401
-
-    # Must delete the session
-    assert deleted == [sid]
-
-    # Must audit the lifetime exceeded event
-    events = [ev for ev, _ in audit_calls]
-    assert "service_session_absolute_lifetime_exceeded" in events, audit_calls
-
-    # Optional: verify key audit payload fields
-    _, kw = next((ev, kw) for ev, kw in audit_calls if ev == "service_session_absolute_lifetime_exceeded")
-    assert kw["session_id"] == sid
-    assert kw["created_at"] == sess.created_at
-    assert kw["absolute_lifetime_seconds"] == 100
-    assert kw["realm"] == sess.realm
 
 
 def test_extract_session_key_from_cookie(app):
@@ -236,17 +157,6 @@ def test_get_realm_no_default_causes_abort(monkeypatch):
         assert excinfo.value.code == 400
 
 
-def test_generate_nonce_length_and_uniqueness():
-    n1 = util.generate_nonce()
-    n2 = util.generate_nonce()
-    assert isinstance(n1, str) and len(n1) >= 32
-    assert isinstance(n2, str) and n1 != n2
-    n1 = util.generate_nonce()
-    n2 = util.generate_nonce()
-    assert isinstance(n1, str) and len(n1) >= 32
-    assert isinstance(n2, str) and n1 != n2
-
-
 def test_make_json_response_body_and_status():
     payload = {"msg": "ok"}
     res = util.make_json_response(payload)
@@ -261,14 +171,6 @@ def test_get_effective_scopes_combines_scopes_and_additional_tokens(base_session
     assert set(scopes) == {"openid", "profile", "svc1", "svc2"}
 
 
-def test_encrypt_decrypt_roundtrip():
-    codec = util.AESGCMCodec("supersecretvalue")
-    plaintext = {"key": "value"}
-    encrypted = codec.encrypt(json.dumps(plaintext))
-    decrypted = json.loads(codec.decrypt(encrypted))
-    assert decrypted["key"] == "value"
-
-
 def test_get_tokens_by_scope_only_primary(base_session):
     base_session.scopes = "openid email"
     base_session.access_token = "A1"
@@ -278,6 +180,7 @@ def test_get_tokens_by_scope_only_primary(base_session):
     assert out == {
         "openid email": {"access_token": "A1", "refresh_token": "R1"}
     }
+
 
 def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app, base_session):
     """revoke_tokens() revokes access and refresh tokens per scope and emits audit events."""
@@ -399,23 +302,23 @@ def test_client_ip_unknown_when_missing(app):
         assert util.client_ip(util.request) == "unknown"
 
 
-def test_get_correlation_id_prefers_traceparent(app):
+def test_get_request_id_prefers_traceparent(app):
     with app.test_request_context("/", headers={"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}):
-        assert util.get_correlation_id(util.request) == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+        assert util.get_request_id(util.request.headers) == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 @pytest.mark.parametrize("header_name", ["X-Request-Id", "X-Request-ID", "x-request-id",
                                         "X-Correlation-Id", "X-Correlation-ID", "x-correlation-id",
                                         "X-Amzn-Trace-Id", "x-amzn-trace-id"])
-def test_get_correlation_id_uses_common_headers(app, header_name):
+def test_get_request_id_uses_common_headers(app, header_name):
     with app.test_request_context("/", headers={header_name: "RID-123"}):
-        assert util.get_correlation_id(util.request) == "RID-123"
+        assert util.get_request_id(util.request.headers) == "RID-123"
 
 
-def test_get_correlation_id_generates_uuid_last_resort(app, monkeypatch):
+def test_get_request_id_generates_uuid_last_resort(app, monkeypatch):
     monkeypatch.setattr(uuid, "uuid4", lambda: uuid.UUID("12345678-1234-5678-1234-567812345678"))
     with app.test_request_context("/", headers={}):
-        assert util.get_correlation_id(util.request) == "12345678-1234-5678-1234-567812345678"
+        assert util.get_request_id(util.request.headers) == "12345678-1234-5678-1234-567812345678"
 
 
 def test_ip_rate_limited_allows_and_attaches_headers(app, monkeypatch):
@@ -626,3 +529,113 @@ def test_retrying_requests_session_mounts_and_retries_configured():
     # default allowed_methods in util is GET-only unless overridden
     assert retry.allowed_methods is not None
     assert "GET" in retry.allowed_methods
+
+def test_singleton_returns_string():
+    result = collapse_str_list(["value"])
+    assert isinstance(result, str)
+    assert result == "value"
+
+
+def test_singleton_after_dedup_returns_string():
+    # duplicate entries collapse to one unique value
+    result = collapse_str_list(["x", "x"])
+    assert isinstance(result, str)
+    assert result == "x"
+
+
+def test_multiple_unique_returns_list():
+    result = collapse_str_list(["a", "b"])
+    assert isinstance(result, list)
+    assert result == ["a", "b"]
+
+
+def test_multiple_unique_sorted_list():
+    # collapse_str_list should preserve normalize_str_list sorting behavior
+    result = collapse_str_list(["b", "a"])
+    assert isinstance(result, list)
+    assert result == ["a", "b"]
+
+
+def test_parse_basic_auth_valid_and_invalid():
+    # valid basic
+    b64 = base64.b64encode(f"cid1:s1".encode("utf-8")).decode("ascii")
+    header = f"Basic {b64}"
+    parsed = parse_basic_auth(header)
+    assert parsed == {"client_id": "cid1", "client_secret": "s1"}
+
+    # wrong scheme
+    assert parse_basic_auth("Bearer abcdef") is None
+
+    # malformed base64
+    assert parse_basic_auth("Basic !!!notbase64!!!") is None
+
+    # no colon after decode
+    b64 = base64.b64encode(b"nocolon").decode("ascii")
+    assert parse_basic_auth(f"Basic {b64}") is None
+
+    # empty header
+    assert parse_basic_auth("") is None
+    assert parse_basic_auth(None) is None
+
+
+def test_validate_resource_string_none_raises():
+    with pytest.raises(ValueError, match="resource value required"):
+        validate_resource_string(None)
+
+
+def test_validate_resource_string_empty_raises():
+    with pytest.raises(ValueError, match="empty resource value not allowed"):
+        validate_resource_string("   ")
+
+
+def test_validate_resource_string_accepts_urn_verbatim_and_strips_whitespace():
+    # leading/trailing whitespace is stripped, URN preserved otherwise
+    inp = "  urn:example:resource:all  "
+    out = validate_resource_string(inp)
+    assert out == "urn:example:resource:all"
+
+
+def test_validate_resource_string_accepts_urn_case_insensitive_prefix():
+    # function uses .lower().startswith("urn:"), so mixed case still treated as URN
+    inp = "URN:EXAMPLE:CASE"
+    out = validate_resource_string(inp)
+    assert out == "URN:EXAMPLE:CASE"
+
+
+def test_validate_resource_string_requires_scheme_and_host():
+    with pytest.raises(ValueError, match="scheme and host required"):
+        validate_resource_string("example.com/no-scheme")
+
+    with pytest.raises(ValueError, match="scheme and host required"):
+        validate_resource_string("/just/a/path")
+
+
+def test_validate_resource_string_disallows_userinfo_in_netloc():
+    # user:pass@host should be disallowed
+    with pytest.raises(ValueError, match="must not contain userinfo"):
+        validate_resource_string("https://user:pass@example.com/path")
+
+
+def test_validate_resource_string_accepts_https_urls():
+    inp = "https://example.com/some/path?query=1"
+    out = validate_resource_string(inp)
+    assert out == inp
+
+
+def test_validate_resource_string_accepts_https_uppercase_scheme_and_host():
+    # scheme and host case should be tolerated; returned value is original string
+    inp = "HTTPS://EXAMPLE.COM/UPPER"
+    out = validate_resource_string(inp)
+    assert out == inp
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+def test_validate_resource_string_allows_http_for_localhost_and_127(host):
+    inp = f"http://{host}:8080/path"
+    out = validate_resource_string(inp)
+    assert out == inp
+
+
+def test_validate_resource_string_rejects_http_for_non_localhost():
+    with pytest.raises(ValueError, match="network resource URIs must use https"):
+        validate_resource_string("http://example.com/path")

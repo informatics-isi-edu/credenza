@@ -101,10 +101,11 @@ Deliverable:
   - Redirect to client.
 
 ## 2.2 `/token` Endpoint
-Support:
+Support grant types:
 - `authorization_code`
 - `device_code`
 - `urn:ietf:params:oauth:grant-type:token-exchange`
+- `client_credentials`
 
 ### Authorization Code Exchange
 - Atomically consume auth code.

@@ -1,0 +1,85 @@
+{
+  "version": "0.1",
+  "clients": {
+    "deriva-py": {
+      "desc": "DERIVA Python CLI/API",
+      "enabled": true,
+      "public": true,
+      "allowed_grant_types": [
+        "device_code"
+      ],
+      "allowed_resources": [
+        "urn:deriva:rest:service:all"
+      ],
+      "additional_claims": {
+        "description": "Public client that uses RFC 8628 Device Authorization."
+      },
+      "max_session_ttl_seconds": 7200
+    },
+
+    "deriva-mcp": {
+      "desc": "Deriva MCP Server (confidential)",
+      "enabled": true,
+      "adapter": {
+        "name": "client_secret",
+        "client_secret": "REDACTED",
+        "client_secret_hash": "bcrypt:$2b$12$LEGACYHASHEDSECRETzzzzzzzzzzzzzzzzzzzz"
+      },
+      "allowed_grant_types": [
+        "client_credentials",
+        "token_exchange"
+      ],
+      "allowed_auth_methods": [
+        "client_secret_basic",
+        "client_secret_post"
+      ],
+      "allowed_token_exchange_targets": [
+        "urn:deriva:rest:service:ermrest",
+        "urn:deriva:rest:service:hatrac",
+        "urn:deriva:rest:service:all"
+      ],
+      "allowed_resources": [
+        "urn:deriva:rest:service:all"
+      ],
+      "allowed_scopes": [
+      ],
+      "default_scopes": [
+      ],
+      "max_session_ttl_seconds": 3600,
+      "additional_claims": {
+        "name": "Deriva MCP Client App",
+        "email": "isrd-support@isi.edu"
+      }
+    },
+    "aws-deriva-etl-test-ec2": {
+      "desc": "AWS EC2 ETL Ingest client (role-based)",
+      "enabled": true,
+      "adapter": {
+        "name": "aws_presigned",
+        "role_arn": "arn:aws:iam::812117085036:role/credenza-service-auth-test-role"
+      },
+      "allowed_grant_types": [
+        "client_credentials"
+      ],
+      "allowed_resources": [
+        "urn:deriva:rest:service:all"
+      ],
+      "allowed_scopes": [
+        "aws-deriva-etl-ingest"
+      ],
+      "default_scopes": [
+        "aws-deriva-etl-ingest"
+      ],
+      "max_session_ttl_seconds": 7200,
+      "absolute_session_lifetime_seconds": 86400,
+      "additional_claims": {
+        "username": "deriva-etl-service",
+        "name": "AWS EC2 DERIVA Data Ingest Service Account",
+        "email": "isrd-support@isi.edu",
+        "roles": [
+          "admins", "curators"
+        ]
+      }
+    }
+  }
+}

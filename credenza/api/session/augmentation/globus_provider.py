@@ -99,7 +99,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
         # Check if we already have a session created by this token. In this case the passed-in token is a Globus bearer
         # token, since we return it as the session key upon success
-        sid, session = store.get_session_by_session_key(bearer_token)
+        sid, session = store.get_active_session_by_session_key(bearer_token)
         if sid and session:
             return sid, session
 

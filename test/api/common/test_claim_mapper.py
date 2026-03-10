@@ -14,7 +14,14 @@
 # limitations under the License.
 #
 from copy import deepcopy
-from credenza.api.common.claim_mapper import DEFAULT_CLAIM_MAP, build_realm_claim_maps, get_claim_map_for_realm, resolve_claim
+from credenza.api.common.claim_mapper import (
+    DEFAULT_CLAIM_MAP,
+    ClaimMap,
+    build_realm_claim_maps,
+    get_claim_map_for_realm,
+    resolve_claim,
+    merge_additional_claims
+)
 
 def test_build_maps_applies_preset_on_exact_realm_name():
     profiles = {
@@ -128,3 +135,70 @@ def test_preset_effect_in_resolution_with_substring_realm_name():
     cmap = realm_maps["cognito-dev"]
     ui = {"cognito:groups": ["A", "B"]}
     assert resolve_claim(ui, cmap, "groups", [], listify=True) == ["A", "B"]
+
+def test_merge_additional_claims_normalizes_and_respects_allowed():
+    userinfo = {"email": "e@x.com"}
+    # adapter supplies a flat key "username" which should map -> "preferred_username"
+    additional = {"username": "u1", "roles": ["r1"]}
+    claim_map = DEFAULT_CLAIM_MAP
+
+    # allow only preferred_username (so roles should be rejected)
+    merged, changes = merge_additional_claims(userinfo,
+                                              additional,
+                                              claim_map=claim_map,
+                                              allowed_claims={"preferred_username"})
+    assert merged["preferred_username"] == "u1"
+    assert "roles" in changes and changes["roles"]["action"] == "skipped_disallowed"
+
+def test_merge_additional_claims_skips_non_json_safe_values():
+    userinfo = {}
+    # object() is not JSON-safe
+    additional = {"weird": object()}
+    # put "weird" in a claim_map entry so normalization doesn't change the key
+    claim_map = {"weird": ["weird"]}
+
+    merged, changes = merge_additional_claims(userinfo, additional, claim_map=claim_map)
+    assert "weird" not in merged
+    assert "weird" in changes and changes["weird"]["action"] == "skipped_non_json_safe"
+
+def test_merge_additional_claims_overwrite_and_skip_existing_behaviour():
+    userinfo = {"email": "old@example.org"}
+    additional = {"email": "new@example.org"}
+    claim_map = {"email": ["email"]}
+
+    # default: overwrite=False -> skip existing
+    merged1, changes1 = merge_additional_claims(userinfo, additional, claim_map=claim_map, overwrite=False)
+    assert merged1["email"] == "old@example.org"
+    assert changes1["email"]["action"] == "skipped_existing"
+
+    # with overwrite=True -> replace
+    merged2, changes2 = merge_additional_claims(userinfo, additional, claim_map=claim_map, overwrite=True)
+    assert merged2["email"] == "new@example.org"
+    assert changes2["email"]["action"] == "overwrite"
+    assert changes2["email"]["prev"] == "old@example.org"
+
+def test_merge_additional_claims_listify_keys_coerces_scalar_to_list():
+    userinfo = {}
+    additional = {"groups": "dev"}
+    claim_map = {"groups": ["groups"]}
+
+    merged, changes = merge_additional_claims(userinfo, additional, claim_map=claim_map, listify_keys={"groups"})
+    assert merged["groups"] == ["dev"]
+    assert changes["groups"]["action"] == "add"
+
+def test_resolve_claim_prefers_canonical_then_fallback():
+
+    # claim_map that prefers 'name' as the source for full_name
+    cm: ClaimMap = {"full_name": ["name"], "email": ["email"]}
+
+    # Case A: canonical key present (e.g., after early normalization)
+    ui_a = {"full_name": "Canonical Name"}
+    assert resolve_claim(ui_a, cm, "full_name", default=None) == "Canonical Name"
+
+    # Case B: canonical missing but source path present
+    ui_b = {"name": "Adapter Name"}
+    assert resolve_claim(ui_b, cm, "full_name", default=None) == "Adapter Name"
+
+    # listify behavior: scalar -> list if requested
+    ui_c = {"full_name": "Single"}
+    assert resolve_claim(ui_c, cm, "full_name", default=None, listify=True) == ["Single"]
