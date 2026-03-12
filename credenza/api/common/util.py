@@ -14,31 +14,24 @@
 # limitations under the License.
 #
 from __future__ import annotations
-import re
-import json
 import time
-import uuid
 import base64
-import hashlib
 import logging
-import ipaddress
 import requests
-import functools
-from enum import Enum
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
-from typing import Iterable, Optional, Set, Tuple, List, Dict, Union, Mapping
 from datetime import datetime, timezone
-from publicsuffix2 import get_sld
-from flask import current_app, request, make_response, Response, abort, jsonify, g
-from requests import HTTPError, Timeout, ConnectionError
+from requests.adapters import HTTPAdapter
+from typing import Iterable, Optional, Set, Tuple, List, Dict, Union
+from flask import current_app, request, abort
+from urllib3.util import Retry
 from urllib.parse import urlparse
-from ..common import client_ip
-from ..session.storage.session_store import SessionData, SessionType
+from requests import HTTPError, Timeout, ConnectionError
+from ..session.storage.session_store import SessionData
 from ...telemetry import audit_event
 
-
 logger = logging.getLogger(__name__)
+
+MAX_RESOURCES = 32
+MAX_SCOPES = 128
 
 
 def extract_session_key() -> Tuple[str, bool]:
@@ -105,35 +98,10 @@ def augment_session(tokens, realm, userinfo, metadata):
     return userinfo, additional_tokens
 
 
-def make_json_response(data):
-    return Response(
-        json.dumps(data, sort_keys=False),  # Preserve key order
-        mimetype="application/json"
-    )
-
-
-def route_label(req):
-    # Prefer the matched rule (shows which alias hit), else fallback to raw path
-    rule = getattr(req, "url_rule", None)
-    route = rule.rule if rule is not None else req.path
-    return f"{req.method} {route}"
-
-
-def limit_or_429(limiter, key, detail):
-    allowed, remaining, reset_s = limiter.allow(key)
-    if allowed:
-        return None, remaining, reset_s
-    resp = make_response(jsonify({"error": "rate_limited", "detail": detail}), 429)
-    resp.headers.update(limiter.headers(remaining, reset_s))
-    resp.headers["Retry-After"] = str(reset_s)
-    audit_event("request_rate_limited", detail=detail)
-    return resp, remaining, reset_s
-
-
 def get_effective_scopes(session: SessionData) -> list:
     if not session:
         return []
-    effective_scopes = list(session.scopes.split())
+    effective_scopes = list(session.scopes.split()) if session.scopes else []
     additional_scopes = list(session.additional_tokens.keys())
     effective_scopes.extend(additional_scopes)
     return effective_scopes
@@ -279,81 +247,23 @@ def parse_basic_auth(header_value: str) -> Optional[Dict[str, str]]:
     if scheme.lower() != "basic":
         return None
     try:
-        raw = base64.b64decode(b64.strip()).decode("utf-8")
+        value = base64.b64decode(b64.strip()).decode("utf-8")
     except Exception:
         return None
-    if ":" not in raw:
+    if ":" not in value:
         return None
-    cid, secret = raw.split(":", 1)
+    cid, secret = value.split(":", 1)
     return {"client_id": cid, "client_secret": secret}
 
 
-def get_cookie_domain() -> Optional[str]:
-    """
-    Determine which cookie domain to use, based on configuration.
+def get_request_resource_args(resources: list, maxsize: int = MAX_RESOURCES):
+    result = normalize_str_list(resources)
 
-    - If COOKIE_DOMAIN is unset or None: do not set a cookie domain (passthrough to set_cookie which will use FQHN).
-    - If COOKIE_DOMAIN is 'true' or True: determine a base domain heuristically via publicsuffix2.get_sld().
-    - If COOKIE_DOMAIN is a non-IP-address string (e.g. 'example.org'): use it as-is.
+    if not result and current_app.config.get("ENABLE_LEGACY_API", False):
+        default_res = current_app.config.get("LEGACY_DEFAULT_RESOURCE")
+        return [default_res] if default_res else []
 
-    Returns:
-        Optional[str]: The cookie domain to use, or None to omit the 'domain' attribute.
-    """
-    configured = current_app.config.get("COOKIE_DOMAIN")
-
-    if configured and str(configured).lower() in ("true", "1", "yes"):
-        host = request.host.split(":")[0]  # strip port
-
-        # Rule out localhost or numeric IPs
-        try:
-            ipaddress.ip_address(host)
-            return None
-        except ValueError:
-            pass
-
-        if host.endswith("localhost"):
-            return None
-
-        base_domain = get_sld(host)
-        return base_domain if base_domain else None
-
-    if isinstance(configured, str) and configured.strip().lower() not in ("false", "none"):
-        return configured.strip()
-
-    return None
-
-
-def is_browser_client(req):  # pragma: no cover
-    accept = (req.headers.get("Accept") or "").lower()
-    content_type = (req.headers.get("Content-Type") or "").lower()
-
-    # If the client is clearly asking for JSON, treat as API
-    if "application/json" in accept or content_type.startswith("application/json"):
-        return False
-
-    # Classic XHR signal (some libs still set this)
-    if (req.headers.get("X-Requested-With") or "").lower() == "xmlhttprequest":
-        return False
-
-    # Modern browser fetch/navigation signals:
-    # - navigate/document => likely real browser page load
-    # - cors/no-cors/same-origin + not document => likely fetch/xhr
-    sfm = (req.headers.get("Sec-Fetch-Mode") or "").lower()
-    sfd = (req.headers.get("Sec-Fetch-Dest") or "").lower()
-
-    if sfm:
-        if sfm == "navigate" and (sfd == "document" or not sfd):
-            return True
-        # Anything else is usually fetch/xhr/subresource
-        return False
-
-    # Fallback when Sec-Fetch-* is absent:
-    # Only treat as browser when HTML is *specifically* acceptable.
-    # (Still keep JSON as the safer default.)
-    if "text/html" in accept or "application/xhtml+xml" in accept:
-        return True
-
-    return False
+    return result[:maxsize] if isinstance(maxsize, int) else result
 
 
 def validate_resource_string(value: str) -> str:
@@ -495,7 +405,7 @@ def retrying_requests_session(
         backoff_factor=backoff_factor,
         respect_retry_after_header=True,
         raise_on_redirect=False,
-        raise_on_status=False,             # we’ll inspect status ourselves
+        raise_on_status=False,             # we'll inspect status ourselves
     )
     adapter = HTTPAdapter(max_retries=retry,
                           pool_connections=pool_connections,
@@ -504,219 +414,3 @@ def retrying_requests_session(
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
-
-
-_TRACEPARENT_RE = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$", re.IGNORECASE)
-
-
-def get_request_id(headers: Optional[Mapping[str, str]] = None) -> str:
-    """
-    Return a stable request id for the current Flask request.
-
-    - Reuses a cached id stored on flask.g if present.
-    - Prefer W3C `traceparent` (extracts the trace-id portion).
-    - Fall back to common correlation headers.
-    - Last-resort: generate a UUID once and cache it on g.
-    """
-    # use provided headers (test-friendly) or the current request headers
-    if headers is None:
-        headers = request.headers
-
-    # return cached id if already computed for this request
-    cid = getattr(g, "request_id", None)
-    if cid:
-        return cid
-
-    # 1) W3C Trace Context: try to extract the trace-id (more compact & stable)
-    tp = headers.get("traceparent")
-    if tp:
-        tp = tp.strip()
-        m = _TRACEPARENT_RE.match(tp)
-        if m:
-            cid = m.group(1)
-        else:
-            # fallback to returning the whole header if it doesn't match expected pattern
-            cid = tp
-        g.request_id = cid
-        return cid
-
-    # 2) common correlation/request id headers (case-insensitive via headers.get)
-    for h in (
-        "X-Request-Id",
-        "X-Request-ID",
-        "x-request-id",
-        "X-Correlation-Id",
-        "X-Correlation-ID",
-        "x-correlation-id",
-        "X-Amzn-Trace-Id",
-        "x-amzn-trace-id",
-    ):
-        v = headers.get(h)
-        if v:
-            cid = v.strip()
-            g.request_id = cid
-            return cid
-
-    # 3) Last resort: create one, store it and return
-    cid = str(uuid.uuid4())
-    g.request_id = cid
-    return cid
-
-
-def ip_rate_limited(unknown_bucket="10_per_min", normal_bucket="30_per_min"):
-    """
-    Decorator that enforces an IP-based rate limit and adds its headers
-    to the final response. Stashes details in g.rate_limit for handlers.
-
-    Set app.config["ENABLE_RATE_LIMITING"] = False to bypass entirely.
-
-    Usage:
-      @service_blueprint.route("/service/token", methods=["DELETE"])
-      @ip_rate_limited()
-      def revoke_service_token(): ...
-    """
-    def _decorator(fn):
-        @functools.wraps(fn)
-        def _wrapped(*args, **kwargs):
-            # Bypass completely if disabled (default: enabled)
-            enabled = current_app.config.get("ENABLE_RATE_LIMITING", True)
-            if not enabled:
-                return fn(*args, **kwargs)
-
-            limits = current_app.extensions["rate_limits"]
-            ip = client_ip(request)
-            ip_key = f"ip:{ip}"
-            detail = f"Too many requests: {route_label(request)} from: {ip_key}"
-            bucket = limits[unknown_bucket] if ip == "unknown" else limits[normal_bucket]
-
-            resp, rem, reset = limit_or_429(bucket, ip_key, detail)
-            if resp is not None:
-                return resp  # already a proper 429
-
-            # stash for handler (optional)
-            g.rate_limit = {"bucket": bucket, "remaining": rem, "reset": reset}
-
-            rv = fn(*args, **kwargs)
-
-            # always attach IP bucket headers to the outgoing response
-            response = current_app.make_response(rv)
-            try:
-                response.headers.update(bucket.headers(rem, reset))
-            except Exception: # pragma: no cover
-                pass
-            return response
-
-        return _wrapped
-    return _decorator
-
-
-def rate_limit_principal_key(principal: str, *, realm: str = "", adapter: str = "") -> str:
-    # Normalize for stability
-    p = (principal or "").strip()
-    material = "\n".join([realm or "", adapter or "", p]).encode("utf-8", errors="surrogatepass")
-    digest = hashlib.sha256(material).hexdigest()[:24]  # short, bounded
-    return f"principal:{digest}"
-
-
-def perf_logged(*, warn_ms: Optional[int] = None, logger=None, include_query=False):
-    """
-    Log total handler time with endpoint + rule inferred from the request.
-
-    Args:
-      warn_ms: log at WARNING if elapsed >= warn_ms, else DEBUG.
-      logger:  override logger; defaults to current_app.logger.
-      include_query: include the query string in the logged path.
-
-    Always logs, even on abort/exception. Never affects response flow.
-    """
-    def _decorator(fn):
-        @functools.wraps(fn)
-        def _wrap(*args, **kwargs):
-            start = time.perf_counter()
-            status = "-"
-            try:
-                rv = fn(*args, **kwargs)
-                return rv
-            finally:
-                # Do NOT return from finally
-                try:
-                    enabled = bool(getattr(current_app, "config", {}).get("DEBUG_PERF", False))
-                except Exception: # pragma: no cover
-                    enabled = False
-
-                if not enabled:
-                    # Skip logging silently
-                    pass
-                else:
-                    elapsed_ms = int((time.perf_counter() - start) * 1000)
-                    try:
-                        # Best-effort status extraction
-                        if "rv" in locals():
-                            try:
-                                status = make_response(rv).status_code
-                            except Exception: # pragma: no cover
-                                pass
-
-                        # Infer labels from the request
-                        endpoint = request.endpoint or "-"          # e.g. "session.get_session"
-                        rule     = getattr(request, "url_rule", None)
-                        rule_s   = rule.rule if rule else request.path
-                        path     = request.full_path if include_query else request.path
-
-                        # Short function name (after blueprint) if helpful
-                        # e.g., "session.get_session" -> "get_session"
-                        short_fn = endpoint.split(".")[-1] if endpoint else "-"
-
-                        # Compose message
-                        msg = (
-                            f"{request.method} {path} -> {status} "
-                            f"[rule={rule_s} endpoint={endpoint} fn={short_fn}] "
-                            f"took {elapsed_ms} ms"
-                        )
-
-                        log = logger or getattr(current_app, "logger", None)
-                        if log:
-                            if warn_ms is not None and elapsed_ms >= warn_ms:
-                                log.warning(msg)
-                            else:
-                                log.debug(msg)
-                    except Exception:
-                        # Never let logging break the response
-                        pass
-        return _wrap
-    return _decorator
-
-class GrantType(str, Enum):
-    # Core OAuth 2.0
-    AUTHORIZATION_CODE = "authorization_code"
-    CLIENT_CREDENTIALS = "client_credentials"
-    REFRESH_TOKEN = "refresh_token"
-    PASSWORD = "password"  # legacy / currently unsupported
-
-    # Extensions
-    DEVICE_CODE = "urn:ietf:params:oauth:grant-type:device_code"
-    TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
-
-    # Assertions
-    JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-    SAML2_BEARER = "urn:ietf:params:oauth:grant-type:saml2-bearer"
-
-    @classmethod
-    def from_value(cls, value: str) -> GrantType: # pragma: no cover
-        try:
-            return cls(value)
-        except ValueError:
-            raise ValueError(f"Unsupported grant_type: {value}")
-
-
-def map_grant_type_to_session_type(grant_type: GrantType) -> SessionType:
-    try:
-        return {
-            GrantType.CLIENT_CREDENTIALS: SessionType.SERVICE,
-            GrantType.DEVICE_CODE: SessionType.DEVICE,
-            GrantType.TOKEN_EXCHANGE: SessionType.DERIVED,
-            GrantType.AUTHORIZATION_CODE: SessionType.USER,
-          # GrantType.REFRESH_TOKEN: SessionType.USER,  # not currently applicable
-        }[grant_type]
-    except KeyError: # pragma: no cover
-        raise ValueError(f"Unsupported grant type for session mapping: {grant_type}")

@@ -19,7 +19,6 @@ import time
 import requests
 import logging
 from secrets import token_urlsafe
-from authlib.oauth2.client import OAuth2Client
 from authlib.integrations.requests_client import OAuth2Session
 from authlib.jose import jwt, JsonWebKey
 
@@ -214,7 +213,7 @@ class OIDCClient:
 
     def revoke_token(self, scope: str, token: str, token_type_hint: str = "access_token") -> bool:
         """
-        Revoke an access or refresh token at the provider’s revocation endpoint.
+        Revoke an access or refresh token at the provider's revocation endpoint.
         Returns True on HTTP 200, False otherwise.
         """
         if not self.revocation_url:

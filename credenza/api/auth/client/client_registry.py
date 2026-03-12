@@ -21,7 +21,8 @@ from urllib.parse import quote, urlparse
 from dataclasses import dataclass, field, asdict, replace, fields as _dc_fields
 from typing import Dict, List, Optional, Any, Type, Tuple, Iterable,  get_origin as _get_origin, get_args as _get_args
 from ...common.validators import validate_bounded
-from ...common.util import validate_resource_string
+from ...common.util import validate_resource_string, normalize_str_list
+from ...common.grant_type import GrantType
 from ..client import DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL, DEFAULT_CLIENT_AUTH_MAX_ABSOLUTE_LIFETIME
 from .adapters.adapter import (
     AdapterConfig,
@@ -36,6 +37,14 @@ RE_CLIENT_REALM = re.compile(r"^urn:credenza:realm:client:[A-Za-z0-9._%\-]{1,256
 RE_REALM_SHORT = re.compile(r"^[A-Za-z0-9._\-]{1,256}$")
 MAX_RESOURCE_LEN = 1024
 MIN_RESOURCE_LEN = 3
+
+
+def _normalize_grant_type(value: str) -> str:
+    # Resolve via GrantType (handles aliases via _missing_); unknown values pass through unchanged.
+    try:
+        return GrantType(value.strip())
+    except ValueError:
+        return value.strip()
 
 
 def make_client_realm_urn(client_id: str) -> str:
@@ -108,7 +117,7 @@ class ClientRecord:
 
     A ClientRecord represents a registered application identity (the
     client) that interacts with Credenza. This record is *not* a per-user
-    session — it is the static, admin-configured registration for an
+    session -- it is the static, admin-configured registration for an
     application and documents that application's authentication and
     authorization policy.
 
@@ -125,7 +134,7 @@ class ClientRecord:
         and resources the registered app may use.
       - User sessions (interactive logins) and service sessions (tokens issued
         via client authentication or token exchange) are distinct runtime
-        entities produced by Credenza — they are not stored inside ClientRecord.
+        entities produced by Credenza -- they are not stored inside ClientRecord.
       - Fields like realm, allowed_scopes, default_scopes, and TTL
         govern the tokens/sessions that Credenza will issue to that client.
 
@@ -200,6 +209,8 @@ class ClientRecord:
     allowed_resources: List[str] = field(default_factory=list)
     allowed_scopes: List[str] = field(default_factory=list)
     allowed_auth_methods: List[str] = field(default_factory=list)
+    allowed_redirect_uris: List[str] = field(default_factory=list)
+    allowed_introspection_resources: List[str] = field(default_factory=list)
     allowed_token_exchange_targets: List[str] = field(default_factory=list)
     max_session_ttl_seconds: Optional[int] = DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL
     absolute_session_lifetime_seconds: Optional[int] = DEFAULT_CLIENT_AUTH_MAX_ABSOLUTE_LIFETIME
@@ -250,6 +261,23 @@ class ClientRecord:
             )
         object.__setattr__(self, "allowed_scopes", effective_allowed_scopes)
         object.__setattr__(self, "default_scopes", effective_default_scopes)
+
+        # normalize allowed_grant_types: expand short aliases to canonical URN forms
+        object.__setattr__(self, "allowed_grant_types",
+                           [_normalize_grant_type(g) for g in self.allowed_grant_types])
+
+        # normalize allowed_redirect_uris: strip, dedupe, sort; preserve exact case (path is case-sensitive)
+        try:
+            object.__setattr__(self, "allowed_redirect_uris", normalize_str_list(self.allowed_redirect_uris))
+        except ValueError as ex:
+            raise ValueError(f"invalid allowed_redirect_uris for client={self.client_id}: {ex}") from ex
+
+        # validate allowed_introspection_resources using the same rules as allowed_resources
+        try:
+            object.__setattr__(self, "allowed_introspection_resources",
+                               validate_resources_list(self.allowed_introspection_resources))
+        except ValueError as ex:
+            raise ValueError(f"invalid allowed_introspection_resources for client={self.client_id}: {ex}") from ex
 
     @property
     def adapter_name(self) -> str:
@@ -435,7 +463,7 @@ def load_client_registry(path: str) -> ClientRegistry:
 
         # If adapter block exists, attempt instantiation. If missing, client is adapterless.
         if adapter_spec is not None:
-            # Resolve adapter class — will raise if 'adapter_name' missing or unknown
+            # Resolve adapter class -- will raise if 'adapter_name' missing or unknown
             adapter_name = adapter_spec.get("adapter_name") or adapter_spec.get("name")
             if not adapter_name:
                 raise ValueError(f"adapter.adapter_name (or 'name') missing in configuration for client {client_id}")
@@ -480,6 +508,8 @@ def load_client_registry(path: str) -> ClientRegistry:
             allowed_scopes=list(spec.get("allowed_scopes") or []),
             allowed_claims=list(spec.get("allowed_claims") or []),
             allowed_auth_methods=list(spec.get("allowed_auth_methods") or []),
+            allowed_redirect_uris=list(spec.get("allowed_redirect_uris") or []),
+            allowed_introspection_resources=list(spec.get("allowed_introspection_resources") or []),
             allowed_token_exchange_targets=list(spec.get("allowed_token_exchange_targets") or []),
             max_session_ttl_seconds=spec.get("max_session_ttl_seconds"),
             absolute_session_lifetime_seconds=spec.get("absolute_session_lifetime_seconds"),

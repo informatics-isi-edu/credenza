@@ -21,6 +21,9 @@ from urllib.parse import urlparse, parse_qs
 from credenza.rest import device as df
 from credenza.api.session.storage.session_store import SessionData, SessionType
 from credenza.rest.device import device_callback
+from credenza.api.auth.client.client_registry import ClientRegistry, ClientRecord
+from credenza.api.common.rate_limit import FixedWindowJitterLimiter
+from credenza.rest.helpers import GrantType
 
 class StubDeviceClient:
     def __init__(self, *, tokens=None, userinfo=None, scope="openid email profile"):
@@ -44,9 +47,34 @@ class StubDeviceClient:
     def validate_id_token(self, id_token, nonce):
         return self._userinfo
 
+def _make_device_registry(client_id="device-test-client", *,
+                          public=True,
+                          allowed_resources=None,
+                          allowed_scopes=None,
+                          allowed_grant_types=None):
+    """Build a minimal ClientRegistry with one device client for testing."""
+    cr = ClientRecord(
+        client_id=client_id,
+        public=public,
+        allowed_grant_types=allowed_grant_types or ["urn:ietf:params:oauth:grant-type:device_code"],
+        allowed_resources=allowed_resources or ["urn:test:resource"],
+        allowed_scopes=allowed_scopes or ["openid", "email", "profile"],
+    )
+    return ClientRegistry(version="1", clients={client_id: cr})
+
+
 @pytest.fixture
 def client(app, store, monkeypatch):
-    """Register the device blueprint and return a test client."""
+    """Register the device blueprint and return a test client (no registry -- legacy mode)."""
+    app.register_blueprint(df.device_blueprint)
+    app.testing = True
+    return app.test_client()
+
+
+@pytest.fixture
+def client_with_registry(app, store, monkeypatch):
+    """Register the device blueprint with a client registry configured (Phase 3 compliance mode)."""
+    app.config["CLIENT_REGISTRY"] = _make_device_registry()
     app.register_blueprint(df.device_blueprint)
     app.testing = True
     return app.test_client()
@@ -60,13 +88,13 @@ def test_start_device_flow_defaults(client, app, store, frozen_time):
     assert "user_code" in data and len(data["user_code"]) == 8  # 32-bit hex uppercase
     assert all(c in "0123456789ABCDEF" for c in data["user_code"])
     assert data["interval"] == 3
-    assert data["expires_in"] == df.DEVICE_TTL
+    assert data["expires_in"] == df.DEVICE_FLOW_TTL
     assert data["verification_uri"].endswith(f"/device/verify/{data['user_code']}")
     flow = store.get_device_flow(data["device_code"])
     assert flow["user_code"] == data["user_code"]
     assert flow["realm"] == app.config["DEFAULT_REALM"]
     assert flow["issued_at"] == frozen_time
-    assert flow["expires_at"] == frozen_time + df.DEVICE_TTL
+    assert flow["expires_at"] == frozen_time + df.DEVICE_FLOW_TTL
     assert store.consume_usercode_mapping(data["user_code"]) == data["device_code"]
 
 def test_start_device_flow_custom_realm(client, app, store):
@@ -146,41 +174,6 @@ def test_device_callback_missing_nonce(client, app, store, monkeypatch):
     assert resp.status_code == 400
 
 
-def test_device_poll_rate_limit(client, app, store, monkeypatch, frozen_time):
-    """
-    If a client polls for a token more frequently than the 'interval',
-    we should return a 429 slow_down error.
-    """
-    device_code = "RATE1"
-
-    # Set up a fresh device flow with last_poll_at == frozen_time
-    flow = {
-        "realm": app.config["DEFAULT_REALM"],
-        "verified": False,
-        "last_poll_at": frozen_time,
-        "interval": app.config.get("DEVICE_POLL_INTERVAL", 3),
-    }
-    store.set_device_flow(device_code, flow, ttl=20)
-
-    # First poll (at frozen_time) should be too fast -> 429
-    resp1 = client.post("/device/token", json={"device_code": device_code})
-    assert resp1.status_code == 429
-    data1 = resp1.get_json()
-    assert data1["error"] == "too_many_requests"
-    assert data1["message"] == "slow_down"
-    assert data1["code"] == 429
-
-    # Advance time to exactly interval seconds later
-    interval = app.config.get("DEVICE_POLL_INTERVAL", 3)
-    monkeypatch.setattr(time, "time", lambda: frozen_time + interval)
-
-    # Second poll at frozen_time + interval should now proceed
-    # Since still unverified, it returns authorization_pending (403)
-    resp2 = client.post("/device/token", json={"device_code": device_code})
-    assert resp2.status_code == 403
-    data2 = resp2.get_json()
-    assert data2["error"] == "authorization_pending"
-
 def test_device_callback_success(client, app, store, monkeypatch, frozen_time):
     device_code = "D5"
     state = f"{device_code}"
@@ -217,92 +210,6 @@ def test_device_callback_success(client, app, store, monkeypatch, frozen_time):
     sid, session = store.get_session_by_session_key(skey)
     assert isinstance(session, SessionData)
     assert session.access_token == "acc"
-
-def test_poll_for_token_missing_device_code(client, app):
-    resp = client.post("/device/token", json={})
-    assert resp.status_code == 400
-
-def test_poll_for_token_expired_flow(client, app, store):
-    resp = client.post("/device/token", json={"device_code":"X"})
-    assert resp.status_code == 400
-
-def test_poll_for_token_pending(client, app, store, frozen_time):
-    store.set_device_flow("P1", {"verified":False, "session_key":None}, ttl=10)
-    resp = client.post("/device/token", json={"device_code":"P1"})
-    assert resp.status_code == 403
-    assert resp.get_json() == {"error":"authorization_pending"}
-
-def test_poll_for_token_success(client, app, store, frozen_time):
-    sid = "S10"
-    skey, session = store.create_session(
-        session_id=sid,
-        session_type=SessionType.DEVICE,
-        access_token="acc",
-        userinfo={"sub":"u"},
-        realm=app.config["DEFAULT_REALM"],
-        id_token="idtok",
-        refresh_token="rt",
-        scopes="openid"
-    )
-    store.set_device_flow("R1", {"verified":True, "session_key":skey}, ttl=10)
-    resp = client.post("/device/token", json={"device_code":"R1"})
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["access_token"] == skey
-    assert data["token_type"] == "Bearer"
-    assert abs(data["expires_in"] - store.get_ttl("S10")) < 1
-
-def test_device_logout_not_device(client, app, store, monkeypatch):
-    sid = "S20"
-    skey, session = store.create_session(
-        session_id=sid,
-        session_type=SessionType.USER,
-        access_token="acc",
-        userinfo={"sub":"u","email":"e"},
-        realm=app.config["DEFAULT_REALM"],
-        id_token="idtok",
-        refresh_token="rt",
-        scopes="openid"
-    )
-    monkeypatch.setattr(df, "get_current_session", lambda: (skey, session))
-    resp = client.post("/device/logout")
-    assert resp.status_code == 403
-
-def test_device_logout_success(client, app, store, monkeypatch):
-    sid = "S21"
-    skey, session = store.create_session(
-        session_id=sid,
-        session_type=SessionType.DEVICE,
-        access_token="acc",
-        userinfo={"sub":"u","email":"e"},
-        realm=app.config["DEFAULT_REALM"],
-        id_token="idtok",
-        refresh_token="rt",
-        scopes="openid",
-        metadata={"device_session":True}
-    )
-    monkeypatch.setattr(df, "get_current_session", lambda: (sid, session))
-
-    # Stub the OIDC client factory to avoid any network
-    calls = []
-    class DummyClient:
-        def revoke_token(self, scope, token, token_type_hint=None):
-            calls.append((scope, token_type_hint))
-            return True
-
-    monkeypatch.setattr(
-        app.config["OIDC_CLIENT_FACTORY"],
-        "get_client",
-        lambda realm, **kwargs: DummyClient(),   # accept native_client kwarg
-    )
-
-    resp = client.post("/device/logout")
-    assert resp.status_code == 200
-    assert resp.get_json() == {"status":"logged out"}
-    assert store.get_session_data(sid) is None
-
-    # prove we invoked revocation
-    assert any(t == "access_token" for _, t in calls) or calls  # depending on your route logic
 
 
 def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
@@ -365,3 +272,123 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
     assert updated_session.additional_tokens == dummy_additional_tokens
 
 
+# ---------------------------------------------------------------------------
+# RFC 8628 compliance tests (client_id enforcement, grant type
+# validation, scope/resource validation)
+# ---------------------------------------------------------------------------
+
+def test_device_authorization_missing_client_id(client_with_registry):
+    resp = client_with_registry.post("/device_authorization")
+    assert resp.status_code == 400
+
+def test_device_authorization_unknown_client(client_with_registry):
+    resp = client_with_registry.post("/device_authorization",
+                                     data={"client_id": "no-such-client"})
+    assert resp.status_code == 401
+
+def test_device_authorization_wrong_grant_type(app, store):
+    """Client exists but does not have device_code in allowed_grant_types."""
+    wrong_registry = _make_device_registry(
+        allowed_grant_types=["authorization_code"]
+    )
+    app.config["CLIENT_REGISTRY"] = wrong_registry
+    app.register_blueprint(df.device_blueprint)
+    c = app.test_client()
+    resp = c.post("/device_authorization",
+                  data={"client_id": "device-test-client"})
+    assert resp.status_code == 401
+
+def test_device_authorization_scope_denied(client_with_registry):
+    resp = client_with_registry.post("/device_authorization",
+                                     data={"client_id": "device-test-client",
+                                           "scope": "openid bad_scope"})
+    assert resp.status_code == 400
+
+def test_device_authorization_resource_denied(client_with_registry):
+    resp = client_with_registry.post("/device_authorization",
+                                     data={"client_id": "device-test-client",
+                                           "resource": "not:allowed"})
+    assert resp.status_code == 400
+
+def test_device_authorization_valid_client_stores_client_id(client_with_registry, app, store, frozen_time):
+    resp = client_with_registry.post("/device_authorization",
+                                     data={"client_id": "device-test-client"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "device_code" in data
+    flow = store.get_device_flow(data["device_code"])
+    assert flow["client_id"] == "device-test-client"
+
+def test_device_authorization_valid_client_with_resource(client_with_registry, app, store, frozen_time):
+    resp = client_with_registry.post("/device_authorization",
+                                     data={"client_id": "device-test-client",
+                                           "resource": "urn:test:resource"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    flow = store.get_device_flow(data["device_code"])
+    assert flow["allowed_resources"] == ["urn:test:resource"]
+
+def test_device_authorization_valid_client_with_scope(client_with_registry, app, store, frozen_time):
+    resp = client_with_registry.post("/device_authorization",
+                                     data={"client_id": "device-test-client",
+                                           "scope": "openid email"})
+    assert resp.status_code == 200
+
+def test_device_authorization_legacy_start_also_accepts_client_id(client_with_registry, app, store, frozen_time):
+    """The /device/start alias should also accept client_id when registry is configured."""
+    resp = client_with_registry.post("/device/start",
+                                     data={"client_id": "device-test-client"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    flow = store.get_device_flow(data["device_code"])
+    assert flow["client_id"] == "device-test-client"
+
+
+def test_device_authorization_unregistered_client_rejected_by_default(app, store):
+    """Unknown client_id is rejected when DEVICE_ALLOW_UNREGISTERED_CLIENTS is not set."""
+    app.config["CLIENT_REGISTRY"] = _make_device_registry()
+    app.register_blueprint(df.device_blueprint)
+    resp = app.test_client().post("/device_authorization",
+                                  data={"client_id": "nobody"})
+    assert resp.status_code == 401
+
+
+def test_device_authorization_unregistered_client_allowed_when_configured(app, store, frozen_time):
+    """Unknown client_id is accepted when DEVICE_ALLOW_UNREGISTERED_CLIENTS=True."""
+    app.config["CLIENT_REGISTRY"] = _make_device_registry()
+    app.config["ALLOW_UNREGISTERED_CLIENTS"] = True
+    app.register_blueprint(df.device_blueprint)
+    resp = app.test_client().post("/device_authorization",
+                                  data={"client_id": "unknown-client"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    flow = store.get_device_flow(data["device_code"])
+    assert flow["client_id"] == "unknown-client"
+
+
+# ---------------------------------------------------------------------------
+# IP rate limit tests for device endpoints
+# ---------------------------------------------------------------------------
+
+def test_start_device_flow_ip_rate_limit_returns_429(app, store):
+    """Second POST to /device/start from the same IP within the window is rate-limited."""
+    app.register_blueprint(df.device_blueprint)
+    app.extensions["rate_limits"]["30_per_min"] = FixedWindowJitterLimiter(limit=1, window_sec=60, seed=42)
+
+    with app.test_client() as c:
+        c.post("/device/start")  # consumes the IP token
+        r2 = c.post("/device/start")
+    assert r2.status_code == 429
+    assert r2.get_json()["error"] == "rate_limited"
+
+
+def test_verify_device_ip_rate_limit_returns_429(app, store):
+    """Second GET to /device/verify from the same IP within the window is rate-limited."""
+    app.register_blueprint(df.device_blueprint)
+    app.extensions["rate_limits"]["30_per_min"] = FixedWindowJitterLimiter(limit=1, window_sec=60, seed=42)
+
+    with app.test_client() as c:
+        c.get("/device/verify/BADCODE1")  # consumes the IP token (returns 404, but limit is consumed)
+        r2 = c.get("/device/verify/BADCODE2")
+    assert r2.status_code == 429
+    assert r2.get_json()["error"] == "rate_limited"

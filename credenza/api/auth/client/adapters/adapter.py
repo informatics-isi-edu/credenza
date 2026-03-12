@@ -134,7 +134,7 @@ class AdapterResult:
     auth_context
         Optional implementation-specific context (e.g., proof details,
         provider metadata, verification artifacts, policy information).
-        Primarily for auditing and downstream metadata storage — not a
+        Primarily for auditing and downstream metadata storage -- not a
         substitute for token-handler authorization checks.
 
     additional_claims
@@ -153,8 +153,8 @@ class AdapterResult:
         Precedence rules (effective namespace resolution):
 
             adapter_result.namespace
-                → client_rec.namespace
-                    → client_rec.client_id
+                -> client_rec.namespace
+                    -> client_rec.client_id
 
         If provided, this value takes precedence over any client-level namespace
         because it reflects verified runtime identity information.
@@ -269,7 +269,7 @@ class AdapterInterface(ABC, Generic[C]):
     @abstractmethod
     def from_dict(cls, config: Dict[str, Any], client_id: str) -> AdapterInterface[C]:
         """
-        Factory: parse/validate the raw config and return an instance of the concrete adapter class.
+        Factory: parse/validate the config and return an instance of the concrete adapter class.
 
         Subclasses should raise ValueError for invalid config.
         """

@@ -2,18 +2,17 @@
 
 ## 1. Status
 
-**Proposed**  
+**Accepted**
 Decision Date: 2026-02-11
 
 ### Review History
 
-| Date       | Status     | Notes                                                                                |
-|------------|------------|--------------------------------------------------------------------------------------|
-| 2026-02-10 | Proposed   | Draft including token exchange constraints and acceptance criteria                   |
-| 2026-02-11 | Amended    | Unified client registry and grant-based session model; clarified lifecycle semantics |
-| 2026-02-11 | Amended    | Added authorization code infrastructure and backend atomicity requirements           |
-| YYYY-MM-DD | Accepted   | Approved after implementation and security review                                    |
-| YYYY-MM-DD | Superseded | Replaced by ADR-00XX                                                                 |
+| Date       | Status   | Notes                                                                                |
+|------------|----------|--------------------------------------------------------------------------------------|
+| 2026-02-10 | Proposed | Draft including token exchange constraints and acceptance criteria                   |
+| 2026-02-11 | Amended  | Unified client registry and grant-based session model; clarified lifecycle semantics |
+| 2026-02-11 | Amended  | Added authorization code infrastructure and backend atomicity requirements           |
+| 2026-03-11 | Accepted | Phases 0-5 implemented (authorization code, token exchange, device flow, revocation) |
 
 ---
 
@@ -319,8 +318,7 @@ Credenza enforces a two-tier expiration model:
    when permitted by grant profile.
 2. **Absolute lifetime cap** — Sessions are bounded by an absolute expiration
    constraint:
-   - Service sessions: `max_ttl_seconds`
-   - Device sessions: `refresh_expires_at`
+   - Service or device sessions: `absolute_expires_at`
    - Interactive sessions: internal TTL policy
 
 Only Device sessions MAY perform upstream token refresh using stored

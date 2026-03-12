@@ -52,7 +52,7 @@ class ClientSecretAdapter(AdapterInterface[ClientSecretConfig]):
     @classmethod
     def from_dict(cls, config: Dict[str, Any], client_id: str) -> ClientSecretAdapter:
         """
-        Factory: parse/validate raw config and return an adapter instance.
+        Factory: parse/validate config and return an adapter instance.
         Raises ValueError for invalid config.
         """
         if config.get("client_secret") is None and config.get("client_secret_hash") is None:
@@ -114,7 +114,7 @@ class ClientSecretAdapter(AdapterInterface[ClientSecretConfig]):
             try:
                 known, unknown = self.validate_allowed_methods(allowed_methods, raise_on_unknown=True)
             except ValueError as ex:
-                # Admin supplied unknown/invalid methods — treat as configuration/server error
+                # Admin supplied unknown/invalid methods -- treat as configuration/server error
                 raise AdapterError(f"invalid allowed_methods configuration: {ex}") from ex
 
             # If `known` is empty -> allowed_methods was empty/None-equivalent -> no restriction.

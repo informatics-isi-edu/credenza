@@ -282,9 +282,11 @@ class SessionStore:
     def get_active_session_by_session_id(self, sid: str) -> Optional[SessionData]:
         """
         Retrieve only an `active` session by enforcing absolute cap (delete if expired).
-        Returns (sid, session) or (None, None) if session expired or missing.
+        Returns session or None if session expired or missing.
         """
         session = self.get_session_data(sid)
+        if session is None:
+            return None
 
         cap = session.absolute_expires_at
         now = int(time.time())
@@ -404,6 +406,8 @@ class SessionStore:
     def consume_authn_request_ctx(self, state) -> Any:
         key = f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}"
         authn_request_ctx = self._decode_backend_value(self.backend.consume(key))
+        if not authn_request_ctx:
+            return None
 
         return json.loads(authn_request_ctx)
 
@@ -439,16 +443,23 @@ class SessionStore:
 
     def consume_usercode_mapping(self, user_code) -> Optional[str]:
         key = f"{self.prefix}{self.oidc_prefix}user_code:{user_code}"
-        code = self._decode_backend_value(self.backend.consume(key))
 
-        return code
+        return self._decode_backend_value(self.backend.consume(key))
 
     def delete_usercode_mapping(self, user_code) -> None:
         self.backend.delete(f"{self.prefix}{self.oidc_prefix}user_code:{user_code}")
 
-    def consume_authorization_code(self, code: str) -> Any:
-        # Note: authorization-code storage key is 'authz_code:<code>' if used elsewhere.
-        key = f"{self.prefix}{self.oidc_prefix}authz_code:{code}"
-        code = self._decode_backend_value(self.backend.consume(key))
+    def set_authorization_code(self, code: str, payload: dict, ttl: int = 300) -> None:
+        data = json.dumps(payload, separators=(",", ":"))
+        if self.crypto_codec:
+            data = self.crypto_codec.encrypt(data)
 
-        return json.loads(code)
+        self.backend.setex(f"{self.prefix}{self.oidc_prefix}authz_code:{code}", data, ttl)
+
+    def consume_authorization_code(self, code: str) -> Any:
+        key = f"{self.prefix}{self.oidc_prefix}authz_code:{code}"
+        code_data = self._decode_backend_value(self.backend.consume(key))
+        if code_data is None:
+            return None
+
+        return json.loads(code_data)

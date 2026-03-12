@@ -39,6 +39,10 @@ class OAuthError(str, Enum):  # pragma: no cover
         "invalid_target",
         "The requested resource is invalid, missing, unknown, or malformed."
     )
+    INVALID_GRANT = (
+        "invalid_grant",
+        "The provided authorization grant or refresh token is invalid, expired, revoked, or mismatched."
+    )
     INVALID_TOKEN = (
         "invalid_token",
         "The provided token is invalid, expired, or otherwise unacceptable."

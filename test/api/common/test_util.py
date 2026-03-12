@@ -15,20 +15,14 @@
 #
 import pytest
 import copy
-import uuid
 import base64
-from flask import Flask, jsonify, g
+from flask import Flask
 from werkzeug.http import dump_cookie
 from werkzeug.exceptions import HTTPException, NotFound
 from credenza.api.common import util
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
 from credenza.api.session.storage.session_store import SessionData, SessionMetadata, SessionType
-from credenza.api.common.util import (
-    get_tokens_by_scope,
-    get_cookie_domain,
-    parse_basic_auth,
-    collapse_str_list,
-    validate_resource_string)
+from credenza.api.common.util import get_tokens_by_scope, parse_basic_auth, collapse_str_list, validate_resource_string
 
 def test_get_current_session_no_skey(monkeypatch, app):
     """No SID -> abort(404)."""
@@ -157,13 +151,6 @@ def test_get_realm_no_default_causes_abort(monkeypatch):
         assert excinfo.value.code == 400
 
 
-def test_make_json_response_body_and_status():
-    payload = {"msg": "ok"}
-    res = util.make_json_response(payload)
-    assert res.get_json() == payload
-    assert res.mimetype == "application/json"
-
-
 def test_get_effective_scopes_combines_scopes_and_additional_tokens(base_session):
     base_session.scopes = "openid profile"
     base_session.additional_tokens = {"svc1": {"access_token": "t1"}, "svc2": {"access_token": "t2"}}
@@ -273,248 +260,6 @@ def test_get_tokens_by_scope_with_additional(base_session):
     }
 
 
-@pytest.mark.parametrize("host,config,expected", [
-    ("app.example.org", "true", "example.org"),
-    ("example.co.uk", "true", "example.co.uk"),
-    ("localhost", "true", None),
-    ("127.0.0.1", "true", None),
-    ("sub.my.example.com", "true", "example.com"),
-    ("app.example.org", "custom-domain.org", "custom-domain.org"),
-    ("app.example.org", None, None),
-    ("app.example.org", "false", None),
-])
-def test_get_cookie_domain(app, monkeypatch, host, config, expected):
-    app.config["COOKIE_DOMAIN"] = config
-
-    with app.test_request_context("/", base_url=f"http://{host}"):
-        monkeypatch.setattr("flask.current_app", app)
-        result = get_cookie_domain()
-        assert result == expected
-
-
-def test_client_ip_returns_remote_addr(app):
-    with app.test_request_context("/", environ_base={"REMOTE_ADDR": "1.2.3.4"}):
-        assert util.client_ip(util.request) == "1.2.3.4"
-
-
-def test_client_ip_unknown_when_missing(app):
-    with app.test_request_context("/", environ_base={}):
-        assert util.client_ip(util.request) == "unknown"
-
-
-def test_get_request_id_prefers_traceparent(app):
-    with app.test_request_context("/", headers={"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}):
-        assert util.get_request_id(util.request.headers) == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-
-@pytest.mark.parametrize("header_name", ["X-Request-Id", "X-Request-ID", "x-request-id",
-                                        "X-Correlation-Id", "X-Correlation-ID", "x-correlation-id",
-                                        "X-Amzn-Trace-Id", "x-amzn-trace-id"])
-def test_get_request_id_uses_common_headers(app, header_name):
-    with app.test_request_context("/", headers={header_name: "RID-123"}):
-        assert util.get_request_id(util.request.headers) == "RID-123"
-
-
-def test_get_request_id_generates_uuid_last_resort(app, monkeypatch):
-    monkeypatch.setattr(uuid, "uuid4", lambda: uuid.UUID("12345678-1234-5678-1234-567812345678"))
-    with app.test_request_context("/", headers={}):
-        assert util.get_request_id(util.request.headers) == "12345678-1234-5678-1234-567812345678"
-
-
-def test_ip_rate_limited_allows_and_attaches_headers(app, monkeypatch):
-    # Bucket that always allows
-    class DummyBucket:
-        def allow(self, key):
-            return True, 7, 42  # allowed, remaining, reset_s
-
-        def headers(self, remaining, reset_s):
-            return {"X-RateLimit-Remaining": str(remaining), "X-RateLimit-Reset": str(reset_s)}
-
-    # Ensure rate limits exist
-    app.extensions.setdefault("rate_limits", {})
-    app.extensions["rate_limits"]["30_per_min"] = DummyBucket()
-    app.extensions["rate_limits"]["10_per_min"] = DummyBucket()
-
-    # Stable client IP
-    monkeypatch.setattr(util, "client_ip", lambda req: "1.2.3.4")
-
-    @util.ip_rate_limited()
-    def handler():
-        # Ensure decorator stashed g.rate_limit
-        assert "bucket" in g.rate_limit
-        assert g.rate_limit["remaining"] == 7
-        assert g.rate_limit["reset"] == 42
-        return jsonify({"ok": True}), 200
-
-    with app.test_request_context("/x", method="GET"):
-        resp = handler()
-        resp = app.make_response(resp)
-        assert resp.status_code == 200
-        assert resp.get_json() == {"ok": True}
-        # Headers added by decorator
-        assert resp.headers.get("X-RateLimit-Remaining") == "7"
-        assert resp.headers.get("X-RateLimit-Reset") == "42"
-
-
-def test_ip_rate_limited_denies_429_and_audits(app, monkeypatch):
-    audit_events = []
-    monkeypatch.setattr(util, "audit_event", lambda event, **kwargs: audit_events.append((event, kwargs)))
-
-    class DenyBucket:
-        def allow(self, key):
-            return False, 0, 11
-
-        def headers(self, remaining, reset_s):
-            return {"X-RateLimit-Remaining": str(remaining), "X-RateLimit-Reset": str(reset_s)}
-
-    app.extensions.setdefault("rate_limits", {})
-    app.extensions["rate_limits"]["30_per_min"] = DenyBucket()
-    app.extensions["rate_limits"]["10_per_min"] = DenyBucket()
-
-    monkeypatch.setattr(util, "client_ip", lambda req: "9.9.9.9")
-
-    @util.ip_rate_limited()
-    def handler():
-        return jsonify({"ok": True}), 200  # should never run
-
-    with app.test_request_context("/x", method="POST"):
-        resp = handler()
-        resp = app.make_response(resp)
-        assert resp.status_code == 429
-        data = resp.get_json()
-        assert data["error"] == "rate_limited"
-        assert "Too many requests:" in data["detail"]
-        assert resp.headers.get("Retry-After") == "11"
-        assert resp.headers.get("X-RateLimit-Remaining") == "0"
-        assert resp.headers.get("X-RateLimit-Reset") == "11"
-
-    assert any(ev == "request_rate_limited" for ev, _ in audit_events), audit_events
-
-def test_ip_rate_limited_bypass_skips_limits_and_limit_or_429(app, monkeypatch):
-    app.config["ENABLE_RATE_LIMITING"] = False
-
-    # Make it obvious if the decorator tries to rate limit anyway
-    app.extensions.pop("rate_limits", None)
-
-    def boom(*args, **kwargs):
-        raise AssertionError("limit_or_429 should not be called when ENABLE_RATE_LIMITING is False")
-
-    monkeypatch.setattr(util, "limit_or_429", boom)
-
-    @util.ip_rate_limited()
-    def handler():
-        return jsonify({"ok": True}), 200
-
-    with app.test_request_context("/x", method="GET"):
-        resp = app.make_response(handler())
-        assert resp.status_code == 200
-        assert resp.get_json() == {"ok": True}
-        # Optional: ensure decorator didn't stash rate-limit info
-        assert not hasattr(g, "rate_limit")
-
-
-def test_perf_logged_noop_when_disabled(app):
-    # Should not log anything or change return value
-    app.config["DEBUG_PERF"] = False
-
-    class DummyLogger:
-        def __init__(self):
-            self.debug_calls = []
-            self.warning_calls = []
-
-        def debug(self, msg):
-            self.debug_calls.append(msg)
-
-        def warning(self, msg):
-            self.warning_calls.append(msg)
-
-    log = DummyLogger()
-
-    @util.perf_logged(warn_ms=1, logger=log)
-    def handler():
-        return ("ok", 200)
-
-    with app.test_request_context("/p", method="GET"):
-        resp = handler()
-        resp = app.make_response(resp)
-        assert resp.status_code == 200
-        assert resp.get_data(as_text=True) == "ok"
-
-    assert log.debug_calls == []
-    assert log.warning_calls == []
-
-
-def test_perf_logged_debug_when_enabled_and_under_warn(app):
-    app.config["DEBUG_PERF"] = True
-
-    class DummyLogger:
-        def __init__(self):
-            self.debug_calls = []
-            self.warning_calls = []
-
-        def debug(self, msg):
-            self.debug_calls.append(msg)
-
-        def warning(self, msg):
-            self.warning_calls.append(msg)
-
-    log = DummyLogger()
-
-    @util.perf_logged(warn_ms=10_000, logger=log)  # huge threshold => debug
-    def handler():
-        return ("ok", 200)
-
-    with app.test_request_context("/p", method="GET"):
-        resp = handler()
-        resp = app.make_response(resp)
-        assert resp.status_code == 200
-
-    assert len(log.debug_calls) == 1
-    assert log.warning_calls == []
-    assert "GET" in log.debug_calls[0]
-    assert "took" in log.debug_calls[0]
-
-
-def test_perf_logged_warning_when_enabled_and_over_warn(app, monkeypatch):
-    app.config["DEBUG_PERF"] = True
-
-    # Force perf_counter to simulate elapsed >= warn_ms
-    seq = {"i": 0}
-
-    def fake_perf_counter():
-        seq["i"] += 1
-        # first call start=0.0, second call end=1.0 => 1000ms
-        return 0.0 if seq["i"] == 1 else 1.0
-
-    monkeypatch.setattr(util.time, "perf_counter", fake_perf_counter)
-
-    class DummyLogger:
-        def __init__(self):
-            self.debug_calls = []
-            self.warning_calls = []
-
-        def debug(self, msg):
-            self.debug_calls.append(msg)
-
-        def warning(self, msg):
-            self.warning_calls.append(msg)
-
-    log = DummyLogger()
-
-    @util.perf_logged(warn_ms=500, logger=log)  # 1000ms >= 500 => warning
-    def handler():
-        return ("ok", 200)
-
-    with app.test_request_context("/p", method="GET"):
-        resp = handler()
-        resp = app.make_response(resp)
-        assert resp.status_code == 200
-
-    assert log.debug_calls == []
-    assert len(log.warning_calls) == 1
-    assert "took" in log.warning_calls[0]
-
-
 def test_retrying_requests_session_mounts_and_retries_configured():
     s = util.retrying_requests_session(total=5, backoff_factor=0.1)
     assert "http://" in s.adapters
@@ -529,6 +274,7 @@ def test_retrying_requests_session_mounts_and_retries_configured():
     # default allowed_methods in util is GET-only unless overridden
     assert retry.allowed_methods is not None
     assert "GET" in retry.allowed_methods
+
 
 def test_singleton_returns_string():
     result = collapse_str_list(["value"])

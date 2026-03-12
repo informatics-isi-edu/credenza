@@ -66,7 +66,7 @@ def test_fetch_discovery_metadata_http_error(monkeypatch):
 # _jwks_expired logic
 #
 def test_jwks_expired_true_if_never_fetched(tmp_path, dummy_profile):
-    # Create a minimal client‐secret JSON so __init__ succeeds
+    # Create a minimal client-secret JSON so __init__ succeeds
     secret = tmp_path / "secret.json"
     secret.write_text(json.dumps({"client_id": "cid", "client_secret": "cs"}))
     dummy_profile["client_secret_file"] = secret
@@ -79,7 +79,7 @@ def test_jwks_expired_true_if_never_fetched(tmp_path, dummy_profile):
 
 
 def test_jwks_expired_false_within_ttl(monkeypatch, dummy_profile, tmp_path):
-    # Same setup for client‐secret
+    # Same setup for client-secret
     secret = tmp_path / "secret.json"
     secret.write_text(json.dumps({"client_id": "cid", "client_secret": "cs"}))
 

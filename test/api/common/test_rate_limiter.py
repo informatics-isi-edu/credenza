@@ -59,7 +59,7 @@ def test_rollover_integer_time():
     assert limiter.allow(key, now=t0)[0] is False
 
     # Find the boundary in whole seconds by advancing until we observe reset
-    # (Worst case advances ≤ window_sec steps)
+    # (Worst case advances <= window_sec steps)
     t = t0
     while True:
         t += 1

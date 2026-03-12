@@ -47,7 +47,7 @@ Key concepts
 - Resolution: render-time lookup where callers ask "give me canonical key X" and the mapper
   tries the canonical top-level value first, then the claim_map fallbacks in order.
 - Merge policy: merging additional claims into userinfo is explicit and auditable. The
-  merge helpers do not make high-level trust decisions — callers should pass an
+  merge helpers do not make high-level trust decisions -- callers should pass an
   allowlist if they wish to restrict what can be injected.
 
 Why document this module
@@ -85,7 +85,7 @@ IDP_PRESETS: Dict[str, Dict[str, List[Union[str, List[str]]]]] = {
         "roles": [["realm_access", "roles"], "roles"],
     },
     # "auth0": {
-    #     # Put your tenant’s namespaced keys here if desired, e.g.:
+    #     # Put your tenant's namespaced keys here if desired, e.g.:
     #     # "groups": ["https://example.com/groups", "groups"],
     #     # "roles":  ["https://example.com/roles",  "roles"],
     # }

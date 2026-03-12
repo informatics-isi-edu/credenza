@@ -208,7 +208,7 @@ class PostgreSQLBackend:
         """
         Atomically delete-and-return the value for `key` using DELETE ... RETURNING.
         Honors TTL: expired entries will not be returned (they are treated as absent).
-        Returns raw bytes value or None if key missing/expired.
+        Returns bytes value or None if key missing/expired.
         """
         now = int(time.time())
         # Use the prepared consume statement for a single-statement atomic operation.

@@ -7,7 +7,7 @@ Each phase should be independently testable and deployable where possible.
 
 ---
 
-# Phase 0 — Foundations (Safe Structural Changes)
+# Phase 0 — Foundations (Safe Structural Changes) [COMPLETE]
 
 **Goal:** Introduce structural primitives without changing external behavior.
 
@@ -40,7 +40,7 @@ Deliverable:
 
 ---
 
-# Phase 1 — Authorization Code Infrastructure
+# Phase 1 — Authorization Code Infrastructure [COMPLETE]
 
 **Goal:** Implement OAuth Authorization Code + PKCE without yet enabling external clients.
 
@@ -75,7 +75,7 @@ Deliverable:
 
 ---
 
-# Phase 2 — `/authorize` and `/token` Endpoint Expansion
+# Phase 2 — `/authorize` and `/token` Endpoint Expansion [COMPLETE]
 
 **Goal:** Expose OAuth Authorization Code flow for registered clients.
 
@@ -119,7 +119,7 @@ Deliverable:
 
 ---
 
-# Phase 3 — Device Flow Compliance (RFC 8628)
+# Phase 3 — Device Flow Compliance (RFC 8628) [COMPLETE]
 
 **Goal:** Make existing device flow fully spec-compliant.
 
@@ -141,7 +141,7 @@ Deliverable:
 
 ---
 
-# Phase 4 — Token Exchange Hardening
+# Phase 4 — Token Exchange Hardening [COMPLETE]
 
 **Goal:** Enforce strict RFC 8693 semantics and default-deny model.
 
@@ -165,7 +165,7 @@ Deliverable:
 
 ---
 
-# Phase 5 — Storage Backend Hardening
+# Phase 5 — Storage Backend Hardening [COMPLETE]
 
 **Goal:** Guarantee production safety across supported backends.
 

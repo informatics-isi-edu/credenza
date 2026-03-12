@@ -34,12 +34,15 @@ from .api.common.claim_mapper import build_realm_claim_maps
 from .api.common.rate_limit import FixedWindowJitterLimiter
 from .api.common.crypto import AESGCMCodec
 from .api.common.crypto import register_default_hashers
-from .api.common.util import is_browser_client, get_request_id
+from .rest.helpers import is_browser_client, get_request_id
 from .rest.session import session_blueprint
 from .rest.login import login_blueprint
 from .rest.device import device_blueprint
 from .rest.discovery import discovery_blueprint
 from .rest.token import token_blueprint
+from .rest.introspect import introspect_blueprint
+from .rest.metadata import metadata_blueprint
+from .rest.authorize import authorize_blueprint
 from .telemetry.audit.logger import init_audit_logger
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker
@@ -62,6 +65,7 @@ def load_config(app):
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
         "CREDENZA_STORAGE_BACKEND": "memory",
         "CREDENZA_AUDIT_USE_SYSLOG": "false",
+        "CREDENZA_LEGACY_DEFAULT_RESOURCE": "urn:deriva:rest:service:all"
     }
 
     # Load .env from one of these locations, if it exists
@@ -125,8 +129,8 @@ def load_config(app):
 
     # Optional client registry (OAuth2/RS/M2M) config
     logger.debug(f"Registered client authentication adapters: {set(list_adapters().keys())}")
-    client_auth_path = app.config.get("CLIENT_AUTH_FILE", "config/client_auth.json")
-    app.config["CLIENT_AUTH_REGISTRY"] = load_client_registry(client_auth_path)
+    client_registry_path = app.config.get("CLIENT_REGISTRY_FILE", "config/client_registry.json")
+    app.config["CLIENT_REGISTRY"] = load_client_registry(client_registry_path)
 
     # Optional trusted issuers
     trusted_path = app.config.get("TRUSTED_ISSUERS_FILE", "config/oidc_idp_trusted_issuers.json")
@@ -172,21 +176,21 @@ def init_logging(app):
     logger.addHandler(log_handler)
     logger.setLevel(logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
-def load_serialized_kwargs(raw):
-   if not raw:
+def load_serialized_kwargs(input_kwargs):
+   if not input_kwargs:
       return {}
 
-   if isinstance(raw, dict):
-       return raw
+   if isinstance(input_kwargs, dict):
+       return input_kwargs
 
    try:
-      parsed = json.loads(raw)
+      parsed = json.loads(input_kwargs)
       if not isinstance(parsed, dict):
          logger.warning(f"Serialized kwargs should be a JSON object; got {type(parsed).__name__}; using empty dict")
          return {}
       return parsed
    except Exception as e:
-      logger.warning(f"Invalid JSON in serialized kwargs={raw!r}; using empty dict: {e}")
+      logger.warning(f"Invalid JSON in serialized kwargs={input_kwargs!r}; using empty dict: {e}")
       return {}
 
 def create_app():
@@ -277,6 +281,9 @@ def create_app():
     app.register_blueprint(login_blueprint)
     app.register_blueprint(device_blueprint)
     app.register_blueprint(token_blueprint)
+    app.register_blueprint(introspect_blueprint)
+    app.register_blueprint(metadata_blueprint)
+    app.register_blueprint(authorize_blueprint)
     app.register_blueprint(metrics_blueprint)
     if app.config.get("ENABLE_LEGACY_API", False):
         app.register_blueprint(discovery_blueprint)

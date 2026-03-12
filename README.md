@@ -4,29 +4,37 @@
 [![Coverage Status](https://coveralls.io/repos/github/informatics-isi-edu/credenza/badge.svg)](https://coveralls.io/github/informatics-isi-edu/credenza)
 [![License](https://img.shields.io/pypi/l/bdbag.svg)](http://www.apache.org/licenses/LICENSE-2.0)
 
-### OIDC Relying Party and Session Broker
+### OIDC Relying Party and Narrow OAuth 2.1 Authorization Server
 
-**Credenza** is a RESTful web service that functions as both an OIDC Relying Party (RP) and an IdP session management and
-brokering layer. It handles OAuth2/OIDC login/logout/device flows to OIDC Operating Parties (OP) and then caches OIDC
-userinfo, identity claims, tokens, and other information provided by Identity Providers to a persistent session storage layer.
+**Credenza** is a RESTful web service that functions as both an OIDC Relying Party (RP) and a narrow OAuth 2.1
+Authorization Server (AS). It handles OAuth2/OIDC login/logout/device flows to upstream OIDC Identity Providers (IdPs)
+and caches OIDC userinfo, identity claims, and tokens in a persistent session storage layer. It then issues opaque,
+audience-bound access tokens for protected resource servers — validated via RFC 7662 token introspection.
 
-Credenza also supports **machine-to-machine (M2M) / service authentication** by issuing **opaque “service access tokens”**
-backed by server-side **service sessions**. Service callers prove identity via configured adapters (e.g., AWS STS presigned
-GetCallerIdentity), Credenza maps the proof to an internal subject plus authorization envelope (scopes/audiences/groups),
-and returns an opaque bearer token for subsequent API calls.
+Credenza also supports **machine-to-machine (M2M) authentication** via the OAuth 2.0 `client_credentials` grant.
+Clients prove identity via configured adapters (e.g., AWS STS presigned GetCallerIdentity, client secret), and receive
+opaque bearer tokens bound to configured scopes and resource audiences.
 
 #### Features:
 
-- Supports multiple OIDC Operating Parties (OPs) and identity providers (IDPs) via configuration profiles
+- Supports multiple OIDC Identity Providers via configuration profiles (Keycloak, Okta, Cognito, Globus, etc.)
 - Persistent session storage with lifecycle management and session encryption
-- All OAuth2/OIDC flows use the Python `authlib` module under-the-hood with PKCE enabled whenever applicable
-- Headless login via OAuth2 Device Code Flow
-- Secure background token refresh option for device sessions
-- Service Auth / M2M token issuance and revocation
-  - Adapter-based proof verification (e.g., AWS presigned STS, client_secret)
-  - Opaque bearer tokens backed by server-side `service` sessions (revocable, auditable)
-  - Enforcement of allowed **scopes** and **audiences** via configuration
-  - Renewal controls (max session TTL clamp, absolute lifetime)
+- All OAuth2/OIDC flows use the Python `authlib` module with PKCE enabled whenever applicable
+- **OAuth 2.1 Authorization Server** capabilities:
+  - RFC 8414 Authorization Server Metadata discovery
+  - RFC 7662 Token Introspection with per-client resource gating
+  - RFC 8693 Token Exchange with default-deny exchange policy
+  - RFC 7009 Token Revocation
+  - Authorization Code + PKCE flow for registered clients
+  - Client Credentials grant for M2M / service authentication
+  - RFC 8628 Device Authorization Grant (fully spec-compliant)
+- **Client authentication** via extensible adapter interface:
+  - `client_secret` (HTTP Basic or form post)
+  - `aws_presigned` (AWS STS presigned GetCallerIdentity — no shared secrets)
+  - Custom adapters (mTLS, workload identity, etc.) via `@register_adapter`
+- Unified client registry with per-client grant type, scope, resource, and lifetime policy
+- Opaque bearer tokens backed by server-side sessions (instantly revocable, auditable)
+- Secure background token refresh for device sessions
 - Audit logging
 - Prometheus metrics
 
@@ -57,23 +65,30 @@ federated environments.
 ### Credenza User Authentication Flow
 ![credenza-flow](./docs/credenza-flow.png)
 
-* #### [Credenza User Auth (OIDC) Documentation](docs/user_auth_oidc.md)
+* #### Credenza [User Auth (OIDC)](docs/user_auth_oidc.md) Documentation
 
-### Credenza Service Authentication (M2M) Flow
+### Credenza Client Authentication (M2M) Flow
 
-- **Issue service token**
-  - `POST /authn/service/token` (alias: `POST /authn/service-token`)
-  - Requires form field: `grant_type=urn:credenza:service:auth`
-  - Adapter-specific proof fields determine which adapter matches
-  - Returns: `{"access_token": "<opaque>", "expires_in": <seconds>}`
+- **Issue token** — `POST /authn/token`
+  - `grant_type=client_credentials`
+  - Adapter-specific proof fields (client secret or AWS presigned URL)
+  - Returns: `{"access_token": "<opaque>", "token_type": "Bearer", "expires_in": <seconds>}`
 
-- **Revoke service token**
-  - `DELETE /authn/service/token` (alias: `DELETE /authn/service-token`)
-  - Requires: `Authorization: Bearer <access_token>`
-  - Only service tokens are revocable here (user sessions use user logout)
-  - Returns: `204 No Content`
+- **Revoke token** — `POST /authn/revoke` (RFC 7009)
+  - `token=<access_token>` plus client authentication
+  - Returns: `200` on all outcomes
 
-* #### [Credenza Service Auth (M2M) Documentation](docs/service_auth_m2m.md)
+- **Introspect token** — `POST /authn/introspect` (RFC 7662)
+  - Used by resource servers to validate opaque tokens
+  - Returns standard active/inactive response with claims
+
+* #### Credenza [Client Auth (M2M)](docs/client_auth.md) Documentation
+
+### Further Documentation
+
+* #### [Configuration Reference](docs/configuration.md) — `credenza.env`, `oidc_idp_profiles.json`, and `client_registry.json`
+* #### [OAuth & OIDC Profile](docs/credenza-oauth-profile.md) — supported RFCs, grant types, and token characteristics
+* #### [Security Model](docs/security_model.md) — threat model, trust boundaries, and operational assumptions
 
 ### Project Status
 

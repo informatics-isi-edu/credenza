@@ -158,17 +158,25 @@ The device flow supports a classic “device initiates, user completes in browse
 
 ### 4.1 Endpoints
 
-#### Start: `POST /authn/device/start`
-Creates a new device flow and returns:
+#### Start: `POST /authn/device/start` (or `POST /authn/device_authorization` per RFC 8628)
+
+Accepts `application/x-www-form-urlencoded`. When a client registry is configured, `client_id` is required.
+Registered clients are validated against their allowed grant types, scopes, and resources.
+
+Form fields:
+
+- `client_id` — required when a client registry is configured
+- `refresh` — optional boolean (`true`/`false`); stored in the flow to control whether background token refresh is allowed
+- `scope` — optional space-delimited scopes; validated against the client's `allowed_scopes` if registered
+- `resource` — optional, may be repeated; validated against the client's `allowed_resources` if registered
+
+Returns:
 
 - `device_code`
-- `user_code` (short code user types/uses)
+- `user_code` (short 8-character hex code the user enters or follows)
 - `verification_uri` (URL user visits)
-- `interval` (poll interval)
+- `interval` (poll interval in seconds)
 - `expires_in` (DEVICE_TTL, currently 600s)
-
-Supports query parameter:
-- `?refresh=true|false` — stored in the flow and used later to decide whether background refresh is allowed.
 
 #### Verify: `GET /authn/device/verify/<user_code>`
 - Exchanges the `user_code` for a `device_code`.
@@ -196,17 +204,23 @@ Flow:
 8. Mark the device flow as verified, stash `session_key`, and clear nonce/verifier.
 
 Response:
-- Returns a simple success string to the user agent: `"Device authorization complete. You may return to the device."`
+- Returns a styled HTML success page ("Device Authorized") to the user agent.
 
-#### Poll: `POST /authn/device/token`
-The device polls this endpoint with JSON body:
-```json
-{"device_code": "..."}
+#### Poll: `POST /authn/token` (RFC 8628 compliant)
+
+The device polls the standard token endpoint (`/token`)  with form-encoded body:
+
+```
+grant_type=urn:ietf:params:oauth:grant-type:device_code
+device_code=<device_code>
+client_id=<client_id>
 ```
 
 Behavior:
-- Enforces polling interval; too-fast polling returns `429 slow_down`.
-- If not verified yet, returns `{"error": "authorization_pending"}` with HTTP 403.
+- `client_id` must match the value used at `/device/start`.
+- Enforces polling interval; too-fast polling returns HTTP 429 with `{"error": "slow_down"}`.
+- If not yet verified, returns HTTP 400 with `{"error": "authorization_pending"}`.
+- If the device code has expired, returns HTTP 400 with `{"error": "expired_token"}`.
 - When verified:
   - Looks up the created session by stored `session_key`.
   - Deletes the device flow.
@@ -217,20 +231,19 @@ Behavior:
 
 #### Device logout: `POST /authn/device/logout`
 - Uses `get_current_session()` to resolve session from bearer or cookie.
-- Confirms `session_metadata.system["device_session"]` is true.
+- Confirms the session is a device session via `session_type == DEVICE` (returns 403 otherwise).
 - Revokes upstream tokens (if user session; service sessions are skipped in `revoke_tokens`).
 - Deletes the session from the store.
 - Returns `{"status": "logged out"}`.
 
 ### 4.2 Device-session metadata
 
-During `/authn/device/callback`, Credenza sets system metadata including:
+During `/authn/device/callback`, Credenza sets session metadata including:
 
-- `device_session`: true
-- `allow_automatic_refresh`: from `/device/start?refresh=true`
+- `allow_automatic_refresh`: from the `refresh` form field at `/device/start`
 - `offline_access_granted`: whether a refresh token was issued
-- `refresh_expires_at`: computed (see above)
-- `token_expires_at`: from token response if present
+- `refresh_token_expires_at`: computed (see above)
+- `access_token_expires_at`: from token response if present
 
 ---
 
@@ -313,15 +326,22 @@ Device flow currently uses `DEFAULT_REALM` when starting a flow.
 
 ### 7.1 Start a device flow
 ```bash
-curl -sS -X POST "https://<credenza>/authn/device/start?refresh=true" | jq
+curl -sS -X POST "https://<credenza>/authn/device/start" \
+  -d client_id="<client_id>" \
+  -d refresh=true \
+  -d scope="openid email profile" \
+  -d resource="<resource_uri>" | jq
 ```
 
 ### 7.2 User completes verification in browser
 Open the returned `verification_uri` and complete login.
 
-### 7.3 Device polls for token
+### 7.3 Device polls for token (RFC 8628)
 ```bash
-curl -sS -X POST "https://<credenza>/authn/device/token"   -H "Content-Type: application/json"   -d '{"device_code":"<device_code>"}' | jq
+curl -sS -X POST "https://<credenza>/authn/token" \
+  -d grant_type="urn:ietf:params:oauth:grant-type:device_code" \
+  -d device_code="<device_code>" \
+  -d client_id="<client_id>" | jq
 ```
 
 ### 7.4 Introspect session

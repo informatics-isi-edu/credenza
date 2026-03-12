@@ -15,7 +15,7 @@
 #
 import time
 import logging
-from ..api.common.util import refresh_access_token, refresh_additional_tokens, revoke_tokens
+from ..api.common.util import refresh_access_token, refresh_additional_tokens
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 def run_refresh_worker(app):
     store = app.config["SESSION_STORE"]
     interval = app.config.get("REFRESH_WORKER_POLL_INTERVAL", 60)
-    session_expiry_threshold = app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
     debug_perf = app.config.get("DEBUG_PERF", False)
 
     while True:

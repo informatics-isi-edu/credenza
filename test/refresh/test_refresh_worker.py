@@ -253,7 +253,7 @@ def test_device_access_token_refresh(app,
     monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
     monkeypatch.setattr(store, "get_session_data", lambda s: sess)
 
-    # ─── 3) Capture update_session and mirror real TTL behavior ────────────
+    # 3) Capture update_session and mirror real TTL behavior
     updated = []
     def fake_update_session(session_id, session_data):
         assert session_id == sid
@@ -286,7 +286,7 @@ def test_device_access_token_refresh(app,
         with pytest.raises(StopIteration):
             run_refresh_worker(app)
 
-    # The helper should have emitted an access‐token refresh event
+    # The helper should have emitted an access-token refresh event
     events = [ev for ev, _ in audit_calls]
     assert "access_token_refreshed" in events
 

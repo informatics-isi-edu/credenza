@@ -16,8 +16,10 @@
 import logging
 import time
 import uuid
+from secrets import token_urlsafe
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify, g
+from .helpers import get_cookie_domain, perf_logged
 from ..telemetry import audit_event
 from ..api.session.storage.session_store import TRANSIENT_DATA_TTL, SessionType
 from ..api.common.crypto import generate_nonce
@@ -25,11 +27,9 @@ from ..api.common.util import (
     get_current_session,
     get_effective_scopes,
     augment_session,
-    get_cookie_domain,
     revoke_tokens,
     safe_referrer,
-    is_transient_request_error,
-    perf_logged
+    is_transient_request_error
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +106,7 @@ def callback():
         abort(400, description=f"Missing or expired request context for state: {state}")
 
     realm = authn_request_ctx.get("realm")
+    is_oauth_flow = bool(authn_request_ctx.get("oauth_client_id"))
     try:
         client = factory.get_client(realm)
     except Exception as e:
@@ -171,7 +172,9 @@ def callback():
             userinfo=userinfo,
             realm=realm,
             metadata=metadata,
-            additional_tokens=additional_tokens
+            additional_tokens=additional_tokens,
+            allowed_resources=authn_request_ctx.get("oauth_resources") if is_oauth_flow else None,
+            session_ttl=authn_request_ctx.get("oauth_session_ttl") if is_oauth_flow else None,
         )
 
         sub = userinfo.get("sub")
@@ -192,16 +195,46 @@ def callback():
             session_data.additional_tokens = additional_tokens
             store.update_session(sid, session_data)
 
-        referrer = authn_request_ctx.get("referrer", current_app.config.get("POST_LOGIN_REDIRECT", "/"))
-        logger.debug(f"Callback referrer: {referrer}")
-        response = redirect(referrer)
-        response.set_cookie(current_app.config["COOKIE_NAME"],
-                            session_key,
-                            domain=get_cookie_domain(),
-                            httponly=True,
-                            secure=True,
-                            samesite="Lax")
-        return response
+        if is_oauth_flow:
+            # OAuth Authorization Code flow: generate code and redirect back to client
+            auth_code = token_urlsafe(32)
+            code_payload = {
+                "session_id":            sid,
+                "client_id":             authn_request_ctx["oauth_client_id"],
+                "redirect_uri":          authn_request_ctx["oauth_redirect_uri"],
+                "code_challenge":        authn_request_ctx.get("oauth_code_challenge"),
+                "code_challenge_method": authn_request_ctx.get("oauth_code_challenge_method"),
+                "scope":                 authn_request_ctx.get("oauth_scope", ""),
+                "resources":             authn_request_ctx.get("oauth_resources", []),
+                "realm":                 realm,
+                "issued_at":             int(time.time()),
+            }
+            store.set_authorization_code(auth_code, code_payload, ttl=300)
+            audit_event("authorize_code_issued",
+                        session_id=sid,
+                        client_id=authn_request_ctx["oauth_client_id"],
+                        user=user,
+                        sub=sub,
+                        realm=realm)
+            logger.info(
+                f"OAuth authorization code issued for user {user} ({sub}), "
+                f"client={authn_request_ctx['oauth_client_id']}, session={sid}")
+            client_state = authn_request_ctx.get("oauth_state", "")
+            params = {"code": auth_code}
+            if client_state:
+                params["state"] = client_state
+            return redirect(f"{authn_request_ctx['oauth_redirect_uri']}?{urlencode(params)}")
+        else:
+            referrer = authn_request_ctx.get("referrer", current_app.config.get("POST_LOGIN_REDIRECT", "/"))
+            logger.debug(f"Callback referrer: {referrer}")
+            response = redirect(referrer)
+            response.set_cookie(current_app.config["COOKIE_NAME"],
+                                session_key,
+                                domain=get_cookie_domain(),
+                                httponly=True,
+                                secure=True,
+                                samesite="Lax")
+            return response
 
     finally:
         if not preserve_ctx:

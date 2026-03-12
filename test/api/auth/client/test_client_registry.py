@@ -26,10 +26,12 @@ from credenza.api.auth.client.client_registry import (
     _validate_adapter_instance,
     _validate_adapter_config,
     _normalize_list_field,
+    _normalize_grant_type,
     fingerprint_client_record,
     load_client_registry,
     ClientRecord,
 )
+from credenza.api.common.grant_type import GrantType
 
 class DummyAdapterConfig(adapter_mod.AdapterConfig):
     # keep fields compatible; AdapterConfig is frozen dataclass in real code but for tests we just construct
@@ -444,3 +446,39 @@ def test_adapter_name_with_instance():
 def test_adapter_name_none_when_missing():
     rec = ClientRecord(client_id="c1", desc=None, enabled=True, adapter_instance=None)
     assert rec.adapter_name == "none"
+
+
+def test_grant_type_aliases_via_constructor():
+    # GrantType._missing_ resolves short aliases to canonical members
+    assert GrantType("device_code") == GrantType.DEVICE_CODE
+    assert GrantType("token_exchange") == GrantType.TOKEN_EXCHANGE
+    assert GrantType("jwt_bearer") == GrantType.JWT_BEARER
+    assert GrantType("saml2_bearer") == GrantType.SAML2_BEARER
+    # canonical values still work
+    assert GrantType("authorization_code") == GrantType.AUTHORIZATION_CODE
+    assert GrantType("urn:ietf:params:oauth:grant-type:device_code") == GrantType.DEVICE_CODE
+    # unknown values raise ValueError
+    import pytest
+    with pytest.raises(ValueError):
+        GrantType("some_future_grant")
+
+
+def test_normalize_grant_type_aliases():
+    # _normalize_grant_type wraps GrantType; aliases resolve, unknowns pass through
+    assert _normalize_grant_type("device_code") == "urn:ietf:params:oauth:grant-type:device_code"
+    assert _normalize_grant_type("token_exchange") == "urn:ietf:params:oauth:grant-type:token-exchange"
+    assert _normalize_grant_type("authorization_code") == "authorization_code"
+    assert _normalize_grant_type("client_credentials") == "client_credentials"
+    assert _normalize_grant_type("some_future_grant") == "some_future_grant"
+
+
+def test_client_record_normalizes_grant_type_aliases():
+    rec = ClientRecord(
+        client_id="alias-test",
+        allowed_grant_types=["device_code", "token_exchange", "authorization_code"],
+    )
+    assert "urn:ietf:params:oauth:grant-type:device_code" in rec.allowed_grant_types
+    assert "urn:ietf:params:oauth:grant-type:token-exchange" in rec.allowed_grant_types
+    assert "authorization_code" in rec.allowed_grant_types
+    assert "device_code" not in rec.allowed_grant_types
+    assert "token_exchange" not in rec.allowed_grant_types

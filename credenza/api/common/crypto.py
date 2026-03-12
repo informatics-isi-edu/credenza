@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import hmac
 import json
 import time
 import base64
+import hashlib
 import logging
 from typing import Dict, Optional, Callable
 from Cryptodome.Cipher import AES
@@ -68,6 +70,22 @@ class AESGCMCodec:
 def generate_nonce():
   nonce = str(int(time.time())) + '.' + base64.urlsafe_b64encode(get_random_bytes(30)).decode() + '.'
   return nonce
+
+
+def verify_pkce(code_challenge: str, code_verifier: str, method: str = "S256") -> bool:
+    """
+    Verify an OAuth 2.1 PKCE code_verifier against a stored code_challenge.
+
+    Only S256 is accepted; plain is explicitly rejected per RFC 7636 / OAuth 2.1.
+    Uses hmac.compare_digest for timing-safe comparison.
+    """
+    if not code_challenge or not code_verifier:
+        return False
+    if method != "S256":
+        return False
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return hmac.compare_digest(expected, code_challenge)
 
 
 _hasher_registry: Dict[str, Callable[[str, str], bool]] = {}
@@ -167,7 +185,7 @@ def verify_secret_candidate(candidate: str, *,
                 return False
             return hasher(candidate, stored_hash)
 
-        # fallback raw equality
+        # fallback to equality
         return candidate == stored_hash
 
     if plaintext is not None:

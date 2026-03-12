@@ -128,10 +128,10 @@ def test_put_session_with_refresh_access_token(client,
     sid = "S1"
     now = frozen_time
 
-    # Make a deep‐copy so we don't clobber other tests
+    # Make a deep-copy so we don't clobber other tests
     sess = copy.deepcopy(base_session)
     sess._session_type = SessionType.DEVICE
-    # Simulate an expired access token, but a still‐valid refresh token
+    # Simulate an expired access token, but a still-valid refresh token
     sess.session_metadata.system.update({
         "access_token_expires_at":   now - 1,    # already expired
         "refresh_token_expires_at":  now + 600,  # still valid
@@ -566,14 +566,26 @@ def test_put_session_service_match_200(monkeypatch, client, base_session, store)
     assert resp.json == stub
 
 
-def test_get_session_user_ignores_resource(monkeypatch, client, base_session):
-    # Ensure user session path ignores 'resource' entirely
+def test_get_session_user_with_resources_wrong_resource_403(monkeypatch, client, base_session):
+    # User session that carries allowed_resources enforces resource binding when caller
+    # provides a resource param that doesn't intersect.
     base_session._session_type = SessionType.USER
     base_session._allowed_resources = ["some-other-api"]
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("user-ok", base_session))
 
     resp = client.get("/session?resource=rest-api")
+    assert resp.status_code == 403
+
+
+def test_get_session_user_with_resources_no_resource_param_200(monkeypatch, client, base_session):
+    # User session with allowed_resources but no resource param -> allowed (no enforcement).
+    base_session._session_type = SessionType.USER
+    base_session._allowed_resources = ["some-other-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("user-ok", base_session))
+
+    resp = client.get("/session")
     assert resp.status_code == 200
 
 

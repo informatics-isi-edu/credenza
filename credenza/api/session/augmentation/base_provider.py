@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 class SessionAugmentationProvider(ABC):
     """
     Extension points for sessions:
-      • process_additional_tokens (some providers, e.g. Globus, may return additional dependent tokens in the token response)
-      • fetch_dependent_tokens (some providers, e.g. Globus, allow clients to retrieve dependent tokens via token endpoints)
-      • enrich_userinfo (add groups, roles, claims, etc. to userinfo from other sources)
+      - process_additional_tokens (some providers, e.g. Globus, may return additional dependent tokens in the token response)
+      - fetch_dependent_tokens (some providers, e.g. Globus, allow clients to retrieve dependent tokens via token endpoints)
+      - enrich_userinfo (add groups, roles, claims, etc. to userinfo from other sources)
       (additional as needed in future)
     """
 

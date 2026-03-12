@@ -17,21 +17,20 @@ import time
 import logging
 from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
+from .helpers import make_json_response, perf_logged
 from ..telemetry import audit_event
 from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
 from ..api.session.storage.session_store import SessionData, SessionType
 from ..api.common.util import (
     get_current_session,
     get_effective_scopes,
-    make_json_response,
+    get_request_resource_args,
+    get_augmentation_provider,
     refresh_access_token,
     refresh_additional_tokens,
     revoke_tokens,
-    get_augmentation_provider,
-    strtobool,
-    perf_logged,
+    strtobool
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -70,21 +69,14 @@ def get_session():
     user = session.userinfo.get("email") \
         if not session.is_service() else session.userinfo.get("name","service")
 
+    # Accept multiple resource hints via repeated query params: ?resource=A&resource=B
+    req_resources = get_request_resource_args(request.args.getlist("resource"))
+
     if session.is_service():
         # Resource binding for service/M2M tokens at introspection.
-        # - Accept multiple resource hints via repeated query params: ?resource=A&resource=B
-        # - Enforce ONLY for service sessions; user sessions skip resource checks entirely, as these have already been
-        #   validated by the OIDC OP/RP flow.
-        # - Rationale: issuance != proper use. This prevents cross-service replay by requiring that
+        #   Rationale: issuance != proper use. This prevents cross-service replay by requiring that
         #   at least one requested resource matches the token's declared resources.
-
-        # Normalize and dedupe resource args
-        req_resources = sorted({
-            s for r in request.args.getlist("resource")
-            if isinstance(r, str) and (s := r.strip())
-        })[:64]
         res_claim = set(session.allowed_resources)
-
         if not res_claim:
             audit_event(
                 "service_session_resource_misconfig",
@@ -124,6 +116,31 @@ def get_session():
             requested_resources=req_resources,
             token_resources=sorted(res_claim),
         )
+
+    elif session.allowed_resources:
+        # Resource binding for non-service sessions that carry allowed_resources
+        # (e.g., user sessions issued via authorization_code flow).
+        # In legacy mode: skip unless LEGACY_DEFAULT_RESOURCE is configured.
+        # In non-legacy mode: enforce only when the caller provides a resource param.
+        if req_resources:
+            res_claim = set(session.allowed_resources)
+            if not (set(req_resources) & res_claim):
+                audit_event(
+                    "session_resource_denied",
+                    session_id=sid,
+                    realm=realm,
+                    requested_resources=req_resources,
+                    token_resources=sorted(res_claim),
+                    reason="no_resource_intersection",
+                )
+                abort(403, "no_resource_intersection")
+            audit_event(
+                "session_resource_ok",
+                session_id=sid,
+                realm=realm,
+                requested_resources=req_resources,
+                token_resources=sorted(res_claim),
+            )
 
     if request.method == "PUT":
 
