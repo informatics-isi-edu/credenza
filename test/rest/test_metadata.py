@@ -15,7 +15,7 @@
 #
 import pytest
 from flask import Flask
-from credenza.rest.metadata import metadata_blueprint
+from credenza.rest.metadata import metadata_blueprint, rfc8414_discovery_url
 
 BASE = "https://authn.example.com/authn"
 
@@ -102,3 +102,29 @@ def test_metadata_revocation_endpoint_auth_methods(client):
     assert "client_secret_basic" in methods
     assert "client_secret_post" in methods
     assert "none" in methods
+
+
+# ---------------------------------------------------------------------------
+# Tests: RFC 8414 Section 2 discovery URL construction
+# ---------------------------------------------------------------------------
+
+def test_rfc8414_discovery_url_with_path():
+    """Issuer with path prefix: well-known path appended after the segment."""
+    url = rfc8414_discovery_url("https://authn.example.com/authn")
+    assert url == "https://authn.example.com/.well-known/oauth-authorization-server/authn"
+
+
+def test_rfc8414_discovery_url_no_path():
+    """Issuer with no path: standard well-known URL with no suffix."""
+    url = rfc8414_discovery_url("https://authn.example.com")
+    assert url == "https://authn.example.com/.well-known/oauth-authorization-server"
+
+
+def test_rfc8414_discovery_url_trailing_slash_stripped():
+    url = rfc8414_discovery_url("https://authn.example.com/authn/")
+    assert url == "https://authn.example.com/.well-known/oauth-authorization-server/authn"
+
+
+def test_rfc8414_discovery_url_nested_path():
+    url = rfc8414_discovery_url("https://host/a/b")
+    assert url == "https://host/.well-known/oauth-authorization-server/a/b"

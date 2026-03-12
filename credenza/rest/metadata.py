@@ -14,12 +14,32 @@
 # limitations under the License.
 #
 import logging
+from urllib.parse import urlparse
 from flask import Blueprint, current_app, Response
 import json
 
 logger = logging.getLogger(__name__)
 
 metadata_blueprint = Blueprint("metadata", __name__)
+
+
+def rfc8414_discovery_url(base_url: str) -> str:
+    """
+    Compute the RFC 8414 Section 2 discovery URL for a given issuer URL.
+
+    For an issuer with no path (https://host), the URL is:
+        https://host/.well-known/oauth-authorization-server
+    For an issuer with a path prefix (https://host/authn), the URL is:
+        https://host/.well-known/oauth-authorization-server/authn
+
+    In path-prefix deployments (WSGIScriptAlias /authn), a reverse-proxy
+    rewrite rule must expose this URL since Flask cannot serve paths outside
+    its own SCRIPT_NAME boundary.
+    """
+    parsed = urlparse(base_url.rstrip("/"))
+    path = parsed.path.rstrip("/")
+    well_known = f"{parsed.scheme}://{parsed.netloc}/.well-known/oauth-authorization-server"
+    return f"{well_known}{path}" if path else well_known
 
 
 @metadata_blueprint.route("/.well-known/oauth-authorization-server", methods=["GET"])

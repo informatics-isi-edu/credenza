@@ -1,6 +1,12 @@
 # this file must be loaded (alphabetically) after wsgi.conf
 AllowEncodedSlashes On
 
+# RFC 8414 Section 2: for an issuer with a path prefix (https://host/authn),
+# the spec-compliant discovery URL is /.well-known/oauth-authorization-server/authn
+# (at the host root, not under the application prefix). Map it to the Flask handler.
+RewriteEngine On
+RewriteRule ^/.well-known/oauth-authorization-server/authn$ /authn/.well-known/oauth-authorization-server [PT,L]
+
 WSGIPythonOptimize 1
 WSGIDaemonProcess @DAEMONUSER@ processes=1 threads=4 user=@DAEMONUSER@ maximum-requests=2000
 WSGIScriptAlias /authn @PYLIBDIR@/credenza/credenza_wsgi.py process-group=@DAEMONUSER@

@@ -89,6 +89,8 @@ federated environments.
 * #### [Configuration Reference](docs/configuration.md) — `credenza.env`, `oidc_idp_profiles.json`, and `client_registry.json`
 * #### [OAuth & OIDC Profile](docs/credenza-oauth-profile.md) — supported RFCs, grant types, and token characteristics
 * #### [Security Model](docs/security_model.md) — threat model, trust boundaries, and operational assumptions
+* #### [ADR-0001: Narrow OAuth AS Profile](docs/ADR-0001-narrow-oauth-profile.md) — architecture decision record
+* #### [ADR-0002: Delegation Consent](docs/ADR-0002-delegation-consent.md) — optional consent UI and delegation transparency
 
 ### Project Status
 
