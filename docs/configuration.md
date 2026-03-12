@@ -10,7 +10,7 @@ All three are loaded at startup. Configuration errors fail fast.
 
 ---
 
-## 1. credenza.env
+## 1. `credenza.env`
 
 Environment variables are loaded from one of the following locations (first match wins):
 
@@ -119,7 +119,7 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 
 ---
 
-## 2. oidc_idp_profiles.json
+## 2. `oidc_idp_profiles.json`
 
 Defines one or more upstream OpenID Connect Identity Providers. Each top-level key is the
 **realm name** used throughout the system (in `DEFAULT_REALM`, client records, session data, etc.).
@@ -175,7 +175,7 @@ document is incorrect or when an endpoint is at a non-standard URL.
 | `discovery_scopes`                            | *(unset)*                            | Dict of `name -> scope-url` for IDP-specific named scopes. Used by augmentation providers.                                                                                              |
 | `session_augmentation_provider`               | `DefaultSessionAugmentationProvider` | Dotted Python import path to a custom `SessionAugmentationProvider` class for this realm (e.g., `credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider`). |
 
-### 2.4 client_secret_file format
+### 2.4 `client_secret_file` format
 
 The file referenced by `client_secret_file` must be a JSON object:
 
@@ -217,7 +217,7 @@ The file referenced by `client_secret_file` must be a JSON object:
 
 ---
 
-## 3. client_registry.json
+## 3. `client_registry.json`
 
 Defines registered OAuth clients and their authorization policy. The registry is loaded at startup;
 changes require a restart. The JSON key for each client entry is used as the authoritative

@@ -91,6 +91,8 @@ federated environments.
 * #### [Security Model](docs/security_model.md) — threat model, trust boundaries, and operational assumptions
 * #### [ADR-0001: Narrow OAuth AS Profile](docs/ADR-0001-narrow-oauth-profile.md) — architecture decision record
 * #### [ADR-0002: Delegation Consent](docs/ADR-0002-delegation-consent.md) — optional consent UI and delegation transparency
+* #### [ADR-0003: mTLS Client Authentication](docs/ADR-0003-mtls-client-auth.md) — RFC 8705 mutual TLS adapter
+* #### [ADR-0004: private_key_jwt Client Authentication](docs/ADR-0004-private-key-jwt-client-auth.md) — RFC 7523 asymmetric JWT adapter (blue-sky)
 
 ### Project Status
 
