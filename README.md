@@ -40,25 +40,36 @@ opaque bearer tokens bound to configured scopes and resource audiences.
 
 ### Why Credenza?
 
-Modern applications increasingly delegate authentication to external identity providers using protocols like OIDC,
-but often stop short of managing the resulting session lifecycle and token hygiene with equal rigor. This leaves
-critical gaps — expired tokens that are still accepted, refresh tokens lingering beyond their intended lifetime, and no
-clear view into when or how access was last granted, renewed, or revoked.
+Modern applications delegate authentication to external identity providers, but identity providers solve authentication
+and token issuance — they do not automatically solve the internal identity-management problem inside a deployment.
+Backends still need normalized principals, policy-aware token disclosure, consistent session state across browser,
+device, and service workflows, downstream credential brokerage, and centralized revocation and audit.
 
-**Credenza** fills that void by acting as a lightweight, centralized session broker that maintains consistent access and
-refresh token lifecycles across distributed services. It handles token acquisition and refresh delegation, emits structured audit
-events, and supports distributed session inspection without exposing sensitive credentials externally.
+Credenza addresses this as a **deployment-local broker**: a first-party service that translates upstream identity
+artifacts into a stable, policy-aware internal abstraction that backends can consume uniformly, regardless of how the
+identity was established.
 
-Credenza extends these guarantees to **service identities** as well: service tokens are **validated by session lookup**
-(not self-contained JWTs), enabling **immediate revocation**, consistent renewal semantics, and centralized auditing/rate limiting.
+Key properties:
 
-As recent security analyses have highlighted, modernization without coherent identity and session oversight can create more surface area
-for compromise — not less. By providing observability, rotation, and revocation for both user and service tokens,
-Credenza helps bring your authentication layer closer to the operational standards expected in secure,
-federated environments.
+- **Opaque, server-side tokens** — Credenza issues opaque access tokens backed by server-side sessions, not
+  self-contained JWTs. Sessions can be revoked instantly. Token contents can differ by the resource server calling
+  introspect, enabling controlled per-caller disclosure without distributing that policy across services.
+- **Unified session model** — browser (Authorization Code + PKCE), device (RFC 8628), and M2M service identities
+  (client credentials) are all represented through one internal session model. Device sessions perform background
+  upstream token refresh; no other grant type holds or uses long-lived upstream credentials.
+- **Token exchange for downstream brokerage** — RFC 8693 token exchange allows services to obtain audience-scoped
+  derived tokens for downstream APIs under explicit, default-deny policy. Services do not need to implement delegation
+  logic themselves.
+- **Per-client introspection gating** — resource servers retrieve only the session claims they are authorized to see,
+  enforced at the broker rather than distributed across applications.
+
+As recent security analyses have highlighted, modernization without coherent identity and session oversight can create
+more surface area for compromise — not less. Credenza provides a governed, auditable control plane for identity and
+token lifecycle across the deployment.
 
 #### Further Reading
 
+* [Deployment-Local Identity and Session Brokerage](docs/whitepaper.md) — whitepaper describing the architectural pattern Credenza implements
 * [Application identity modernization poses significant risks](https://www.helpnetsecurity.com/2025/05/27/application-identity-modernization-risks/) – Help Net Security
 * [Session Management in Microservices](https://www.geeksforgeeks.org/system-design/session-management-in-microservices) – GeeksforGeeks
 
