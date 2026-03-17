@@ -69,38 +69,22 @@ token lifecycle across the deployment.
 
 #### Further Reading
 
-* [Deployment-Local Identity and Session Brokerage](docs/whitepaper.md) — whitepaper describing the architectural pattern Credenza implements
-* [Application identity modernization poses significant risks](https://www.helpnetsecurity.com/2025/05/27/application-identity-modernization-risks/) – Help Net Security
-* [Session Management in Microservices](https://www.geeksforgeeks.org/system-design/session-management-in-microservices) – GeeksforGeeks
+* #### [Deployment-Local Identity and Session Brokerage](docs/whitepaper.md) — whitepaper describing the architectural pattern Credenza implements
+* #### [Application identity modernization poses significant risks](https://www.helpnetsecurity.com/2025/05/27/application-identity-modernization-risks/) – Help Net Security
+* #### [Session Management in Microservices](https://www.geeksforgeeks.org/system-design/session-management-in-microservices) – GeeksforGeeks
 
-### Credenza User Authentication Flow
-![credenza-flow](./docs/credenza-flow.png)
+### Authentication Flows
 
-* #### Credenza [User Auth (OIDC)](docs/user_auth_oidc.md) Documentation
-
-### Credenza Client Authentication (M2M) Flow
-
-- **Issue token** — `POST /authn/token`
-  - `grant_type=client_credentials`
-  - Adapter-specific proof fields (client secret or AWS presigned URL)
-  - Returns: `{"access_token": "<opaque>", "token_type": "Bearer", "expires_in": <seconds>}`
-
-- **Revoke token** — `POST /authn/revoke` (RFC 7009)
-  - `token=<access_token>` plus client authentication
-  - Returns: `200` on all outcomes
-
-- **Introspect token** — `POST /authn/introspect` (RFC 7662)
-  - Used by resource servers to validate opaque tokens
-  - Returns standard active/inactive response with claims
-
-* #### Credenza [Client Auth (M2M)](docs/client_auth.md) Documentation
+* #### [User Auth (OIDC)](docs/user_auth_oidc.md) Documentation
+* #### [Client Auth (M2M)](docs/client_auth.md) Documentation
+* #### [Authentication Flow Diagrams](docs/credenza-flow.md)
 
 ### Further Documentation
 
 * #### [Configuration Reference](docs/configuration.md) — `credenza.env`, `oidc_idp_profiles.json`, and `client_registry.json`
 * #### [OAuth & OIDC Profile](docs/credenza-oauth-profile.md) — supported RFCs, grant types, and token characteristics
 * #### [Security Model](docs/security_model.md) — threat model, trust boundaries, and operational assumptions
-* #### [ADR-0001: Narrow OAuth AS Profile](docs/ADR-0001-narrow-oauth-profile.md) — architecture decision record
+* #### [ADR-0001: Narrow OAuth AS Profile](docs/ADR-0001-narrow-oauth-profile.md) — architecture decision record for AS functionality
 * #### [ADR-0002: Delegation Consent](docs/ADR-0002-delegation-consent.md) — optional consent UI and delegation transparency
 * #### [ADR-0003: mTLS Client Authentication](docs/ADR-0003-mtls-client-auth.md) — RFC 8705 mutual TLS adapter
 * #### [ADR-0004: private_key_jwt Client Authentication](docs/ADR-0004-private-key-jwt-client-auth.md) — RFC 7523 asymmetric JWT adapter (blue-sky)

@@ -16,6 +16,9 @@ uses the same `ClientRecord` structure as interactive (browser/device) clients. 
 registry entry may authorize both interactive and M2M grant types (e.g.,
 `authorization_code` plus `token_exchange` plus `client_credentials`).
 
+> **Flow diagram:** [Client Credentials (M2M)](credenza-flow.md#flow-3-client-credentials-m2m)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-m2m" -->
+
 ---
 
 ## 2. Endpoints
@@ -62,6 +65,9 @@ be returned as active.
 ---
 
 ## 3. Token validation model
+
+> **Flow diagram:** [Token Introspection (RFC 7662)](credenza-flow.md#flow-5-resource-server----token-introspection-rfc-7662)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-introspect" -->
 
 A client-issued access token is opaque. Resource servers validate it by calling
 `POST /introspect`. Credenza:
@@ -313,6 +319,9 @@ curl -sS -X POST https://<credenza>/authn/revoke \
 ---
 
 ## 7. Token exchange for downstream service calls
+
+> **Flow diagram:** [Token Exchange (RFC 8693)](credenza-flow.md#flow-6-resource-server----token-exchange-rfc-8693)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-exchange" -->
 
 A confidential client with `token_exchange` in `allowed_grant_types` may exchange a
 user-scoped token for a narrowly scoped derived token to call a downstream service.

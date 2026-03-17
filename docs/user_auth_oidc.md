@@ -21,6 +21,9 @@ User sessions are stored as `SESSION_TYPE.user` in the session store and are aut
 > Note: Credenza also supports **service/M2M tokens**. This document focuses on the **user flow**, but points out where
 > service-session logic intersects `/authn/session` behavior.
 
+> **Flow diagrams:** [Authorization Code + PKCE](credenza-flow.md#flow-1-authorization-code--pkce) | [Device Authorization Grant](credenza-flow.md#flow-2-device-authorization-grant-rfc-8628) | [Legacy Browser Login](credenza-flow.md#flow-4-legacy-browser-login)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-authcode" / flow-device / flow-legacy -->
+
 ---
 
 ## 2. Identity Provider configuration: `OIDC_IDP_PROFILES`
@@ -156,6 +159,9 @@ This is used for auditing and responses (`get_effective_scopes(session)`).
 
 The device flow supports a classic “device initiates, user completes in browser, device polls” pattern.
 
+> **Flow diagram:** [Device Authorization Grant](credenza-flow.md#flow-2-device-authorization-grant-rfc-8628)
+<!-- MkDocs: replace with --8<-- “docs/credenza-flow.md:flow-device” -->
+
 ### 4.1 Endpoints
 
 #### Start: `POST /authn/device/start` (or `POST /authn/device_authorization` per RFC 8628)
@@ -248,6 +254,9 @@ During `/authn/device/callback`, Credenza sets session metadata including:
 ---
 
 ## 5. Session introspection and renewal
+
+> **Flow diagram:** [Session Inspection](credenza-flow.md#flow-7-session-inspection)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-session" -->
 
 ### 5.1 `/authn/whoami` (GET)
 Returns a JSON object including:

@@ -25,6 +25,9 @@ This design applies generically to any protected resource server
 requiring OAuth-compliant access tokens (e.g., MCP servers, REST APIs,
 data platforms, service-to-service endpoints).
 
+> **Component overview:** [Architecture diagram](credenza-flow.md#component-overview)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-overview" -->
+
 ------------------------------------------------------------------------
 
 # Architectural Roles
@@ -146,6 +149,9 @@ Provides:
 
 ## RFC 7662 --- Token Introspection
 
+> **Flow diagram:** [Token Introspection](credenza-flow.md#flow-5-resource-server----token-introspection-rfc-7662)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-introspect" -->
+
 Endpoint:
 
 `POST /introspect`
@@ -180,6 +186,9 @@ This prevents cross-service token replay.
 
 ## RFC 8693 --- OAuth 2.0 Token Exchange
 
+> **Flow diagram:** [Token Exchange](credenza-flow.md#flow-6-resource-server----token-exchange-rfc-8693)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-exchange" -->
+
 Endpoint:
 
 `POST /token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
@@ -197,6 +206,9 @@ This enables audience transformation without token passthrough.
 ------------------------------------------------------------------------
 
 ## RFC 8628 --- Device Authorization Grant
+
+> **Flow diagram:** [Device Authorization Grant](credenza-flow.md#flow-2-device-authorization-grant-rfc-8628)
+<!-- MkDocs: replace with --8<-- "docs/credenza-flow.md:flow-device" -->
 
 Endpoints:
 
