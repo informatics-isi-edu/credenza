@@ -243,6 +243,7 @@ def callback():
             except Exception:
                 logger.exception(f"Failed to delete authn_request_ctx for state {state}")
 
+
 @login_blueprint.route("/logout", methods=["GET"])
 @perf_logged(warn_ms=1000)
 def logout():

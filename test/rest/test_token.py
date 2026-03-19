@@ -1146,13 +1146,43 @@ def test_token_exchange_resource_not_in_targets(app, store):
     assert resp.status_code == 403
 
 
-def test_token_exchange_resource_not_in_subject_session(app, store):
-    """Subject session is resource-bound and requested resource is outside it -- 403."""
+def test_token_exchange_resource_not_in_subject_session_succeeds(app, store):
+    """Exchange to a resource not in the subject session's bound resources succeeds
+    when the client has explicit allowed_token_exchange_targets permission.
+
+    The subject token's resource binding establishes identity (who the user is),
+    not the ceiling of downstream delegation. allowed_token_exchange_targets is
+    the policy boundary for what the exchange client can access on the user's
+    behalf. This supports the MCP delegation pattern where the user's token is
+    scoped to the MCP resource server but the MCP server needs to exchange it
+    for access to downstream DERIVA services. See ADR-0001 and ADR-0002.
+    """
     other = "https://other.example/"
     _make_exchange_client(
         app,
         allowed_resources=[_RESOURCE_TC, other],
         allowed_targets=[_RESOURCE_TC, other],
+    )
+    _, skey = _create_subject_session(store, resources=[_RESOURCE_TC])
+    with app.test_client() as c:
+        resp = c.post("/token", data={
+            "client_id":          "exchange-client",
+            "grant_type":         _TOKEN_EXCHANGE_GRANT,
+            "subject_token":      skey,
+            "subject_token_type": _TOKEN_TYPE_ACCESS,
+            "resource":           other,
+        })
+    assert resp.status_code == 200
+
+
+def test_token_exchange_cross_resource_delegation_denied_without_target(app, store):
+    """Exchange to a resource outside allowed_token_exchange_targets is still denied
+    even if the client has it in allowed_resources."""
+    other = "https://other.example/"
+    _make_exchange_client(
+        app,
+        allowed_resources=[_RESOURCE_TC, other],
+        allowed_targets=[_RESOURCE_TC],  # other is NOT in targets
     )
     _, skey = _create_subject_session(store, resources=[_RESOURCE_TC])
     with app.test_client() as c:

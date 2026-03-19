@@ -13,6 +13,7 @@ Decision Date: 2026-02-11
 | 2026-02-11 | Amended  | Unified client registry and grant-based session model; clarified lifecycle semantics |
 | 2026-02-11 | Amended  | Added authorization code infrastructure and backend atomicity requirements           |
 | 2026-03-11 | Accepted | Phases 0-5 implemented (authorization code, token exchange, device flow, revocation) |
+| 2026-03-19 | Amended  | Revised token exchange resource policy (section 5.4) to support delegated intermediary pattern; see ADR-0002 |
 
 ---
 
@@ -359,11 +360,39 @@ Resource binding determines where a token may be presented.
 - Token exchange SHALL NOT be transitive by default.
 - Derived tokens are not automatically eligible for further exchange.
 
-### 5.4 No Privilege Escalation
+### 5.4 Delegation Policy and Resource Boundaries (Revised 2026-03-19)
 
-- Exchange SHALL NOT elevate privileges beyond those asserted in the
-  subject session.
-- Exchange transforms audience, not authorization scope.
+The permitted resource set for a token exchange is the intersection of the
+client's `allowed_token_exchange_targets` and the client's `allowed_resources`.
+The subject token's resource binding is **not** part of this intersection.
+
+**Rationale:** The subject token's bound resources establish *who the user is*
+(they authenticated and received a token for resource X). They do not limit
+*what downstream resources a trusted intermediary can access on the user's behalf*.
+That boundary is enforced by `allowed_token_exchange_targets`, which is
+admin-configured and default-deny.
+
+Including the subject resources in the permitted-resource intersection would
+break the standard delegated intermediary pattern (RFC 8693 actor/on-behalf-of),
+where a user authenticates to a front-end service (e.g., an MCP server scoped
+to its own resource URI) that then exchanges the token for access to downstream
+services (e.g., DERIVA catalog APIs). The user's front-end token is correctly
+scoped to the front-end resource; it would never include the downstream resource
+URIs, so the three-way intersection would always be empty.
+
+**What is still prevented:**
+
+- Transitive exchange (section 5.3): derived tokens cannot be exchanged further.
+- Target not in `allowed_token_exchange_targets`: denied regardless of subject.
+- Target not in `allowed_resources`: denied (client cannot hold that resource token).
+- Scope escalation: derived token scopes are bounded by subject session scopes.
+
+**Informed consent implication:** Because a user who authenticates to a delegating
+intermediary implicitly authorizes downstream access (without seeing the downstream
+resources at authorization time), ADR-0002 introduces an optional consent mechanism
+that surfaces `allowed_token_exchange_targets` to the user before the authorization
+code is issued. Operators of intermediary clients (e.g., MCP servers) SHOULD
+evaluate whether `require_consent: true` is appropriate for their deployment.
 
 ### 5.5 Declarative Configuration Only
 

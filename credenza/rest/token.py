@@ -364,7 +364,7 @@ def _handle_authorization_code_grant(proof_ctx: ProofContext,
     expires_in = max(0, session.expires_at - int(time.time()))
 
     audit_event(
-        "token_authz_code_issued",
+        "token_issued_from_authz_code",
         request_id=get_request_id(),
         session_id=session_id,
         client_id=client_id,
@@ -549,16 +549,15 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
                     request_id=get_request_id(), client_id=client_id, sid=sid)
         abort(403, description=OAuthError.ACCESS_DENIED)
 
-    # Resource policy: permitted = intersection of client allowed exchange targets and client allowed resources
-    #                  (further intersected with subject's declared resources if the subject is resource-bound)
+    # Resource policy: permitted = intersection of client allowed exchange targets and client allowed resources.
+    # The subject token's resource binding proves who the user is; it does not restrict what downstream
+    # resources the exchange client can access on the user's behalf -- that is the role of
+    # allowed_token_exchange_targets. Including the subject resources in the intersection would break
+    # the intended delegation pattern (e.g. MCP server exchanging a user's MCP-scoped token for a
+    # DERIVA-scoped token) since the subject token is bound to the upstream resource, not the target.
     allowed_target_set = set(allowed_targets)
     client_allowed_set = set(normalize_str_list(client_rec.allowed_resources or []))
-    session_resources = session.allowed_resources
-    if session_resources:
-        subject_resource_set = set(normalize_str_list(session_resources))
-        permitted_resource_set = allowed_target_set & client_allowed_set & subject_resource_set
-    else:
-        permitted_resource_set = allowed_target_set & client_allowed_set
+    permitted_resource_set = allowed_target_set & client_allowed_set
 
     requested_resources = _parse_requested_resources_from_ctx(proof_ctx)
     if requested_resources:
