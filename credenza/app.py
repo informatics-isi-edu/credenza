@@ -157,23 +157,23 @@ def load_config(app):
     register_default_hashers()
 
 def init_logging(app):
-    log_handler = logging.StreamHandler()
-    log_handler.setFormatter(
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+    logger.addHandler(stream_handler)
 
     syslog_socket = "/dev/log"
     if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
         try:
-            log_handler = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
-            log_handler.ident = "credenza: "
-            log_handler.setFormatter(
+            sh = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
+            sh.ident = "credenza: "
+            sh.setFormatter(
                 logging.Formatter("[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+            logger.addHandler(sh)
             logger.propagate = False
-        except Exception as e:
-            # fallback to preconfigured StreamHandler
+        except Exception:
             pass
 
-    logger.addHandler(log_handler)
     logger.setLevel(logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
 def load_serialized_kwargs(input_kwargs):

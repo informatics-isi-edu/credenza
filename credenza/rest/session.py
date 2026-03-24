@@ -119,7 +119,7 @@ def get_session():
 
     elif session.allowed_resources:
         # Resource binding for non-service sessions that carry allowed_resources
-        # (e.g., user sessions issued via authorization_code flow).
+        # (e.g., user sessions issued via authorization_code flow, or derived sessions).
         # In legacy mode: skip unless LEGACY_DEFAULT_RESOURCE is configured.
         # In non-legacy mode: enforce only when the caller provides a resource param.
         if req_resources:
@@ -144,11 +144,13 @@ def get_session():
 
     if request.method == "PUT":
 
-        if session.is_service():
+        if session.is_service() or session.is_derived():
             max_ttl = session.session_ttl
             now_i = int(now)
 
-            # Clamp final expiry to session.session_ttl if configured
+            # Clamp final expiry to session.session_ttl if configured.
+            # Derived sessions are non-extendable by design; so we allow a PUT on a derived session
+            # to receive a valid session response without triggering the can_extend() guard.
             if max_ttl > 0:
                 cap = now_i + max_ttl
                 if session.expires_at > cap:

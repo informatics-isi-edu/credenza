@@ -532,13 +532,31 @@ def test_put_session_service_missing_resource_403(monkeypatch, client, base_sess
     assert resp.status_code == 403
 
 
-def test_put_session_disallowed_extend_403(monkeypatch, client, base_session):
+def test_put_session_derived_with_matching_resource_200(monkeypatch, client, base_session, store):
+    # DERIVED sessions must be accepted by PUT /session with a matching resource so that
+    # ERMrest (which always uses PUT to validate sessions) can authenticate M2M callers.
     base_session._session_type = SessionType.DERIVED
     base_session._allowed_resources = ["rest-api"]
 
-    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-miss", base_session))
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("derived-put-ok", base_session))
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    monkeypatch.setattr(store, "update_session", lambda sid, sess: ("dummy-map-key", sess))
+    stub = {"ok": True}
+    monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
 
-    resp = client.put("/session")
+    resp = client.put("/session?resource=rest-api")
+    assert resp.status_code == 200
+    assert resp.json == stub
+
+
+def test_put_session_derived_missing_resource_403(monkeypatch, client, base_session):
+    # DERIVED sessions carry allowed_resources; PUT with a non-matching resource is denied.
+    base_session._session_type = SessionType.DERIVED
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("derived-put-miss", base_session))
+
+    resp = client.put("/session?resource=other-api")
     assert resp.status_code == 403
 
 
