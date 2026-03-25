@@ -45,6 +45,7 @@ def extract_session_key() -> Tuple[str, bool]:
 def get_current_session(dont_abort:bool = False) -> Tuple[Optional[str], Optional[SessionData]]:
     skey, is_bearer_token = extract_session_key()
     if not skey:
+        logger.debug(f"No session key found in request")
         return (None, None) if dont_abort else abort(404)
 
     store = current_app.config["SESSION_STORE"]
@@ -56,9 +57,13 @@ def get_current_session(dont_abort:bool = False) -> Tuple[Optional[str], Optiona
     if (current_app.config.get("ENABLE_LEGACY_API", False) and
         hasattr(provider, "session_from_bearer_token") and is_bearer_token):
         skey, session = provider.session_from_bearer_token(skey)
-        return store.get_active_session_by_session_key(skey)
-    else:
-        return (None, None) if dont_abort else abort(404)
+        sid, session =  store.get_active_session_by_session_key(skey)
+
+    if sid and session:
+        return sid, session
+
+    logger.debug(f"No active session found for {skey[:8]}...")
+    return (None, None) if dont_abort else abort(404)
 
 
 def get_realm(realm=None) -> str:

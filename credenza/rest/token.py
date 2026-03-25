@@ -594,9 +594,10 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
                     sid=sid, disallowed_scopes=sorted(disallowed_scopes))
         abort(403, description=OAuthError.INSUFFICIENT_SCOPE)
 
-    # TTL: capped at DERIVED_SESSION_MAX_TTL and client max_session_ttl_seconds
-    client_max = client_rec.max_session_ttl_seconds or DERIVED_SESSION_MAX_TTL
-    ttl = min(DERIVED_SESSION_MAX_TTL, client_max)
+    # TTL: capped at DERIVED_SESSION_MAX_TTL (configurable) and client max_session_ttl_seconds
+    max_ttl = int(current_app.config.get("DERIVED_SESSION_MAX_TTL", DERIVED_SESSION_MAX_TTL))
+    client_max = client_rec.max_session_ttl_seconds or max_ttl
+    ttl = min(max_ttl, client_max)
 
     userinfo = dict(session.userinfo)
     sub = userinfo.get("sub")
