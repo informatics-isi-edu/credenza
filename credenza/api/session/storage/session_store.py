@@ -406,14 +406,6 @@ class SessionStore:
 
         return json.loads(authn_request_ctx)
 
-    def consume_authn_request_ctx(self, state) -> Any:
-        key = f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}"
-        authn_request_ctx = self._decode_backend_value(self.backend.consume(key))
-        if not authn_request_ctx:
-            return None
-
-        return json.loads(authn_request_ctx)
-
     def delete_authn_request_ctx(self, state) -> None:
         self.backend.delete(f"{self.prefix}{self.oidc_prefix}authn_request_ctx:{state}")
 
@@ -507,16 +499,10 @@ class SessionStore:
         self.backend.setex(self._consent_auth_key(principal, client_id), "1", ttl)
 
     def get_consent_auth(self, principal: str, client_id: str) -> Optional[str]:
-        val = self.backend.get(self._consent_auth_key(principal, client_id))
-        if not val:
-            return None
-        return val.decode() if isinstance(val, bytes) else val
+        return self._decode_backend_value(self.backend.get(self._consent_auth_key(principal, client_id)))
 
     def set_consent_deleg(self, principal: str, rs_resource: str, ttl: int = CONSENT_DEFAULT_TTL) -> None:
         self.backend.setex(self._consent_deleg_key(principal, rs_resource), "1", ttl)
 
     def get_consent_deleg(self, principal: str, rs_resource: str) -> Optional[str]:
-        val = self.backend.get(self._consent_deleg_key(principal, rs_resource))
-        if not val:
-            return None
-        return val.decode() if isinstance(val, bytes) else val
+        return self._decode_backend_value(self.backend.get(self._consent_deleg_key(principal, rs_resource)))
