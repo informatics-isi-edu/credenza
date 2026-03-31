@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Proposed**
+**Accepted**
 Decision Date: 2026-03-12
 
 ### Review History
@@ -10,6 +10,7 @@ Decision Date: 2026-03-12
 | Date       | Status   | Notes                                                              |
 |------------|----------|--------------------------------------------------------------------|
 | 2026-03-12 | Proposed | Initial draft covering authorization and delegation consent design |
+| 2026-03-31 | Accepted | Implementation complete; architecture section updated to reflect actual implementation |
 
 ---
 
@@ -228,22 +229,43 @@ for such RS registrations.
 
 ```python
 require_consent: bool = False
-display_name: str = ""                       # human-readable name for consent page
-scope_descriptions: dict[str, str] = {}     # {"openid": "Your identity", ...}
+consent_display_name: str = ""        # human-readable name shown on consent page
+consent_labels: dict[str, str] = {}  # per-client label overrides for scopes/resources
 ```
 
-### 4.5 New Session Store Operations
+### 4.5 Consent Label Resolution
+
+Human-readable labels for scopes and resource URIs are resolved via a three-layer merge:
+
+1. **Global** -- `consent_labels.json` (path configured by `CONSENT_LABELS_FILE`); covers
+   standard OIDC scopes (`openid`, `email`, `profile`, `offline_access`) and
+   commonly-used DERIVA resource URIs.
+2. **Realm** -- `consent_labels` dict in the relevant IDP profile entry in
+   `oidc_idp_profiles.json`; covers IDP-specific scopes (e.g. Globus URN scopes).
+3. **Per-client** -- `consent_labels` on the `ClientRecord`; highest priority,
+   used to override generic labels with client-specific phrasing.
+
+Merge order: global <- realm <- per-client (later layers override earlier).
+
+### 4.6 New Session Store Operations
 
 ```python
-# Pending consent -- bridges callback to consent page
+# Pending consent -- bridges callback to consent page (5-minute TTL)
 store.set_pending_consent(key: str, data: dict, ttl: int)
-store.get_and_consume_pending_consent(key: str) -> dict | None  # atomic
+store.get_pending_consent(key: str) -> dict | None           # peek (non-consuming)
+store.get_and_consume_pending_consent(key: str) -> dict | None  # atomic consume
 
-# Granted consent records
-store.set_consent(sub: str, client_id: str, rs_resource: str,
-                  scopes: set, resources: set, ttl: int)
-store.get_consent(sub: str, client_id: str, rs_resource: str) -> dict | None
+# Two separate granted consent record surfaces
+store.set_consent_auth(principal: str, client_id: str, ttl: int)
+store.get_consent_auth(principal: str, client_id: str) -> dict | None
+
+store.set_consent_deleg(principal: str, rs_resource: str, ttl: int)
+store.get_consent_deleg(principal: str, rs_resource: str) -> dict | None
 ```
+
+Consent records are keyed by `iss/sub` principal composite (not bare `sub`) to
+prevent cross-issuer collisions when multiple IDPs are configured. Store keys
+are SHA-256 hashed to safely accommodate URIs containing colons and slashes.
 
 ### 4.6 New Consent Blueprint
 
@@ -283,18 +305,27 @@ their own branding.
 
 ## 6. Acceptance Criteria
 
-This ADR moves from Proposed to Accepted when:
+All criteria met as of 2026-03-31.
 
-1. `require_consent` field is implemented on `ClientRecord`.
-2. `pending_consent` store operations are implemented and atomically consumed.
-3. Consent records are stored and reused within TTL, keyed correctly.
-4. `ClientRegistry.find_rs_by_resource()` inverted index is implemented.
-5. Consent page renders correctly for both authorization and delegation
-   surfaces, including when `allowed_token_exchange_targets` is empty.
-6. Deny path redirects with `error=access_denied`.
-7. First-party clients with `require_consent: false` are unaffected.
-8. Tests cover: consent bypass (first-party), consent shown (external),
-   consent reuse within TTL, deny path, delegation panel present/absent.
+1. [x] `require_consent` field implemented on `ClientRecord`.
+2. [x] `pending_consent` store operations implemented and atomically consumed.
+3. [x] Consent records stored and reused within TTL, keyed by `iss/sub` principal composite.
+4. [x] `ClientRegistry.find_rs_by_resource()` inverted index implemented.
+5. [x] Consent page renders correctly for both authorization and delegation
+       surfaces, including when `allowed_token_exchange_targets` is empty.
+6. [x] Deny path redirects with `error=access_denied`.
+7. [x] First-party clients with `require_consent: false` are unaffected.
+8. [x] Tests cover: consent bypass (first-party), consent shown (external),
+       consent reuse within TTL, deny path, delegation panel present/absent.
+
+Additionally implemented beyond the original criteria:
+
+- `scopes_supported` added to the RFC 8414 metadata endpoint, derived from
+  the `DEFAULT_REALM` IDP profile's `scopes` field.
+- `MAX_SCOPES` reduced from 128 to 32 (aligned with production AS norms).
+- Consent page UX: service access card (green accent), delegation card (amber
+  accent), scopes listed; page framing emphasizes delegation rather than
+  identity re-verification to reduce confusion with upstream IDP consent.
 
 ---
 

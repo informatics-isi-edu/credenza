@@ -128,3 +128,47 @@ def test_rfc8414_discovery_url_trailing_slash_stripped():
 def test_rfc8414_discovery_url_nested_path():
     url = rfc8414_discovery_url("https://host/a/b")
     assert url == "https://host/.well-known/oauth-authorization-server/a/b"
+
+
+# ---------------------------------------------------------------------------
+# Tests: scopes_supported
+# ---------------------------------------------------------------------------
+
+def _make_app_with_profiles(default_realm, idp_profiles):
+    a = Flask(__name__)
+    a.config["BASE_URL"] = BASE
+    a.config["DEFAULT_REALM"] = default_realm
+    a.config["OIDC_IDP_PROFILES"] = idp_profiles
+    a.register_blueprint(metadata_blueprint)
+    return a
+
+
+def test_scopes_supported_absent_without_realm(client):
+    body = client.get("/.well-known/oauth-authorization-server").get_json()
+    assert "scopes_supported" not in body
+
+
+def test_scopes_supported_from_default_realm():
+    with _make_app_with_profiles("keycloak", {
+        "keycloak": {"scopes": "openid email profile offline_access"}
+    }).test_client() as c:
+        body = c.get("/.well-known/oauth-authorization-server").get_json()
+    assert body["scopes_supported"] == ["email", "offline_access", "openid", "profile"]
+
+
+def test_scopes_supported_ignores_non_default_realm():
+    with _make_app_with_profiles("keycloak", {
+        "keycloak": {"scopes": "openid email"},
+        "okta":     {"scopes": "openid email profile groups"},
+    }).test_client() as c:
+        body = c.get("/.well-known/oauth-authorization-server").get_json()
+    assert "groups" not in body["scopes_supported"]
+    assert body["scopes_supported"] == ["email", "openid"]
+
+
+def test_scopes_supported_absent_when_realm_has_no_scopes():
+    with _make_app_with_profiles("keycloak", {
+        "keycloak": {}
+    }).test_client() as c:
+        body = c.get("/.well-known/oauth-authorization-server").get_json()
+    assert "scopes_supported" not in body

@@ -43,6 +43,7 @@ from .rest.token import token_blueprint
 from .rest.introspect import introspect_blueprint
 from .rest.metadata import metadata_blueprint
 from .rest.authorize import authorize_blueprint
+from .rest.consent import consent_blueprint
 from .telemetry.audit.logger import init_audit_logger
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker
@@ -132,6 +133,14 @@ def load_config(app):
     logger.debug(f"Registered client authentication adapters: {set(list_adapters().keys())}")
     client_registry_path = app.config.get("CLIENT_REGISTRY_FILE", "config/client_registry.json")
     app.config["CLIENT_REGISTRY"] = load_client_registry(client_registry_path)
+
+    # Optional global consent labels (scope and resource URI display names for the consent page)
+    consent_labels_path = app.config.get("CONSENT_LABELS_FILE", "config/consent_labels.json")
+    if os.path.exists(consent_labels_path):
+        with open(consent_labels_path) as f:
+            app.config["CONSENT_LABELS"] = json.load(f)
+    else:
+        app.config["CONSENT_LABELS"] = {}
 
     # Optional trusted issuers
     trusted_path = app.config.get("TRUSTED_ISSUERS_FILE", "config/oidc_idp_trusted_issuers.json")
@@ -285,6 +294,7 @@ def create_app():
     app.register_blueprint(introspect_blueprint)
     app.register_blueprint(metadata_blueprint)
     app.register_blueprint(authorize_blueprint)
+    app.register_blueprint(consent_blueprint)
     app.register_blueprint(metrics_blueprint)
     if app.config.get("ENABLE_LEGACY_API", False):
         app.register_blueprint(discovery_blueprint)

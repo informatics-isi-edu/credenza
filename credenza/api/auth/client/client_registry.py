@@ -215,6 +215,11 @@ class ClientRecord:
     max_session_ttl_seconds: Optional[int] = DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL
     absolute_session_lifetime_seconds: Optional[int] = DEFAULT_CLIENT_AUTH_MAX_ABSOLUTE_LIFETIME
 
+    # Consent UI fields
+    require_consent: bool = False
+    consent_display_name: str = ""
+    consent_labels: Dict[str, str] = field(default_factory=dict)
+
     # Fingerprint of static client config (computed by loader)
     fingerprint: Optional[str] = None
 
@@ -290,9 +295,13 @@ class ClientRecord:
 class ClientRegistry:
     version: str
     clients: Dict[str, ClientRecord]
+    resource_index: Dict[str, ClientRecord] = field(default_factory=dict)
 
     def get(self, client_id: str) -> Optional[ClientRecord]:  # pragma: no cover
         return self.clients.get(client_id)
+
+    def find_rs_by_resource(self, resource_uri: str) -> Optional[ClientRecord]:
+        return self.resource_index.get(resource_uri)
 
 
 def _validate_adapter_instance(adapter_instance: Any, adapter_class: Type[AdapterInterface], cid: str) -> None:
@@ -491,6 +500,10 @@ def load_client_registry(path: str) -> ClientRegistry:
         # Accept optional configured realm from the spec (use None to derive deterministically)
         input_realm = spec.get("realm")
 
+        consent_labels_spec = spec.get("consent_labels")
+        if not isinstance(consent_labels_spec, dict):
+            consent_labels_spec = {}
+
         cr = ClientRecord(
             client_id=client_id,
             realm=input_realm,
@@ -513,6 +526,9 @@ def load_client_registry(path: str) -> ClientRegistry:
             allowed_token_exchange_targets=list(spec.get("allowed_token_exchange_targets") or []),
             max_session_ttl_seconds=spec.get("max_session_ttl_seconds"),
             absolute_session_lifetime_seconds=spec.get("absolute_session_lifetime_seconds"),
+            require_consent=bool(spec.get("require_consent", False)),
+            consent_display_name=str(spec.get("consent_display_name") or ""),
+            consent_labels={str(k): str(v) for k, v in consent_labels_spec.items()},
         )
 
         # Compute fingerprint for static portions and attach it (dataclasses.replace returns a new instance)
@@ -525,7 +541,18 @@ def load_client_registry(path: str) -> ClientRegistry:
         # store under the authoritative client_id (the JSON key)
         clients[client_id] = cr
 
-    return ClientRegistry(version=str(registry_data.get("version", "0")), clients=clients)
+    # Build resource -> ClientRecord inverted index for consent delegation lookup
+    resource_index: Dict[str, ClientRecord] = {}
+    for cr in clients.values():
+        for r in cr.allowed_resources:
+            if r not in resource_index:
+                resource_index[r] = cr
+
+    return ClientRegistry(
+        version=str(registry_data.get("version", "0")),
+        clients=clients,
+        resource_index=resource_index,
+    )
 
 
 # ---------- DB bootstrap / merge helper sketch (ORM-agnostic) -----------------------

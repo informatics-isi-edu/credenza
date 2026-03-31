@@ -16,10 +16,11 @@
 import logging
 import time
 import uuid
-from secrets import token_urlsafe
+from secrets import token_urlsafe, token_hex
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify, g
 from .helpers import get_cookie_domain, perf_logged
+from .consent import is_consent_needed
 from ..telemetry import audit_event
 from ..api.session.storage.session_store import TRANSIENT_DATA_TTL, SessionType
 from ..api.common.crypto import generate_nonce
@@ -196,6 +197,34 @@ def callback():
             store.update_session(sid, session_data)
 
         if is_oauth_flow:
+            # Consent check (ADR-0002): show consent page if client requires it and no
+            # valid consent record exists for this principal + client/resource combination.
+            client_id = authn_request_ctx["oauth_client_id"]
+            registry = current_app.config.get("CLIENT_REGISTRY")
+            client_rec = registry.get(client_id) if registry else None
+            if client_rec and client_rec.require_consent:
+                iss = userinfo.get("iss", "")
+                principal = f"{iss}/{sub}" if iss else sub
+                resources = authn_request_ctx.get("oauth_resources") or []
+                if is_consent_needed(store, registry, principal, client_id, resources):
+                    pending_key = token_hex(16)
+                    store.set_pending_consent(pending_key, {
+                        "session_id":            sid,
+                        "sub":                   sub,
+                        "principal":             principal,
+                        "client_id":             client_id,
+                        "redirect_uri":          authn_request_ctx["oauth_redirect_uri"],
+                        "oauth_state":           authn_request_ctx.get("oauth_state", ""),
+                        "code_challenge":        authn_request_ctx.get("oauth_code_challenge"),
+                        "code_challenge_method": authn_request_ctx.get("oauth_code_challenge_method"),
+                        "scope":                 authn_request_ctx.get("oauth_scope", ""),
+                        "resources":             resources,
+                        "realm":                 realm,
+                    })
+                    return redirect(
+                        f"{current_app.config['BASE_URL']}/authorize/consent?pending={pending_key}"
+                    )
+
             # OAuth Authorization Code flow: generate code and redirect back to client
             auth_code = token_urlsafe(32)
             code_payload = {

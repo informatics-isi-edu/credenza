@@ -16,6 +16,7 @@ import time
 import enum
 import uuid
 import json
+import hashlib
 import secrets
 import logging
 from dataclasses import dataclass, field, asdict
@@ -26,8 +27,10 @@ from ....telemetry import audit_event
 
 logger = logging.getLogger(__name__)
 
-TRANSIENT_DATA_TTL=900
-SESSION_DEFAULT_ABSOLUTE_LIFETIME_SECONDS = 86400 # 24 hours
+TRANSIENT_DATA_TTL = 900
+PENDING_CONSENT_TTL = 300       # 5 minutes
+CONSENT_DEFAULT_TTL = 7776000   # 90 days
+SESSION_DEFAULT_ABSOLUTE_LIFETIME_SECONDS = 86400  # 24 hours
 
 class SessionType(str, enum.Enum):
     USER = "user"
@@ -463,3 +466,57 @@ class SessionStore:
             return None
 
         return json.loads(code_data)
+
+    # ------------------------------------------------------------------
+    # Consent store operations (ADR-0002)
+    # ------------------------------------------------------------------
+    # Pending consent keys use a random token; consent record keys are
+    # SHA-256 hashes of the principal + client/resource composite to
+    # safely handle arbitrary URIs and iss/sub values.
+
+    def _pending_consent_key(self, token: str) -> str:
+        return f"{self.prefix}consent:pending:{token}"
+
+    def _consent_auth_key(self, principal: str, client_id: str) -> str:
+        h = hashlib.sha256(f"auth\x00{principal}\x00{client_id}".encode()).hexdigest()
+        return f"{self.prefix}consent:auth:{h}"
+
+    def _consent_deleg_key(self, principal: str, rs_resource: str) -> str:
+        h = hashlib.sha256(f"deleg\x00{principal}\x00{rs_resource}".encode()).hexdigest()
+        return f"{self.prefix}consent:deleg:{h}"
+
+    def set_pending_consent(self, token: str, data: dict, ttl: int = PENDING_CONSENT_TTL) -> None:
+        serialized = json.dumps(data, separators=(",", ":"))
+        if self.crypto_codec:
+            serialized = self.crypto_codec.encrypt(serialized)
+        self.backend.setex(self._pending_consent_key(token), serialized, ttl)
+
+    def get_pending_consent(self, token: str) -> Optional[dict]:
+        val = self._decode_backend_value(self.backend.get(self._pending_consent_key(token)))
+        if not val:
+            return None
+        return json.loads(val)
+
+    def get_and_consume_pending_consent(self, token: str) -> Optional[dict]:
+        val = self._decode_backend_value(self.backend.consume(self._pending_consent_key(token)))
+        if not val:
+            return None
+        return json.loads(val)
+
+    def set_consent_auth(self, principal: str, client_id: str, ttl: int = CONSENT_DEFAULT_TTL) -> None:
+        self.backend.setex(self._consent_auth_key(principal, client_id), "1", ttl)
+
+    def get_consent_auth(self, principal: str, client_id: str) -> Optional[str]:
+        val = self.backend.get(self._consent_auth_key(principal, client_id))
+        if not val:
+            return None
+        return val.decode() if isinstance(val, bytes) else val
+
+    def set_consent_deleg(self, principal: str, rs_resource: str, ttl: int = CONSENT_DEFAULT_TTL) -> None:
+        self.backend.setex(self._consent_deleg_key(principal, rs_resource), "1", ttl)
+
+    def get_consent_deleg(self, principal: str, rs_resource: str) -> Optional[str]:
+        val = self.backend.get(self._consent_deleg_key(principal, rs_resource))
+        if not val:
+            return None
+        return val.decode() if isinstance(val, bytes) else val

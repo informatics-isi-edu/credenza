@@ -31,7 +31,7 @@ from ...telemetry import audit_event
 logger = logging.getLogger(__name__)
 
 MAX_RESOURCES = 32
-MAX_SCOPES = 128
+MAX_SCOPES = 32
 
 
 def extract_session_key() -> Tuple[str, bool]:

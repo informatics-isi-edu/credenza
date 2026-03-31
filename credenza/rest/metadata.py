@@ -53,6 +53,12 @@ def oauth_authorization_server_metadata():
     """
     base = current_app.config["BASE_URL"].rstrip("/")
 
+    default_realm = current_app.config.get("DEFAULT_REALM")
+    idp_profiles = current_app.config.get("OIDC_IDP_PROFILES") or {}
+    realm_profile = idp_profiles.get(default_realm) or {} if default_realm else {}
+    scopes_str = realm_profile.get("scopes", "")
+    scopes_supported = sorted({s for s in scopes_str.split() if s})
+
     metadata = {
         "issuer": base,
         "authorization_endpoint": f"{base}/authorize",
@@ -84,6 +90,9 @@ def oauth_authorization_server_metadata():
         ],
         "resource_indicators_supported": True,
     }
+
+    if scopes_supported:
+        metadata["scopes_supported"] = scopes_supported
 
     return Response(
         json.dumps(metadata, indent=2),

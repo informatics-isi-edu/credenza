@@ -599,6 +599,79 @@ def test_validate_resources_escalation_and_default_and_excessive(monkeypatch, ap
         assert resp.status_code == 400
 
 
+def test_client_credentials_resource_missing_no_default_403(monkeypatch, app):
+    """
+    No resource param in request and no default_resources on the client -> 403.
+    Exercises the token_request_resource_missing audit event path.
+    """
+    subject = Subject(provider="dummy", subject_id="svcsub")
+    adapter = DummyAdapter.from_dict({}, "ok-res-miss")
+    monkeypatch.setattr(
+        adapter,
+        "authenticate",
+        lambda *a, **k: AdapterResult(subject=subject, additional_claims={}, auth_context={}),
+    )
+
+    cr = make_client_record(
+        client_id="res-miss",
+        adapter_instance=adapter,
+        allowed_resources=["urn:svc:r1"],
+        default_resources=[],   # no default
+    )
+    monkeypatch.setitem(
+        app.config,
+        "CLIENT_REGISTRY",
+        type("R", (object,), {"get": lambda self, cid: cr})(),
+    )
+
+    with app.test_client() as c:
+        resp = c.post(
+            "/token",
+            data={"client_id": "res-miss",
+                  "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value},
+            # deliberately no 'resource' param
+        )
+    assert resp.status_code == 403
+
+
+def test_client_credentials_scope_excessive_400(monkeypatch, app):
+    """
+    Requesting more than MAX_SCOPES distinct scopes -> 400.
+    Exercises the token_request_scope_excessive audit event path.
+    """
+    subject = Subject(provider="dummy", subject_id="svcsub")
+    adapter = DummyAdapter.from_dict({}, "ok-scope-excess")
+    monkeypatch.setattr(
+        adapter,
+        "authenticate",
+        lambda *a, **k: AdapterResult(subject=subject, additional_claims={}, auth_context={}),
+    )
+
+    many_scopes = [f"scope{i}" for i in range(token_mod.MAX_SCOPES + 1)]
+    cr = make_client_record(
+        client_id="scope-excess",
+        adapter_instance=adapter,
+        allowed_scopes=many_scopes,
+        default_scopes=many_scopes,
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+    )
+    monkeypatch.setitem(
+        app.config,
+        "CLIENT_REGISTRY",
+        type("R", (object,), {"get": lambda self, cid: cr})(),
+    )
+
+    with app.test_client() as c:
+        resp = c.post(
+            "/token",
+            data={"client_id": "scope-excess",
+                  "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+                  "scope": " ".join(many_scopes)},
+        )
+    assert resp.status_code == 400
+
+
 def test_validate_scopes_missing_default_and_violation(monkeypatch, app):
     subject = Subject(provider="dummy", subject_id="svcsub")
     adapter = DummyAdapter.from_dict({}, "ok2")
