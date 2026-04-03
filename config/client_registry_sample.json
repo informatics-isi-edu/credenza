@@ -61,6 +61,31 @@
       }
     },
 
+    "deriva-chatbot": {
+      "desc": "DERIVA Chatbot (public, PKCE-only)",
+      "enabled": true,
+      "public": true,
+      "allowed_grant_types": [
+        "authorization_code"
+      ],
+      "allowed_redirect_uris": [
+        "http://localhost:8001/callback"
+      ],
+      "allowed_resources": [
+        "urn:deriva:rest:service:all",
+        "https://localhost/mcp"
+      ],
+      "allowed_scopes": [
+        "openid"
+      ],
+      "require_consent": true,
+      "consent_display_name": "DERIVA Chatbot Server",
+      "consent_labels": {
+        "https://localhost/mcp": "Connect to the DERIVA MCP Server at this URL"
+      },
+      "max_session_ttl_seconds": 28800
+    },
+
     "aws-deriva-etl-test-ec2": {
       "desc": "AWS EC2 ETL Ingest client (role-based)",
       "enabled": true,

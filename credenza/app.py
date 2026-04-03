@@ -16,7 +16,6 @@
 import os
 import json
 import logging
-from logging.handlers import SysLogHandler
 from pathlib import Path
 from threading import Thread
 from dotenv import dotenv_values
@@ -66,6 +65,7 @@ def load_config(app):
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
         "CREDENZA_STORAGE_BACKEND": "memory",
         "CREDENZA_AUDIT_USE_SYSLOG": "false",
+        "CREDENZA_APP_USE_SYSLOG": "false",
         "CREDENZA_LEGACY_DEFAULT_RESOURCE": "urn:deriva:rest:service:all",
         "CREDENZA_DERIVED_SESSION_MAX_TTL": "1800",
     }
@@ -167,22 +167,33 @@ def load_config(app):
     register_default_hashers()
 
 def init_logging(app):
+    """Configure the credenza app logger.
+
+    Always adds a stderr StreamHandler (for docker logs and local dev).
+    Optionally adds a SysLogHandler on LOCAL1 when CREDENZA_APP_USE_SYSLOG
+    is true, for non-Docker deployments where syslog is the only path to
+    a centralized collector.  In Docker, driver: syslog in compose already
+    forwards stderr, so enabling this would duplicate every app log line.
+    """
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
     logger.addHandler(stream_handler)
+    logger.propagate = False
 
-    syslog_socket = "/dev/log"
-    if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
-        try:
-            sh = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
-            sh.ident = "credenza: "
-            sh.setFormatter(
-                logging.Formatter("[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
-            logger.addHandler(sh)
-            logger.propagate = False
-        except Exception:
-            pass
+    if app.config.get("APP_USE_SYSLOG", False):
+        syslog_socket = "/dev/log"
+        if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
+            from logging.handlers import SysLogHandler
+
+            try:
+                sh = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
+                sh.ident = "credenza: "
+                sh.setFormatter(
+                    logging.Formatter("[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+                logger.addHandler(sh)
+            except Exception:
+                pass
 
     logger.setLevel(logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
