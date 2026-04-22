@@ -300,6 +300,7 @@ def device_callback():
 
     sub = userinfo.get("sub")
     user = userinfo.get("email")
+    logger.info(f"Device login successful for user {user} ({sub}) with session id {session_id} on realm {realm}")
     audit_event("device_login",
                 session_id=session_id,
                 user=user,
@@ -309,7 +310,6 @@ def device_callback():
                 realm=realm,
                 offline_access=offline_granted,
                 refresh_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at, timezone.utc).isoformat())
-    logger.info(f"Device login successful for user {user} ({sub}) with session id {session_id} on realm {realm}")
 
     return render_template_string(SUCCESS_HTML)
 

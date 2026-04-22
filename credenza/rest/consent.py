@@ -304,13 +304,13 @@ def consent_submit():
         "issued_at":             int(time.time()),
     }
     store.set_authorization_code(auth_code, code_payload, ttl=300)
-    audit_event("authorize_code_issued",
+    logger.info("OAuth authorization code issued via consent for client=%s session=%s", client_id, sid)
+    audit_event("authorization_code_issued",
                 session_id=sid,
                 client_id=client_id,
                 sub=pending.get("sub"),
                 realm=realm,
                 via_consent=True)
-    logger.info("OAuth authorization code issued via consent for client=%s session=%s", client_id, sid)
 
     params = {"code": auth_code}
     if oauth_state:

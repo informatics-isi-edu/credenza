@@ -180,13 +180,13 @@ def callback():
 
         sub = userinfo.get("sub")
         user = userinfo.get("email")
+        logger.info(f"Login successful for user {user} ({sub}) with session id {sid} on realm {realm}")
         audit_event("login",
                     session_id=sid,
                     user=user,
                     sub=sub,
                     scopes=get_effective_scopes(session_data),
                     realm=realm)
-        logger.info(f"Login successful for user {user} ({sub}) with session id {sid} on realm {realm}")
 
         if metadata.get("augmentation_deferred", False):
             g.session_key = session_key
@@ -239,15 +239,15 @@ def callback():
                 "issued_at":             int(time.time()),
             }
             store.set_authorization_code(auth_code, code_payload, ttl=300)
-            audit_event("authorize_code_issued",
+            logger.info(
+                f"OAuth authorization code issued for user {user} ({sub}), "
+                f"client={authn_request_ctx['oauth_client_id']}, session={sid}")
+            audit_event("authorization_code_issued",
                         session_id=sid,
                         client_id=authn_request_ctx["oauth_client_id"],
                         user=user,
                         sub=sub,
                         realm=realm)
-            logger.info(
-                f"OAuth authorization code issued for user {user} ({sub}), "
-                f"client={authn_request_ctx['oauth_client_id']}, session={sid}")
             client_state = authn_request_ctx.get("oauth_state", "")
             params = {"code": auth_code}
             if client_state:
@@ -301,8 +301,8 @@ def logout():
     revoke_tokens(sid, session)
     store.delete_session(sid)
 
-    audit_event("logout", session_id=sid, user=user, sub=sub, realm=realm)
     logger.info(f"Logout for user {user} ({sub}) with session id {sid} on realm {realm}.")
+    audit_event("logout", session_id=sid, user=user, sub=sub, realm=realm)
 
     if logout_url:
         if logout_url_params:

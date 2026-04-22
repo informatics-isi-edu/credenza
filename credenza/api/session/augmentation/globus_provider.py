@@ -148,14 +148,14 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
         sub = userinfo.get("sub")
         user = userinfo.get("email")
+        logger.info(
+            f"Session creation from bearer token successful for user {user} ({sub}) with session id {session_id} "
+            f"on realm {realm}.")
         audit_event("session_from_bearer_token",
                     session_id=session_id,
                     user=user,
                     sub=sub,
                     scopes=get_effective_scopes(session_data),
                     realm=realm)
-        logger.info(
-            f"Session creation from bearer token successful for user {user} ({sub}) with session id {session_id} "
-            f"on realm {realm}.")
 
         return session_key, session_data
