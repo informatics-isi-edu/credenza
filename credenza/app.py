@@ -271,8 +271,7 @@ def create_app():
                                 x_host=proxy_depth,
                                 x_port=proxy_depth)
 
-    init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
-                      use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
+    init_audit_logger(use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
     app.config["OIDC_CLIENT_FACTORY"] = OIDCClientFactory(app.config["OIDC_IDP_PROFILES"])
 
     # To encrypt or not to encrypt (session data)
