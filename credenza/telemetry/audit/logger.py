@@ -17,7 +17,7 @@ import os
 import datetime
 import logging
 from logging import StreamHandler
-from logging.handlers import SysLogHandler, TimedRotatingFileHandler
+from logging.handlers import SysLogHandler
 from pythonjsonlogger import json
 from flask import has_request_context, request
 from ...api.common import client_ip
@@ -25,8 +25,8 @@ from ...api.common import client_ip
 logger = logging.getLogger(__name__)
 svc_logger = logging.getLogger("credenza")
 
-def init_audit_logger(filename="credenza-audit.log", use_syslog=False):
-    log_handler = StreamHandler() # last-ditch sanity fallback
+def init_audit_logger(use_syslog=False):
+    log_handler = StreamHandler()  # default: stderr
 
     # the use of '/dev/log' causes SysLogHandler to assume the availability of Unix sockets
     syslog_socket = "/dev/log"
@@ -34,25 +34,15 @@ def init_audit_logger(filename="credenza-audit.log", use_syslog=False):
         try:
             log_handler = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
             log_handler.ident = 'credenza-audit: '
-            logger.propagate = False
         except Exception as e:
-            # fallback to the default logger
-            svc_logger.warning(f"Failed to initialize syslog logger, falling back to default audit log handler: {e}")
-            use_syslog = False
-
-    # fallback to TimedRotatingFileHandler if syslog not available/selected
-    if not use_syslog:
-        try:
-            log_handler = TimedRotatingFileHandler(filename=filename, when="D", interval=1, backupCount=0)
-        except Exception as e:
-            # fallback to the last-ditch stream handler
-            svc_logger.warning(
-                f"Failed to initialize {log_handler.__class__.__name__}, falling back to logging.StreamHandler: {e}")
+            # fallback to stderr
+            svc_logger.warning(f"Failed to initialize syslog audit handler, falling back to stderr: {e}")
 
     formatter = json.JsonFormatter("{message}", style="{", rename_fields={"message": "event"})
     log_handler.setFormatter(formatter)
     logger.addHandler(log_handler)
     logger.setLevel(logging.INFO)
+    logger.propagate = False  # prevent double-emit through the root handler
 
 def audit_event(event, **kwargs):
     extra = {}
