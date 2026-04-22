@@ -73,7 +73,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
             try:
                 headers = {"Authorization": f"Bearer {access_token}"}
-                resp = requests.get(self.GLOBUS_GROUPS_URL, headers=headers, timeout=5)
+                resp = requests.get(self.GLOBUS_GROUPS_URL, headers=headers, timeout=15)
                 resp.raise_for_status()
                 # logger.debug(f"Globus groups response: %s" % resp.json())
                 groups = [
