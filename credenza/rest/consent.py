@@ -73,7 +73,7 @@ _CONSENT_TEMPLATE = """\
       margin: 0 0 8px 0;
     }
     ul { margin: 0; padding-left: 18px; }
-    li { margin-bottom: 4px; font-size: 0.875em; line-height: 1.45; }
+    li { margin-bottom: 4px; font-size: 0.875em; line-height: 1.45; overflow-wrap: break-word; }
     li strong { color: #111; }
     li span { color: #555; }
     .service-section {
