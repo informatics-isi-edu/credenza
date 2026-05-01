@@ -365,6 +365,151 @@ def strtobool (val):  # pragma: no cover
     else:
         raise ValueError("invalid truth value %r" % (val,))
 
+def enrich_userinfo_from_endpoint(
+    client,
+    access_token: str,
+    userinfo: dict,
+    fallback_claims: list,
+    realm: str,
+    sub: str,
+) -> dict:
+    """Fill missing identity claims by calling the IDP userinfo endpoint.
+
+    Called when the ID token is missing one or more claims listed in
+    fallback_claims. ID token claims take precedence -- only absent or empty
+    claims are filled from the endpoint response.
+
+    On endpoint failure, or if required claims remain missing after the merge,
+    emits an audit warning and returns the session in degraded form. Never
+    aborts the login.
+
+    Args:
+        client: OIDCClient for the realm.
+        access_token: Access token from the IDP token exchange.
+        userinfo: Claims dict from the validated ID token (mutated in place).
+        fallback_claims: Claim names that must be present (raw JWT claim names).
+        realm: Realm name (for audit events).
+        sub: Subject identifier (for audit events).
+
+    Returns:
+        Enriched userinfo dict.
+    """
+    missing_before = [c for c in fallback_claims if not userinfo.get(c)]
+
+    try:
+        endpoint_data = client.fetch_userinfo(access_token)
+    except Exception as exc:
+        logger.warning(
+            "userinfo fallback failed for realm=%s sub=%s missing=%s: %s",
+            realm, sub, missing_before, exc,
+        )
+        audit_event(
+            "userinfo_fallback_failed",
+            realm=realm,
+            sub=sub,
+            missing_claims=missing_before,
+            error=str(exc),
+        )
+        return userinfo
+
+    filled = []
+    for k, v in endpoint_data.items():
+        if not userinfo.get(k):
+            userinfo[k] = v
+            filled.append(k)
+
+    logger.debug(
+        "userinfo fallback merged claims for realm=%s sub=%s filled=%s",
+        realm, sub, filled,
+    )
+
+    missing_after = [c for c in fallback_claims if not userinfo.get(c)]
+    if missing_after:
+        logger.warning(
+            "userinfo fallback incomplete for realm=%s sub=%s still_missing=%s",
+            realm, sub, missing_after,
+        )
+        audit_event(
+            "userinfo_fallback_incomplete",
+            realm=realm,
+            sub=sub,
+            missing_claims=missing_after,
+        )
+    else:
+        logger.info(
+            "userinfo fallback filled claims for realm=%s sub=%s filled=%s",
+            realm, sub, missing_before,
+        )
+        audit_event(
+            "userinfo_fallback_filled",
+            realm=realm,
+            sub=sub,
+            filled_claims=filled,
+        )
+
+    return userinfo
+
+
+# Key claims expected when each standard OIDC scope is requested.
+# Optional profile fields (birthdate, picture, website, etc.) are excluded to
+# avoid spurious userinfo calls for IDPs that do not populate them.
+_SCOPE_EXPECTED_CLAIMS = {
+    "email":   ["email"],
+    "profile": ["name", "preferred_username"],
+}
+
+
+def get_missing_scope_claims(
+    scopes_str: str,
+    userinfo: dict,
+    scope_expected_claims: Optional[dict] = None,
+) -> list:
+    """Return key claims expected from scopes_str that are absent in userinfo.
+
+    Used to decide whether a userinfo endpoint call is warranted after ID token
+    validation. Only checks the claims listed in _SCOPE_EXPECTED_CLAIMS; unknown
+    or IDP-internal scopes (URN scopes, resource URI scopes) are silently skipped.
+
+    scope_expected_claims is shallow-merged over the global defaults: only the
+    scopes it declares are affected, all others retain their global defaults.
+    This lets an IDP profile override or extend a single scope's expected claims
+    (or add a custom scope) without redeclaring the rest.
+    """
+    effective = _SCOPE_EXPECTED_CLAIMS if not scope_expected_claims \
+        else {**_SCOPE_EXPECTED_CLAIMS, **scope_expected_claims}
+    missing = []
+    seen: set = set()
+    for scope in scopes_str.split():
+        for claim in effective.get(scope, []):
+            if claim not in seen and not userinfo.get(claim):
+                missing.append(claim)
+                seen.add(claim)
+    return missing
+
+
+def check_client_scope_coverage(
+    issuable_scopes: list,
+    clients: dict,
+) -> list:
+    """Check that each client's allowed_scopes are covered by issuable_scopes.
+
+    Returns a list of warning strings and also emits each via logger.warning.
+    Only called when the IDP profile explicitly declares issuable_scopes.
+    """
+    issuable_set = set(issuable_scopes)
+    warnings = []
+    for client_id, client_rec in clients.items():
+        for scope in (client_rec.allowed_scopes or []):
+            if scope not in issuable_set:
+                msg = (
+                    f"Client {client_id}: allowed_scope {scope!r} is not in issuable_scopes "
+                    f"and may not be deliverable to clients"
+                )
+                logger.warning(msg)
+                warnings.append(msg)
+    return warnings
+
+
 def is_transient_request_error(e): # pragma: no cover
     if isinstance(e, (Timeout, ConnectionError)):
         return True

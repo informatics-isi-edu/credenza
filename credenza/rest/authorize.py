@@ -140,6 +140,9 @@ def authorize():
     nonce = generate_nonce()
     callback_uri = f"{current_app.config['BASE_URL']}/callback"
 
+    # oidc_client.scope is the IDP-plane scope from the profile (e.g. Globus URN scopes).
+    # It is independent of oauth_scope (the client-requested scope stored below).
+    # The IDP profile must be configured as a superset of what any registered client may request.
     auth_url, _auth_state, code_verifier = oidc_client.create_authorization_url(
         use_pkce=current_app.config.get("ENABLE_PKCE", True),
         state=oidc_state,

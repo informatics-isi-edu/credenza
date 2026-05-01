@@ -172,3 +172,31 @@ def test_scopes_supported_absent_when_realm_has_no_scopes():
     }).test_client() as c:
         body = c.get("/.well-known/oauth-authorization-server").get_json()
     assert "scopes_supported" not in body
+
+
+def test_scopes_supported_prefers_issuable_scopes_over_scopes():
+    with _make_app_with_profiles("globus", {
+        "globus": {
+            "scopes": "openid email profile urn:globus:auth:scope:groups.api.globus.org:view_my_groups",
+            "issuable_scopes": ["openid", "email", "profile"],
+        }
+    }).test_client() as c:
+        body = c.get("/.well-known/oauth-authorization-server").get_json()
+    assert body["scopes_supported"] == ["email", "openid", "profile"]
+    assert not any("urn:" in s for s in body["scopes_supported"])
+
+
+def test_scopes_supported_falls_back_to_scopes_when_issuable_absent():
+    with _make_app_with_profiles("keycloak", {
+        "keycloak": {"scopes": "openid email profile"}
+    }).test_client() as c:
+        body = c.get("/.well-known/oauth-authorization-server").get_json()
+    assert body["scopes_supported"] == ["email", "openid", "profile"]
+
+
+def test_scopes_supported_issuable_scopes_empty_list_omits_field():
+    with _make_app_with_profiles("keycloak", {
+        "keycloak": {"scopes": "openid email", "issuable_scopes": []}
+    }).test_client() as c:
+        body = c.get("/.well-known/oauth-authorization-server").get_json()
+    assert "scopes_supported" not in body

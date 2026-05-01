@@ -89,6 +89,7 @@ token lifecycle across the deployment.
 * #### [ADR-0003: mTLS Client Authentication](docs/ADR-0003-mtls-client-auth.md) — RFC 8705 mutual TLS adapter
 * #### [ADR-0004: private_key_jwt Client Authentication](docs/ADR-0004-private-key-jwt-client-auth.md) — RFC 7523 asymmetric JWT adapter (blue-sky)
 * #### [ADR-0005: NIH-RAS Integration](docs/ADR-0005-nih-ras-integration.md) — NIH RAS IDP support and GA4GH Passport/Visa session augmentation for controlled-access biomedical data
+* #### [ADR-0006: Dependent Token Vending](docs/ADR-0006-dependent-token-vending.md) — secure client retrieval of upstream auxiliary tokens (e.g., Globus dependent tokens) via token exchange
 
 ### Project Status
 

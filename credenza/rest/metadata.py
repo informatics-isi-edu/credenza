@@ -56,8 +56,11 @@ def oauth_authorization_server_metadata():
     default_realm = current_app.config.get("DEFAULT_REALM")
     idp_profiles = current_app.config.get("OIDC_IDP_PROFILES") or {}
     realm_profile = idp_profiles.get(default_realm) or {} if default_realm else {}
-    scopes_str = realm_profile.get("scopes", "")
-    scopes_supported = sorted({s for s in scopes_str.split() if s})
+    if "issuable_scopes" in realm_profile:
+        scopes_supported = sorted(set(realm_profile["issuable_scopes"]))
+    else:
+        scopes_str = realm_profile.get("scopes", "")
+        scopes_supported = sorted({s for s in scopes_str.split() if s})
 
     metadata = {
         "issuer": base,

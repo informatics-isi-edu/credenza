@@ -30,6 +30,7 @@ from .api.auth.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
 from .api.common.claim_mapper import build_realm_claim_maps
+from .api.common.util import check_client_scope_coverage
 from .api.common.rate_limit import FixedWindowJitterLimiter
 from .api.common.crypto import AESGCMCodec
 from .api.common.crypto import register_default_hashers
@@ -133,6 +134,13 @@ def load_config(app):
     logger.debug(f"Registered client authentication adapters: {set(list_adapters().keys())}")
     client_registry_path = app.config.get("CLIENT_REGISTRY_FILE", "config/client_registry.json")
     app.config["CLIENT_REGISTRY"] = load_client_registry(client_registry_path)
+
+    _default_realm = app.config.get("DEFAULT_REALM")
+    if _default_realm:
+        _realm_profile = app.config["OIDC_IDP_PROFILES"].get(_default_realm, {})
+        _issuable = _realm_profile.get("issuable_scopes")
+        if _issuable is not None:
+            check_client_scope_coverage(_issuable, app.config["CLIENT_REGISTRY"].clients)
 
     # Optional global consent labels (scope and resource URI display names for the consent page)
     consent_labels_path = app.config.get("CONSENT_LABELS_FILE", "config/consent_labels.json")

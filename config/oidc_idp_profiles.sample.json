@@ -28,6 +28,10 @@
       "redirect_name": "homepage."
     },
     "scopes": "openid email profile urn:globus:auth:scope:groups.api.globus.org:view_my_groups_and_memberships https://auth.globus.org/scopes/identifiers.fair-research.org/writer",
+    "issuable_scopes": ["openid", "email", "profile"],
+    "scope_expected_claims": {
+      "profile": ["name", "preferred_username", "identity_set"]
+    },
     "consent_labels": {
       "urn:globus:auth:scope:groups.api.globus.org:view_my_groups_and_memberships": "Access your Globus group memberships",
       "https://auth.globus.org/scopes/identifiers.fair-research.org/writer": "Create and manage FAIR Research identifiers",

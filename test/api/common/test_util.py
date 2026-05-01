@@ -385,3 +385,226 @@ def test_validate_resource_string_allows_http_for_localhost_and_127(host):
 def test_validate_resource_string_rejects_http_for_non_localhost():
     with pytest.raises(ValueError, match="network resource URIs must use https"):
         validate_resource_string("http://example.com/path")
+
+
+# ---------------------------------------------------------------------------
+# enrich_userinfo_from_endpoint
+# ---------------------------------------------------------------------------
+
+from credenza.api.common.util import enrich_userinfo_from_endpoint, check_client_scope_coverage, get_missing_scope_claims
+from credenza.api.auth.client.client_registry import ClientRecord
+
+
+class _FakeClient:
+    def __init__(self, response=None, exc=None):
+        self._response = response
+        self._exc = exc
+        self.calls = []
+
+    def fetch_userinfo(self, access_token):
+        self.calls.append(access_token)
+        if self._exc is not None:
+            raise self._exc
+        return self._response
+
+
+def test_enrich_fills_missing_claims(monkeypatch):
+    events = []
+    monkeypatch.setattr(util, "audit_event", lambda e, **kw: events.append((e, kw)))
+    client = _FakeClient(response={"email": "u@example.com", "name": "User One"})
+    userinfo = {"sub": "u1"}
+    result = enrich_userinfo_from_endpoint(
+        client, "tok", userinfo, ["email", "name"], realm="globus", sub="u1"
+    )
+    assert result["email"] == "u@example.com"
+    assert result["name"] == "User One"
+    assert not any(e == "userinfo_fallback_failed" for e, _ in events)
+    assert not any(e == "userinfo_fallback_incomplete" for e, _ in events)
+    filled_ev = next((kw for e, kw in events if e == "userinfo_fallback_filled"), None)
+    assert filled_ev is not None
+    assert set(filled_ev["filled_claims"]) == {"email", "name"}
+
+
+def test_enrich_does_not_overwrite_existing_claims(monkeypatch):
+    events = []
+    monkeypatch.setattr(util, "audit_event", lambda e, **kw: events.append((e, kw)))
+    client = _FakeClient(response={"email": "other@example.com", "name": "Other"})
+    userinfo = {"sub": "u1", "email": "original@example.com"}
+    result = enrich_userinfo_from_endpoint(
+        client, "tok", userinfo, ["email", "name"], realm="globus", sub="u1"
+    )
+    assert result["email"] == "original@example.com"
+    assert result["name"] == "Other"
+
+
+def test_enrich_endpoint_failure_emits_audit_and_returns_original(monkeypatch):
+    events = []
+    monkeypatch.setattr(util, "audit_event", lambda e, **kw: events.append((e, kw)))
+    client = _FakeClient(exc=RuntimeError("connection refused"))
+    userinfo = {"sub": "u1"}
+    result = enrich_userinfo_from_endpoint(
+        client, "tok", userinfo, ["email"], realm="globus", sub="u1"
+    )
+    assert result is userinfo
+    assert result.get("email") is None
+    assert any(e == "userinfo_fallback_failed" for e, _ in events)
+    failed = next(kw for e, kw in events if e == "userinfo_fallback_failed")
+    assert failed["realm"] == "globus"
+    assert "email" in failed["missing_claims"]
+    assert "connection refused" in failed["error"]
+
+
+def test_enrich_incomplete_after_fallback_emits_audit_warning(monkeypatch):
+    events = []
+    monkeypatch.setattr(util, "audit_event", lambda e, **kw: events.append((e, kw)))
+    client = _FakeClient(response={"name": "User One"})
+    userinfo = {"sub": "u1"}
+    result = enrich_userinfo_from_endpoint(
+        client, "tok", userinfo, ["email", "name"], realm="globus", sub="u1"
+    )
+    assert result["name"] == "User One"
+    assert result.get("email") is None
+    assert any(e == "userinfo_fallback_incomplete" for e, _ in events)
+    incomplete = next(kw for e, kw in events if e == "userinfo_fallback_incomplete")
+    assert incomplete["missing_claims"] == ["email"]
+
+
+# ---------------------------------------------------------------------------
+# get_missing_scope_claims
+# ---------------------------------------------------------------------------
+
+def test_missing_scope_claims_email_absent():
+    assert get_missing_scope_claims("openid email", {"sub": "u1"}) == ["email"]
+
+
+def test_missing_scope_claims_email_present():
+    assert get_missing_scope_claims("openid email", {"sub": "u1", "email": "u@x.com"}) == []
+
+
+def test_missing_scope_claims_profile_both_missing():
+    result = get_missing_scope_claims("openid profile", {"sub": "u1"})
+    assert "name" in result
+    assert "preferred_username" in result
+
+
+def test_missing_scope_claims_profile_partial():
+    result = get_missing_scope_claims("openid profile", {"sub": "u1", "name": "Alice"})
+    assert result == ["preferred_username"]
+
+
+def test_missing_scope_claims_openid_only_never_triggers():
+    assert get_missing_scope_claims("openid", {"sub": "u1"}) == []
+
+
+def test_missing_scope_claims_urn_scope_ignored():
+    assert get_missing_scope_claims(
+        "openid urn:globus:auth:scope:groups.api.globus.org:view_my_groups", {"sub": "u1"}
+    ) == []
+
+
+def test_missing_scope_claims_empty_scopes_string():
+    assert get_missing_scope_claims("", {"sub": "u1"}) == []
+
+
+def test_missing_scope_claims_no_duplicates_across_scopes():
+    # email requested via two different scope tokens (hypothetically)
+    result = get_missing_scope_claims("email email", {"sub": "u1"})
+    assert result.count("email") == 1
+
+
+def test_missing_scope_claims_all_present_returns_empty():
+    userinfo = {"sub": "u1", "email": "u@x.com", "name": "Alice", "preferred_username": "alice"}
+    assert get_missing_scope_claims("openid email profile", userinfo) == []
+
+
+def test_missing_scope_claims_override_replaces_scope_entry():
+    # Override profile to only require identity_set; name/preferred_username no longer checked.
+    overrides = {"profile": ["identity_set"]}
+    result = get_missing_scope_claims("openid profile", {"sub": "u1"}, overrides)
+    assert result == ["identity_set"]
+    assert "name" not in result
+    assert "preferred_username" not in result
+
+
+def test_missing_scope_claims_override_unaffected_scopes_use_defaults():
+    # Override only touches profile; email still uses the global default.
+    overrides = {"profile": ["identity_set"]}
+    result = get_missing_scope_claims("openid email profile", {"sub": "u1"}, overrides)
+    assert "email" in result
+    assert "identity_set" in result
+
+
+def test_missing_scope_claims_override_adds_custom_scope():
+    # A custom IDP scope not in the global defaults can be declared via override.
+    overrides = {"groups": ["group_membership"]}
+    result = get_missing_scope_claims("openid groups", {"sub": "u1"}, overrides)
+    assert result == ["group_membership"]
+
+
+def test_missing_scope_claims_empty_override_uses_defaults():
+    result = get_missing_scope_claims("openid email", {"sub": "u1"}, {})
+    assert result == ["email"]
+
+
+def test_missing_scope_claims_override_none_uses_defaults():
+    result = get_missing_scope_claims("openid email", {"sub": "u1"}, None)
+    assert result == ["email"]
+
+
+# ---------------------------------------------------------------------------
+# check_client_scope_coverage
+# ---------------------------------------------------------------------------
+
+def _make_rec(client_id, allowed_scopes):
+    return ClientRecord(client_id=client_id, allowed_scopes=allowed_scopes)
+
+
+def test_scope_coverage_no_warnings_when_all_covered():
+    clients = {
+        "app": _make_rec("app", ["openid", "email", "profile"]),
+    }
+    warnings = check_client_scope_coverage(["openid", "email", "profile"], clients)
+    assert warnings == []
+
+
+def test_scope_coverage_warns_for_uncovered_scope():
+    clients = {
+        "app": _make_rec("app", ["openid", "email", "groups"]),
+    }
+    warnings = check_client_scope_coverage(["openid", "email"], clients)
+    assert len(warnings) == 1
+    assert "groups" in warnings[0]
+    assert "app" in warnings[0]
+
+
+def test_scope_coverage_warns_for_uri_scope_not_in_issuable():
+    clients = {
+        "svc": _make_rec("svc", ["openid", "https://myapp.example.com/read"]),
+    }
+    warnings = check_client_scope_coverage(["openid"], clients)
+    assert len(warnings) == 1
+    assert "https://myapp.example.com/read" in warnings[0]
+
+
+def test_scope_coverage_multiple_clients_multiple_warnings():
+    clients = {
+        "a": _make_rec("a", ["openid", "offline_access"]),
+        "b": _make_rec("b", ["openid", "groups"]),
+    }
+    warnings = check_client_scope_coverage(["openid"], clients)
+    assert len(warnings) == 2
+
+
+def test_scope_coverage_empty_allowed_scopes_no_warnings():
+    clients = {
+        "app": _make_rec("app", []),
+        "svc": _make_rec("svc", None),
+    }
+    warnings = check_client_scope_coverage(["openid", "email"], clients)
+    assert warnings == []
+
+
+def test_scope_coverage_empty_clients_no_warnings():
+    warnings = check_client_scope_coverage(["openid", "email"], {})
+    assert warnings == []
+

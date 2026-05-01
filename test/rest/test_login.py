@@ -24,12 +24,17 @@ from credenza.api.session.storage.session_store import TRANSIENT_DATA_TTL
 from credenza.api.auth.oidc_client import OIDCClient
 from credenza.api.session.storage.session_store import SessionData, SessionType
 from credenza.rest.login import callback
+import credenza.api.common.util as _util
 
 class StubOIDCClient:
-    def __init__(self, *, tokens, userinfo, scope="openid email profile"):
+    def __init__(self, *, tokens, userinfo, scope="openid email profile",
+                 userinfo_endpoint_data=None, userinfo_endpoint_exc=None):
         self.scope = scope
         self._tokens = tokens
         self._userinfo = userinfo
+        self._userinfo_endpoint_data = userinfo_endpoint_data
+        self._userinfo_endpoint_exc = userinfo_endpoint_exc
+        self.userinfo_fetch_calls = []
         self.logout_url = "https://idp/logout"
 
     def create_authorization_url(self, **kwargs):
@@ -41,6 +46,12 @@ class StubOIDCClient:
 
     def validate_id_token(self, id_token, nonce):
         return self._userinfo
+
+    def fetch_userinfo(self, access_token):
+        self.userinfo_fetch_calls.append(access_token)
+        if self._userinfo_endpoint_exc is not None:
+            raise self._userinfo_endpoint_exc
+        return self._userinfo_endpoint_data or {}
 
 class _StubClientRaises:
     """OIDC client whose token exchange always raises."""
@@ -346,5 +357,126 @@ def test_callback_token_exchange_non_transient_deletes_ctx(client, app, store, m
 
     # Context should be gone due to finally-block deletion on non-transient errors
     assert store.get_authn_request_ctx(state) is None
+
+
+# ---------------------------------------------------------------------------
+# userinfo endpoint fallback tests
+# ---------------------------------------------------------------------------
+
+def _setup_fallback_callback(app, store, stub, monkeypatch):
+    """Store authn_request_ctx and wire the stub client; return state."""
+    state = uuid.uuid4().hex
+    _store_ctx(store, app, state)
+    monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client", lambda _realm: stub)
+    provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
+    monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
+    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
+    return state
+
+
+def test_callback_userinfo_fallback_fills_missing_claims(client, app, store, monkeypatch):
+    # IDP profile requests email+profile; ID token is sparse; endpoint fills claims.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {"scopes": "openid email profile"}
+    try:
+        stub = StubOIDCClient(
+            tokens={"id_token": "id", "access_token": "acc", "scope": "openid email profile"},
+            userinfo={"sub": "u1", "iss": "https://issuer", "aud": ["cid"]},
+            userinfo_endpoint_data={"email": "u1@example.com", "name": "User One"},
+        )
+        state = _setup_fallback_callback(app, store, stub, monkeypatch)
+        resp = client.get("/callback", query_string={"code": "c", "state": state})
+        assert resp.status_code == 302
+        cookie_val = resp.headers["Set-Cookie"].split(";")[0].split("=", 1)[1]
+        _, session = store.get_session_by_session_key(cookie_val)
+        assert session.userinfo["email"] == "u1@example.com"
+        assert session.userinfo["name"] == "User One"
+        assert stub.userinfo_fetch_calls == ["acc"]
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_callback_userinfo_fallback_not_called_when_claims_present(client, app, store, monkeypatch):
+    # IDP profile requests email+profile; ID token already has the expected claims.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {"scopes": "openid email profile"}
+    try:
+        stub = StubOIDCClient(
+            tokens={"id_token": "id", "access_token": "acc", "scope": "openid email profile"},
+            userinfo={"sub": "u1", "email": "u1@example.com", "name": "User One",
+                      "preferred_username": "u1", "iss": "https://issuer", "aud": ["cid"]},
+        )
+        state = _setup_fallback_callback(app, store, stub, monkeypatch)
+        resp = client.get("/callback", query_string={"code": "c", "state": state})
+        assert resp.status_code == 302
+        assert stub.userinfo_fetch_calls == []
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_callback_userinfo_fallback_not_called_with_skip_flag(client, app, store, monkeypatch):
+    # skip_userinfo_fallback: true suppresses the call even when claims are missing.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {
+        "scopes": "openid email profile",
+        "skip_userinfo_fallback": True,
+    }
+    try:
+        stub = StubOIDCClient(
+            tokens={"id_token": "id", "access_token": "acc", "scope": "openid email profile"},
+            userinfo={"sub": "u1", "iss": "https://issuer", "aud": ["cid"]},
+        )
+        state = _setup_fallback_callback(app, store, stub, monkeypatch)
+        resp = client.get("/callback", query_string={"code": "c", "state": state})
+        assert resp.status_code == 302
+        assert stub.userinfo_fetch_calls == []
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_callback_userinfo_fallback_uses_scope_expected_claims_override(client, app, store, monkeypatch):
+    # scope_expected_claims in profile overrides global defaults for that scope.
+    # Profile overrides profile scope to require identity_set instead of name/preferred_username.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {
+        "scopes": "openid profile",
+        "scope_expected_claims": {"profile": ["identity_set"]},
+    }
+    try:
+        stub = StubOIDCClient(
+            tokens={"id_token": "id", "access_token": "acc", "scope": "openid profile"},
+            userinfo={"sub": "u1", "name": "Alice", "preferred_username": "alice",
+                      "iss": "https://issuer", "aud": ["cid"]},
+            userinfo_endpoint_data={"identity_set": [{"sub": "u1"}]},
+        )
+        state = _setup_fallback_callback(app, store, stub, monkeypatch)
+        resp = client.get("/callback", query_string={"code": "c", "state": state})
+        assert resp.status_code == 302
+        # identity_set was missing so fetch_userinfo was called despite name/preferred_username present
+        assert stub.userinfo_fetch_calls == ["acc"]
+        cookie_val = resp.headers["Set-Cookie"].split(";")[0].split("=", 1)[1]
+        _, session = store.get_session_by_session_key(cookie_val)
+        assert session.userinfo.get("identity_set") == [{"sub": "u1"}]
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_callback_userinfo_fallback_failure_creates_degraded_session(client, app, store, monkeypatch):
+    # Endpoint raises; session is still created with whatever the ID token had.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {"scopes": "openid email profile"}
+    audit_events = []
+    monkeypatch.setattr(_util, "audit_event", lambda e, **kw: audit_events.append((e, kw)))
+    try:
+        stub = StubOIDCClient(
+            tokens={"id_token": "id", "access_token": "acc", "scope": "openid email profile"},
+            userinfo={"sub": "u1", "iss": "https://issuer", "aud": ["cid"]},
+            userinfo_endpoint_exc=RuntimeError("network error"),
+        )
+        state = _setup_fallback_callback(app, store, stub, monkeypatch)
+        resp = client.get("/callback", query_string={"code": "c", "state": state})
+        assert resp.status_code == 302
+        cookie_val = resp.headers["Set-Cookie"].split(";")[0].split("=", 1)[1]
+        _, session = store.get_session_by_session_key(cookie_val)
+        assert session is not None
+        assert session.userinfo.get("email") is None
+        assert any(e == "userinfo_fallback_failed" for e, _ in audit_events)
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
 
 

@@ -28,6 +28,8 @@ from ..api.common.util import (
     get_current_session,
     get_effective_scopes,
     augment_session,
+    enrich_userinfo_from_endpoint,
+    get_missing_scope_claims,
     revoke_tokens,
     safe_referrer,
     is_transient_request_error
@@ -158,6 +160,31 @@ def callback():
             msg = "Unable to validate id_token"
             logger.error(f"{msg}: {e}")
             abort(400, description=msg)
+
+        # Fallback to IDP userinfo endpoint if the ID token is missing key claims
+        # for the scopes that were requested. Fires automatically; opt out per
+        # realm with skip_userinfo_fallback: true in the IDP profile. Never aborts
+        # -- the session is created in degraded form if the endpoint also fails.
+        _profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
+        if not _profile.get("skip_userinfo_fallback"):
+            _missing = get_missing_scope_claims(
+                _profile.get("scopes", ""),
+                userinfo,
+                _profile.get("scope_expected_claims"),
+            )
+            if _missing:
+                logger.debug(
+                    "userinfo fallback triggered for realm=%s sub=%s missing=%s",
+                    realm, userinfo.get("sub"), _missing,
+                )
+                userinfo = enrich_userinfo_from_endpoint(
+                    client,
+                    tokens.get("access_token"),
+                    userinfo,
+                    _missing,
+                    realm=realm,
+                    sub=userinfo.get("sub"),
+                )
 
         # Augment the session, if applicable
         userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
