@@ -122,14 +122,6 @@ def load_config(app):
     else:
         app.config["OIDC_IDP_PROFILES"] = {}
 
-    # Optional service authentication (M2M) config
-    service_auth_path = app.config.get("SERVICE_AUTH_FILE", "config/service_auth.json")
-    if os.path.exists(service_auth_path):
-        with open(service_auth_path) as f:
-            app.config["SERVICE_AUTH"] = json.load(f)
-    else:
-        app.config["SERVICE_AUTH"] = {}
-
     # Optional client registry (OAuth2/RS/M2M) config
     logger.debug(f"Registered client authentication adapters: {set(list_adapters().keys())}")
     client_registry_path = app.config.get("CLIENT_REGISTRY_FILE", "config/client_registry.json")
@@ -177,18 +169,12 @@ def load_config(app):
 def init_logging(app):
     """Configure the credenza app logger.
 
-    Always adds a stderr StreamHandler (for docker logs and local dev).
-    Optionally adds a SysLogHandler on LOCAL1 when CREDENZA_APP_USE_SYSLOG
-    is true, for non-Docker deployments where syslog is the only path to
-    a centralized collector.  In Docker, driver: syslog in compose already
-    forwards stderr, so enabling this would duplicate every app log line.
+    Uses syslog (LOCAL1) when CREDENZA_APP_USE_SYSLOG is true and /dev/log is
+    accessible. Falls back to a stderr StreamHandler when syslog is disabled or
+    unavailable (local dev, Docker without rsyslog). Never adds both: that would
+    duplicate every log line when mod_wsgi also forwards stderr to syslog.
     """
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
-    logger.addHandler(stream_handler)
-    logger.propagate = False
-
+    syslog_active = False
     if app.config.get("APP_USE_SYSLOG", True):
         syslog_socket = "/dev/log"
         if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
@@ -200,9 +186,17 @@ def init_logging(app):
                 sh.setFormatter(
                     logging.Formatter("[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
                 logger.addHandler(sh)
+                syslog_active = True
             except Exception:
                 pass
 
+    if not syslog_active:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+        logger.addHandler(stream_handler)
+
+    logger.propagate = False
     logger.setLevel(logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
 def load_serialized_kwargs(input_kwargs):
