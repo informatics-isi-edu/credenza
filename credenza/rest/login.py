@@ -58,7 +58,6 @@ def login():
     logger.debug("Login referrer: %s", referrer)
 
     sid, session = get_current_session(dont_abort=True)
-    logger.debug(f"sid: {sid}, session: {session}")
     if sid and session:
         return redirect(referrer)
 
