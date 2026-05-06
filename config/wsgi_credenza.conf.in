@@ -3,9 +3,8 @@ AllowEncodedSlashes On
 
 # RFC 8414 Section 2: for an issuer with a path prefix (https://host/authn),
 # the spec-compliant discovery URL is /.well-known/oauth-authorization-server/authn
-# (at the host root, not under the application prefix). Map it to the Flask handler.
-RewriteEngine On
-RewriteRule ^/.well-known/oauth-authorization-server/authn$ /authn/.well-known/oauth-authorization-server [PT,L]
+# (at the host root, not under the application prefix). Redirect to the Flask handler.
+Redirect 302 /.well-known/oauth-authorization-server/authn /authn/.well-known/oauth-authorization-server
 
 WSGIPythonOptimize 1
 WSGIDaemonProcess @DAEMONUSER@ processes=1 threads=4 user=@DAEMONUSER@ maximum-requests=2000

@@ -65,8 +65,8 @@ def load_config(app):
         "CREDENZA_ENABLE_REFRESH_WORKER": "true",
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
         "CREDENZA_STORAGE_BACKEND": "memory",
-        "CREDENZA_AUDIT_USE_SYSLOG": "false",
-        "CREDENZA_APP_USE_SYSLOG": "false",
+        "CREDENZA_AUDIT_USE_SYSLOG": "true",
+        "CREDENZA_APP_USE_SYSLOG": "true",
         "CREDENZA_LEGACY_DEFAULT_RESOURCE": "urn:deriva:rest:service:all",
         "CREDENZA_DERIVED_SESSION_MAX_TTL": "1800",
     }
@@ -189,7 +189,7 @@ def init_logging(app):
     logger.addHandler(stream_handler)
     logger.propagate = False
 
-    if app.config.get("APP_USE_SYSLOG", False):
+    if app.config.get("APP_USE_SYSLOG", True):
         syslog_socket = "/dev/log"
         if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
             from logging.handlers import SysLogHandler
@@ -279,7 +279,7 @@ def create_app():
                                 x_host=proxy_depth,
                                 x_port=proxy_depth)
 
-    init_audit_logger(use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
+    init_audit_logger(use_syslog=app.config.get("AUDIT_USE_SYSLOG", True))
     app.config["OIDC_CLIENT_FACTORY"] = OIDCClientFactory(app.config["OIDC_IDP_PROFILES"])
 
     # To encrypt or not to encrypt (session data)
