@@ -484,12 +484,12 @@ def test_missing_scope_claims_email_present():
 def test_missing_scope_claims_profile_both_missing():
     result = get_missing_scope_claims("openid profile", {"sub": "u1"})
     assert "name" in result
-    assert "preferred_username" in result
+    assert "preferred_username" not in result
 
 
 def test_missing_scope_claims_profile_partial():
     result = get_missing_scope_claims("openid profile", {"sub": "u1", "name": "Alice"})
-    assert result == ["preferred_username"]
+    assert result == []
 
 
 def test_missing_scope_claims_openid_only_never_triggers():
@@ -518,7 +518,7 @@ def test_missing_scope_claims_all_present_returns_empty():
 
 
 def test_missing_scope_claims_override_replaces_scope_entry():
-    # Override profile to only require identity_set; name/preferred_username no longer checked.
+    # Override profile to only require identity_set; name no longer checked.
     overrides = {"profile": ["identity_set"]}
     result = get_missing_scope_claims("openid profile", {"sub": "u1"}, overrides)
     assert result == ["identity_set"]

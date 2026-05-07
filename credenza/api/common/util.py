@@ -455,7 +455,7 @@ def enrich_userinfo_from_endpoint(
 # avoid spurious userinfo calls for IDPs that do not populate them.
 _SCOPE_EXPECTED_CLAIMS = {
     "email":   ["email"],
-    "profile": ["name", "preferred_username"],
+    "profile": ["name"],
 }
 
 

@@ -6,8 +6,7 @@
       "enabled": true,
       "public": true,
       "allowed_grant_types": [
-        "device_code",
-        "client_credentials"
+        "device_code"
       ],
       "allowed_resources": [
         "urn:deriva:rest:service:all"
