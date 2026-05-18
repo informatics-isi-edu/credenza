@@ -32,7 +32,7 @@ def run_refresh_worker(app):
             logger.debug(f"Checking {len(session_ids)} sessions for automatic refresh eligibility")
 
             for sid in session_ids:
-                session = store.get_active_session_by_session_id(sid)
+                session = store.get_session_data(sid)
                 if not session:
                     continue
 
@@ -50,6 +50,11 @@ def run_refresh_worker(app):
                 # Refresh other tokens if needed and allowed
                 if allow_auto_refresh:
                     modified = bool(refresh_additional_tokens(sid, session)) or modified
+
+                # Enforce absolute cap after the refresh attempt so that a successful
+                # token rotation (which updates absolute_expires_at) is not discarded.
+                if store.enforce_absolute_cap(sid, session):
+                    continue
 
                 if modified:
                     user = session.userinfo.get("email")

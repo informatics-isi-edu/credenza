@@ -117,40 +117,59 @@ def app(store, discovery_response, dummy_profile, monkeypatch):
 
     return app
 
-@ pytest.fixture(scope="function")
-def base_session():
-    # Prepare a SessionData instance
+@pytest.fixture(scope="function")
+def make_session():
+    """Factory fixture: caller must pass session_type explicitly."""
+    def _factory(session_type: SessionType) -> SessionData:
+        now = int(time.time())
+        return SessionData(
+            id_token="id",
+            access_token="at",
+            refresh_token="rt",
+            scopes="openid email profile",
+            userinfo={
+                "sub": "user1",
+                "email": "user1@example.com",
+                "preferred_username": "user1",
+                "name": "User One",
+                "email_verified": True,
+                "iss": "https://issuer",
+                "id": "https://issuer/user1",
+                "aud": ["cid"],
+                "groups": ["g1", {"id": "g2"}],
+                "roles": ["r1"],
+                "identity_set": [{"sub": "i1"}]
+            },
+            absolute_expires_at=now + 600,
+            expires_at=now + 300,
+            created_at=now - 100,
+            updated_at=now - 50,
+            realm="test",
+            session_ttl=3600,
+            _session_type=session_type,
+            session_metadata=SessionMetadata(system={}, user={}),
+            additional_tokens={}
+        )
+    return _factory
+
+
+@pytest.fixture(scope="function")
+def base_session(make_session):
+    return make_session(SessionType.USER)
+
+
+@pytest.fixture(scope="function")
+def device_session(make_session):
+    """DEVICE session with the metadata fields that is_device() implies."""
     now = int(time.time())
-    metadata = SessionMetadata(system={}, user={})
-    session = SessionData(
-        id_token="id",
-        access_token="at",
-        refresh_token="rt",
-        scopes="openid email profile",
-        userinfo={
-            "sub": "user1",
-            "email": "user1@example.com",
-            "preferred_username": "user1",
-            "name": "User One",
-            "email_verified": True,
-            "iss": "https://issuer",
-            "id": "https://issuer/user1",
-            "aud": ["cid"],
-            "groups": ["g1", {"id": "g2"}],
-            "roles": ["r1"],
-            "identity_set": [{"sub": "i1"}]
-        },
-        absolute_expires_at=now + 600,
-        expires_at=now + 300,
-        created_at=now - 100,
-        updated_at=now - 50,
-        realm="test",
-        session_ttl=3600,
-        _session_type=SessionType.USER,
-        session_metadata=metadata,
-        additional_tokens={}
-    )
-    return session
+    sess = make_session(SessionType.DEVICE)
+    sess.session_metadata.system.update({
+        "allow_automatic_refresh":  False,
+        "offline_access_granted":   True,
+        "access_token_expires_at":  now + 300,
+        "refresh_token_expires_at": now + 600,
+    })
+    return sess
 
 @pytest.fixture()
 def fake_current_session(monkeypatch, store):

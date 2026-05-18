@@ -129,11 +129,10 @@ def refresh_access_token(sid, session):
 
     now = int(time.time())
     token_expires_at = session.session_metadata.system.get("access_token_expires_at")
-    absolute_expires_at = session.absolute_expires_at
-    # Refresh access token only when the token is expired or about to expire
-    if (token_expires_at and
-            token_expires_at < now + current_app.config.get("TOKEN_EXPIRY_THRESHOLD", 300) and
-            absolute_expires_at and absolute_expires_at > now):
+    # Refresh access token only when the token is expired or about to expire.
+    # Callers are responsible for absolute cap enforcement; the refresh itself
+    # may extend absolute_expires_at when the IDP returns refresh_expires_in.
+    if token_expires_at and token_expires_at < now + current_app.config.get("TOKEN_EXPIRY_THRESHOLD", 300):
 
         try:
             refreshed = client.refresh_access_token(refresh_token=session.refresh_token)
@@ -149,8 +148,9 @@ def refresh_access_token(sid, session):
         session.refresh_token = refreshed.get("refresh_token", session.refresh_token)
         session.id_token = refreshed.get("id_token", session.id_token)
         session.session_metadata.system["access_token_expires_at"] = refreshed["expires_at"]
-        if "refresh_expires_in" in refreshed:
-            session.absolute_expires_at = now + refreshed["refresh_expires_in"]
+        refresh_expires_in = refreshed.get("refresh_expires_in")
+        if refresh_expires_in:  # 0 means "no expiry" for offline tokens; skip to preserve existing cap
+            session.absolute_expires_at = now + refresh_expires_in
             session.session_metadata.system["refresh_token_expires_at"] = session.absolute_expires_at
 
         logger.debug(f"Access token refresh for session {sid} for user {user} ({sub}) on realm {realm} complete")

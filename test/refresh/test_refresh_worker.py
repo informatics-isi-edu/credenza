@@ -21,7 +21,6 @@ import pytest
 from credenza.api.common import util as um
 from credenza.refresh import refresh_worker as rw
 from credenza.api.session.storage import session_store as ss
-from credenza.api.session.storage.session_store import SessionType
 from credenza.refresh.refresh_worker import run_refresh_worker
 
 
@@ -88,18 +87,18 @@ def audit_calls(monkeypatch):
 
 def test_absolute_expiry_removes_session(app,
                                          store,
-                                         base_session,
+                                         device_session,
                                          factory,
                                          profiles,
                                          audit_calls,
                                          frozen_time,
                                          monkeypatch):
     sid = "S1"
-    sess = copy.deepcopy(base_session)
+    sess = copy.deepcopy(device_session)
     app.config["OIDC_CLIENT_FACTORY"] = factory
     app.config["OIDC_IDP_PROFILES"] = profiles
 
-    # make the absolute_expires_at in the past
+    # absolute_expires_at is in the past; no allow_automatic_refresh so no refresh is attempted
     sess.absolute_expires_at = frozen_time - 10
     sess.expires_at = frozen_time + 100
     # patch module time used by store implementation
@@ -117,7 +116,7 @@ def test_absolute_expiry_removes_session(app,
         with pytest.raises(StopIteration):
             run_refresh_worker(app)
 
-    # we should have audited "session_absolute_lifetime_expired" and deleted the session
+    # enforce_absolute_cap should have audited and deleted the session
     logging.debug(audit_calls)
     assert ("session_deleted_absolute_lifetime_expired",
             {"session_id": sid,
@@ -127,9 +126,67 @@ def test_absolute_expiry_removes_session(app,
     assert sid in deleted
 
 
+def test_refresh_extends_absolute_cap_prevents_deletion(app,
+                                                        store,
+                                                        device_session,
+                                                        factory,
+                                                        profiles,
+                                                        audit_calls,
+                                                        frozen_time,
+                                                        monkeypatch):
+    """Regression: when a device session's absolute_expires_at has just expired but
+    the refresh succeeds and the IDP returns refresh_expires_in, the updated cap
+    must be checked -- not the stale one -- so the session survives."""
+    sid = "S_CAP"
+    now = frozen_time
+    app.config["OIDC_CLIENT_FACTORY"] = factory
+    app.config["OIDC_IDP_PROFILES"] = profiles
+
+    sess = copy.deepcopy(device_session)
+    sess.refresh_token = "rt_cap"
+    sess.session_metadata.system.update({
+        "allow_automatic_refresh": True,
+        "access_token_expires_at": now + 100,  # within threshold, triggers refresh
+    })
+    # absolute cap already expired -- this is the scenario that caused the regression
+    sess.absolute_expires_at = now - 5
+    sess.expires_at = now + 2000
+
+    monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+
+    deleted = []
+    monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
+    updated = []
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+
+    class CapExtendingClient:
+        def refresh_access_token(self, refresh_token):
+            return {
+                "access_token":       "new_cap_at",
+                "refresh_token":      "new_cap_rt",
+                "expires_at":         now + 3600,
+                "refresh_expires_in": 7200,  # IDP extends the cap
+            }
+
+    monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: CapExtendingClient())
+    monkeypatch.setattr(rw, "refresh_additional_tokens", lambda sid, session: False)
+
+    with app.app_context():
+        with pytest.raises(StopIteration):
+            run_refresh_worker(app)
+
+    # refresh extended absolute_expires_at to now+7200, so enforce_absolute_cap
+    # must NOT delete the session
+    assert sid not in deleted, "session was deleted despite successful cap extension"
+    assert len(updated) == 1, "session should have been updated after successful refresh"
+    _, new_sess = updated[0]
+    assert new_sess.absolute_expires_at == now + 7200
+
+
 def test_additional_token_refresh_success_and_failure(app,
                                                       store,
-                                                      base_session,
+                                                      device_session,
                                                       factory,
                                                       profiles,
                                                       audit_calls,
@@ -141,8 +198,7 @@ def test_additional_token_refresh_success_and_failure(app,
     app.config["OIDC_IDP_PROFILES"] = profiles
 
     # Prepare a session with four additional token blocks
-    sess = copy.deepcopy(base_session)
-    sess._session_type = SessionType.DEVICE
+    sess = copy.deepcopy(device_session)
     sess.additional_tokens = {
         "good":    {"refresh_token": "rt1", "expires_at": now + 100},
         "fail":    {"refresh_token": "rt2", "expires_at": now + 100},
@@ -225,7 +281,7 @@ def test_additional_token_refresh_success_and_failure(app,
 
 def test_device_access_token_refresh(app,
                                      store,
-                                     base_session,
+                                     device_session,
                                      factory,
                                      profiles,
                                      audit_calls,
@@ -236,8 +292,7 @@ def test_device_access_token_refresh(app,
     app.config["OIDC_CLIENT_FACTORY"] = factory
     app.config["OIDC_IDP_PROFILES"] = profiles
 
-    sess = copy.deepcopy(base_session)
-    sess._session_type = SessionType.DEVICE
+    sess = copy.deepcopy(device_session)
     sess.session_metadata.system.update({
         "device_session":           True,
         "allow_automatic_refresh":  True,
@@ -309,6 +364,65 @@ def test_device_access_token_refresh(app,
 
     # Finally, the session TTL was bumped by update_session
     assert new_sess.expires_at == frozen_time + store.ttl
+
+
+def test_refresh_preserves_absolute_cap_when_refresh_expires_in_is_zero(
+        app,
+        store,
+        device_session,
+        factory,
+        profiles,
+        audit_calls,
+        frozen_time,
+        monkeypatch):
+    """Regression: Keycloak offline tokens return refresh_expires_in=0 meaning 'no expiry'.
+    absolute_expires_at must NOT be set to now+0 (triggering immediate deletion)."""
+    sid = "S_ZERO"
+    now = frozen_time
+    app.config["OIDC_CLIENT_FACTORY"] = factory
+    app.config["OIDC_IDP_PROFILES"] = profiles
+
+    sess = copy.deepcopy(device_session)
+    original_cap = now + 14 * 86400
+    sess.absolute_expires_at = original_cap
+    sess.refresh_token = "rt_offline"
+    sess.session_metadata.system.update({
+        "allow_automatic_refresh": True,
+        "access_token_expires_at": now + 100,  # within threshold, triggers refresh
+    })
+    sess.expires_at = original_cap
+
+    monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+
+    deleted = []
+    monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
+    updated = []
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+
+    class OfflineClient:
+        def refresh_access_token(self, refresh_token):
+            return {
+                "access_token":      "new_offline_at",
+                "refresh_token":     "new_offline_rt",
+                "expires_at":        now + 1500,
+                "refresh_expires_in": 0,   # Keycloak offline token: "never expires"
+            }
+
+    monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: OfflineClient())
+    monkeypatch.setattr(rw, "refresh_additional_tokens", lambda sid, session: False)
+
+    with app.app_context():
+        with pytest.raises(StopIteration):
+            run_refresh_worker(app)
+
+    assert sid not in deleted, "session deleted because refresh_expires_in=0 was treated as now+0"
+    assert len(updated) == 1
+    _, new_sess = updated[0]
+    assert new_sess.access_token == "new_offline_at"
+    assert new_sess.absolute_expires_at == original_cap, (
+        f"absolute_expires_at was clobbered to {new_sess.absolute_expires_at}, expected {original_cap}"
+    )
 
 
 def test_worker_survives_pass_exception(app,

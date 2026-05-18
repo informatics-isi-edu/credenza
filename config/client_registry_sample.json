@@ -75,7 +75,9 @@
         "https://localhost/mcp"
       ],
       "allowed_scopes": [
-        "openid"
+        "openid",
+        "email",
+        "profile"
       ],
       "require_consent": true,
       "consent_display_name": "DERIVA Chatbot Server",

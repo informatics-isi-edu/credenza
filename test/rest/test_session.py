@@ -121,16 +121,14 @@ def test_put_session_expired(client, app, monkeypatch):
 def test_put_session_with_refresh_access_token(client,
                                                app,
                                                store,
-                                               base_session,
+                                               device_session,
                                                frozen_time,
                                                monkeypatch,
                                                audit_calls):
     sid = "S1"
     now = frozen_time
 
-    # Make a deep-copy so we don't clobber other tests
-    sess = copy.deepcopy(base_session)
-    sess._session_type = SessionType.DEVICE
+    sess = copy.deepcopy(device_session)
     # Simulate an expired access token, but a still-valid refresh token
     sess.session_metadata.system.update({
         "access_token_expires_at":   now - 1,    # already expired
@@ -203,16 +201,14 @@ def test_put_session_with_refresh_access_token(client,
 def test_put_session_with_refresh_access_token_failure(client,
                                                        app,
                                                        store,
-                                                       base_session,
+                                                       device_session,
                                                        frozen_time,
                                                        monkeypatch,
                                                        audit_calls):
     sid = "S_fail"
     now = frozen_time
 
-    # Copy session and simulate token about to expire, but refresh still valid
-    sess = copy.deepcopy(base_session)
-    sess._session_type = SessionType.DEVICE
+    sess = copy.deepcopy(device_session)
     sess.session_metadata.system.update({
         "access_token_expires_at":   now - 1,    # already expired
         "refresh_token_expires_at":  now + 600,  # still valid
@@ -273,7 +269,7 @@ def test_put_session_with_refresh_access_token_failure(client,
 def test_put_session_additional_tokens_refresh(client,
                                                app,
                                                store,
-                                               base_session,
+                                               device_session,
                                                frozen_time,
                                                monkeypatch,
                                                audit_calls):
@@ -282,8 +278,7 @@ def test_put_session_additional_tokens_refresh(client,
     threshold = 500
 
     # Prepare a session with four additional token blocks:
-    sess = copy.deepcopy(base_session)
-    sess._session_type = SessionType.DEVICE
+    sess = copy.deepcopy(device_session)
     sess.additional_tokens = {
         "good":    {"refresh_token": "rt_good", "expires_at": now - threshold - 1},
         "fail":    {"refresh_token": "rt_fail", "expires_at": now - threshold - 1},

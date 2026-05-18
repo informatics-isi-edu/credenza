@@ -282,15 +282,8 @@ class SessionStore:
         session = self.get_session_data(session_id)
         return session_id, session
 
-    def get_active_session_by_session_id(self, sid: str) -> Optional[SessionData]:
-        """
-        Retrieve only an `active` session by enforcing absolute cap (delete if expired).
-        Returns session or None if session expired or missing.
-        """
-        session = self.get_session_data(sid)
-        if session is None:
-            return None
-
+    def enforce_absolute_cap(self, sid: str, session: SessionData) -> bool:
+        """Delete session if absolute lifetime is expired. Returns True if session was deleted."""
         cap = session.absolute_expires_at
         now = int(time.time())
         if cap is not None and now >= int(cap):
@@ -303,8 +296,19 @@ class SessionStore:
                             absolute_expires_at=cap)
             except Exception:
                 logger.exception(f"failed deleting session after absolute expiry for sid={sid}")
-            return None
+            return True
+        return False
 
+    def get_active_session_by_session_id(self, sid: str) -> Optional[SessionData]:
+        """
+        Retrieve only an `active` session by enforcing absolute cap (delete if expired).
+        Returns session or None if session expired or missing.
+        """
+        session = self.get_session_data(sid)
+        if session is None:
+            return None
+        if self.enforce_absolute_cap(sid, session):
+            return None
         return session
 
     def get_active_session_by_session_key(self, skey: str) -> Tuple[Optional[str], Optional[SessionData]]:
