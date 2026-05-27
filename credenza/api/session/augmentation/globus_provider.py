@@ -17,8 +17,8 @@ import requests
 import logging
 from flask import current_app, abort
 from .base_provider import DefaultSessionAugmentationProvider
-from ...util import get_effective_scopes
-from ...session.storage.session_store import SessionData
+from ....api.common.util import get_effective_scopes
+from ...session.storage.session_store import SessionData, SessionType
 from ....telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
             try:
                 headers = {"Authorization": f"Bearer {access_token}"}
-                resp = requests.get(self.GLOBUS_GROUPS_URL, headers=headers, timeout=5)
+                resp = requests.get(self.GLOBUS_GROUPS_URL, headers=headers, timeout=15)
                 resp.raise_for_status()
                 # logger.debug(f"Globus groups response: %s" % resp.json())
                 groups = [
@@ -91,7 +91,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
         return False
 
-    def session_from_bearer_token(self, bearer_token) -> (str, SessionData):
+    def session_from_bearer_token(self, bearer_token) -> tuple[str, SessionData]:
         realm = current_app.config["DEFAULT_REALM"]
         factory = current_app.config["OIDC_CLIENT_FACTORY"]
         store = current_app.config["SESSION_STORE"]
@@ -99,7 +99,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
         # Check if we already have a session created by this token. In this case the passed-in token is a Globus bearer
         # token, since we return it as the session key upon success
-        sid, session = store.get_session_by_session_key(bearer_token)
+        sid, session = store.get_active_session_by_session_key(bearer_token)
         if sid and session:
             return sid, session
 
@@ -136,6 +136,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
         session_id = store.generate_session_id()
         session_key, session_data = store.create_session(
             session_id=session_id,
+            session_type=SessionType.USER,
             access_token=bearer_token,
             scopes=scopes,
             userinfo=userinfo,
@@ -147,14 +148,14 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
         sub = userinfo.get("sub")
         user = userinfo.get("email")
+        logger.info(
+            f"Session creation from bearer token successful for user {user} ({sub}) with session id {session_id} "
+            f"on realm {realm}.")
         audit_event("session_from_bearer_token",
                     session_id=session_id,
                     user=user,
                     sub=sub,
                     scopes=get_effective_scopes(session_data),
                     realm=realm)
-        logger.info(
-            f"Session creation from bearer token successful for user {user} ({sub}) with session id {session_id} "
-            f"on realm {realm}.")
 
         return session_key, session_data

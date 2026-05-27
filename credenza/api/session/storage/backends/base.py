@@ -36,6 +36,10 @@ class StorageBackend(ABC):
     def get(self, key: str) -> Optional[bytes]: ...
 
     @abstractmethod
+    #  Atomically retrieve *and remove* the value for `key`. Implementations must ensure atomic read+delete semantics.
+    def consume(self, key: str) -> Optional[bytes]: ...
+
+    @abstractmethod
     def delete(self, key: str) -> None: ...
 
     @abstractmethod
@@ -50,7 +54,7 @@ class StorageBackend(ABC):
     @abstractmethod
     def ttl(self, key: str) -> int: ...
 
-def create_storage_backend(backend_name: str, **kwargs) -> StorageBackend:
+def create_storage_backend(backend_name: str, **kwargs) -> StorageBackend: # pragma: no cover
     backend_class = STORAGE_BACKENDS[backend_name]
     logger.debug(f"Creating storage backend type '{backend_name}' with implementation '{backend_class}'")
     return import_string(backend_class)(**kwargs)

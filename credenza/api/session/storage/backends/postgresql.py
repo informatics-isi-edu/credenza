@@ -19,7 +19,7 @@ import psycopg2.pool
 import logging
 import time
 import fnmatch
-from typing import Optional, List, Iterable, Union
+from typing import Optional, List, Iterable, Union, Any
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class connection (psycopg2.extensions.connection):
         cur.execute("""
         DEALLOCATE PREPARE ALL;
 
-        PREPARE credenza_session_set(text, bytea, float8) AS
+        PREPARE credenza_session_set(text, bytea, int) AS
         INSERT INTO credenza (key, value, expires_at)
         VALUES($1, $2, $3)
         ON CONFLICT (key)
@@ -67,6 +67,11 @@ class connection (psycopg2.extensions.connection):
 
         PREPARE credenza_session_delete(text) AS
         DELETE FROM credenza WHERE key = $1;
+        
+        PREPARE credenza_session_consume(text, int) AS
+        DELETE FROM credenza
+        WHERE key = $1 AND (expires_at IS NULL OR expires_at > $2)
+        RETURNING value;
         """)
 
 class PostgreSQLBackend:
@@ -103,7 +108,7 @@ class PostgreSQLBackend:
             pool.closeall()
             del pool
 
-    def _pooled_execute_stmt(self, sql, params, resultfunc=lambda cur: None):
+    def _pooled_execute_stmt(self, sql, params, resultfunc=lambda cur: Optional[Any]):
         """Execute and commit one statement on a pooled connection, returning result of resultfunc applied to cursor.
         """
         conn = None
@@ -126,7 +131,7 @@ class PostgreSQLBackend:
                 self._put_conn(conn, close=True)
 
     def setex(self, key: str, value: Union[str, bytes], ttl: int) -> None:
-        expires_at = time.time() + ttl
+        expires_at = int(time.time()) + ttl
         blob = value if isinstance(value, (bytes, bytearray)) else value.encode()
         self._pooled_execute_stmt(
             "EXECUTE credenza_session_set(%s, %s, %s);",
@@ -142,7 +147,8 @@ class PostgreSQLBackend:
         if not row:
             return None
         value, expires_at = row
-        if expires_at is not None and time.time() >= expires_at:
+        if expires_at is not None and int(time.time()) >= expires_at:
+            # expired; delete and return None
             self.delete(key)
             return None
         return value.tobytes()
@@ -159,7 +165,7 @@ class PostgreSQLBackend:
             None,
             lambda cur: list(cur)
         )
-        now = time.time()
+        now = int(time.time())
         result = []
         for key, expires_at in rows:
             if expires_at is not None and now >= expires_at:
@@ -188,12 +194,30 @@ class PostgreSQLBackend:
         expires_at, = row
         if expires_at is None:
             return -1  # no TTL set
-        remaining = int(expires_at - time.time())
+        remaining = expires_at - int(time.time())
         return remaining if remaining >= 0 else -2
 
     def set(self, key: str, value: Union[str, bytes]) -> None:
         blob = value if isinstance(value, (bytes, bytearray)) else value.encode()
-        row = self._pooled_execute_stmt(
+        self._pooled_execute_stmt(
             "EXECUTE credenza_session_set(%s, %s, %s);",
             (key, blob, None)
         )
+
+    def consume(self, key: str) -> Optional[bytes]:
+        """
+        Atomically delete-and-return the value for `key` using DELETE ... RETURNING.
+        Honors TTL: expired entries will not be returned (they are treated as absent).
+        Returns bytes value or None if key missing/expired.
+        """
+        now = int(time.time())
+        # Use the prepared consume statement for a single-statement atomic operation.
+        row = self._pooled_execute_stmt(
+            "EXECUTE credenza_session_consume(%s, %s);",
+            (key, now),
+            lambda cur: cur.fetchone()
+        )
+        if not row:
+            return None
+        (value,) = row
+        return value.tobytes()

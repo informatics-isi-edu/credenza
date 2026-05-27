@@ -1,0 +1,11 @@
+{
+  "openid":         "Verify your identity",
+  "email":          "Access your email address",
+  "profile":        "Access your profile information",
+  "groups":         "Access your group memberships",
+  "offline_access": "Stay signed in and refresh access without re-authenticating",
+
+  "urn:deriva:rest:service:all":     "Access all DERIVA REST services on your behalf",
+  "urn:deriva:rest:service:ermrest": "Access DERIVA catalog data on your behalf",
+  "urn:deriva:rest:service:hatrac":  "Access DERIVA object storage on your behalf"
+}

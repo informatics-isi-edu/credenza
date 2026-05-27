@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "credenza"
-version = "0.1"
+version = "0.2"
 description = "OIDC Relying Party/Session Broker Web Service"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,6 +24,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Internet :: WWW/HTTP",
   "Topic :: Internet :: Security"
 ]
@@ -32,6 +33,8 @@ dependencies = [
   "requests",
   "authlib",
   "pyjwt",
+  "bcrypt",
+  "argon2-cffi",
   "pycryptodomex",
   "redis",
   "valkey",

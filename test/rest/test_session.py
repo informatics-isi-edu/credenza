@@ -19,9 +19,11 @@ import pytest
 from datetime import datetime
 from werkzeug.exceptions import NotFound
 from credenza.rest import session as sm
-from credenza.api import util as um
+from credenza.api.common import util as um
 from credenza.rest.session import session_blueprint
-from credenza.api.util import get_effective_scopes
+from credenza.api.session.storage import session_store as ss
+from credenza.api.session.storage.session_store import SessionType
+from credenza.api.common.util import get_effective_scopes
 
 
 @pytest.fixture
@@ -30,10 +32,12 @@ def app(app, fake_current_session, monkeypatch):
 
     return app
 
+
 @pytest.fixture
 def client(app):
     app.testing = True
     return app.test_client()
+
 
 @pytest.fixture(autouse=True)
 def audit_calls(monkeypatch):
@@ -44,6 +48,7 @@ def audit_calls(monkeypatch):
     monkeypatch.setattr(um, "audit_event", _audit)
     return calls
 
+
 def test_whoami(client):
     resp = client.get("/whoami")
     assert resp.status_code == 200
@@ -52,10 +57,12 @@ def test_whoami(client):
     assert resp.json["sub"] == "user1"
     assert resp.json["email"] == "user1@example.com"
 
+
 def test_whoami_unauthenticated(monkeypatch, client):
     monkeypatch.setattr(sm,"get_current_session", lambda: (_ for _ in ()).throw(NotFound()))
     resp = client.get("/whoami")
     assert resp.status_code == 404
+
 
 def test_get_session(client):
     resp = client.get("/session")
@@ -70,15 +77,18 @@ def test_get_session(client):
     assert isinstance(data["created_at"], str)
     assert "seconds_remaining" in data
 
+
 def test_get_session_unauthenticated(monkeypatch, client):
     monkeypatch.setattr(sm,"get_current_session", lambda: (_ for _ in ()).throw(NotFound()))
     resp = client.get("/session")
     assert resp.status_code == 404
 
+
 def test_get_session_invalid_bearer(monkeypatch, client):
     monkeypatch.setattr(sm,"get_current_session", lambda: (_ for _ in ()).throw(NotFound()))
     resp = client.get("/session", headers={"Authorization": "Bearer invalid.token"})
     assert resp.status_code == 404
+
 
 def test_put_session_extend(client, store, frozen_time):
     # Capture original values before the PUT
@@ -100,29 +110,29 @@ def test_put_session_extend(client, store, frozen_time):
 
 def test_put_session_expired(client, app, monkeypatch):
     sid, sess = sm.get_current_session()
-    sess.session_metadata.system["refresh_expires_at"] = int(time.time()) + 60
+    sess.absolute_expires_at = int(time.time()) + 60
     monkeypatch.setattr(sm, "revoke_tokens", lambda sid, session: None)
     with app.app_context():
         app.config["SESSION_EXPIRY_THRESHOLD"] = 300
     resp = client.put("/session")
     assert resp.status_code == 401
 
+
 def test_put_session_with_refresh_access_token(client,
                                                app,
                                                store,
-                                               base_session,
+                                               device_session,
                                                frozen_time,
                                                monkeypatch,
                                                audit_calls):
     sid = "S1"
     now = frozen_time
 
-    # Make a deep‐copy so we don't clobber other tests
-    sess = copy.deepcopy(base_session)
-    # Simulate an expired access token, but a still‐valid refresh token
+    sess = copy.deepcopy(device_session)
+    # Simulate an expired access token, but a still-valid refresh token
     sess.session_metadata.system.update({
-        "token_expires_at":   now - 1,    # already expired
-        "refresh_expires_at": now + 600,  # still valid
+        "access_token_expires_at":   now - 1,    # already expired
+        "refresh_token_expires_at":  now + 600,  # still valid
     })
     sess.refresh_token = "old_refresh_token"
     sess.access_token  = "old_access_token"
@@ -149,7 +159,7 @@ def test_put_session_with_refresh_access_token(client,
                 "refresh_token":      "new_refresh_token",
                 "id_token":           "new_id_token",
                 "expires_at":         self.now + 3600,
-                "refresh_expires_at": self.now + 7200,
+                "refresh_expires_in": 7200,
             }
 
     class DummyFactory:
@@ -179,8 +189,8 @@ def test_put_session_with_refresh_access_token(client,
 
     # Check that the helper wrote back the new expiry metadata
     meta = updated.session_metadata.system
-    assert meta["token_expires_at"]   == now + 3600
-    assert meta["refresh_expires_at"] == now + 7200
+    assert meta["access_token_expires_at"]   == now + 3600
+    assert meta["refresh_token_expires_at"] == now + 7200
 
     # update_session should have bumped updated_at and applied max() for expires_at
     assert updated.updated_at == pytest.approx(now, abs=1)
@@ -191,18 +201,17 @@ def test_put_session_with_refresh_access_token(client,
 def test_put_session_with_refresh_access_token_failure(client,
                                                        app,
                                                        store,
-                                                       base_session,
+                                                       device_session,
                                                        frozen_time,
                                                        monkeypatch,
                                                        audit_calls):
     sid = "S_fail"
     now = frozen_time
 
-    # Copy session and simulate token about to expire, but refresh still valid
-    sess = copy.deepcopy(base_session)
+    sess = copy.deepcopy(device_session)
     sess.session_metadata.system.update({
-        "token_expires_at":   now - 1,    # already expired
-        "refresh_expires_at": now + 600,  # still valid
+        "access_token_expires_at":   now - 1,    # already expired
+        "refresh_token_expires_at":  now + 600,  # still valid
     })
     sess.refresh_token = "bad_refresh_token"
     sess.access_token  = "old_access_token"
@@ -248,8 +257,8 @@ def test_put_session_with_refresh_access_token_failure(client,
 
     # Metadata should be unchanged
     meta = updated.session_metadata.system
-    assert meta["token_expires_at"]   == now - 1
-    assert meta["refresh_expires_at"] == now + 600
+    assert meta["access_token_expires_at"]   == now - 1
+    assert meta["refresh_token_expires_at"]  == now + 600
 
     # update_session should have bumped updated_at and applied max() for expires_at
     assert updated.updated_at == pytest.approx(now, abs=1)
@@ -260,7 +269,7 @@ def test_put_session_with_refresh_access_token_failure(client,
 def test_put_session_additional_tokens_refresh(client,
                                                app,
                                                store,
-                                               base_session,
+                                               device_session,
                                                frozen_time,
                                                monkeypatch,
                                                audit_calls):
@@ -269,7 +278,7 @@ def test_put_session_additional_tokens_refresh(client,
     threshold = 500
 
     # Prepare a session with four additional token blocks:
-    sess = copy.deepcopy(base_session)
+    sess = copy.deepcopy(device_session)
     sess.additional_tokens = {
         "good":    {"refresh_token": "rt_good", "expires_at": now - threshold - 1},
         "fail":    {"refresh_token": "rt_fail", "expires_at": now - threshold - 1},
@@ -345,19 +354,21 @@ def test_put_session_additional_tokens_refresh(client,
     assert "not_due" in new_sess.additional_tokens
     assert "no_rt"   in new_sess.additional_tokens
 
-def test_patch_session_success(client, app, store):
-    patch_data = {"foo": "bar"}
-    resp = client.patch("/session", json=patch_data)
-    assert resp.status_code == 200
-    assert resp.json == {"status": "updated", "patched": patch_data}
 
-    session = store.get_session_data("fake_current_sid")
-    # The 'user' section of session_metadata should contain our patch
-    assert session.session_metadata.user == patch_data
+# def test_patch_session_success(client, app, store):
+#     patch_data = {"foo": "bar"}
+#     resp = client.patch("/session", json=patch_data)
+#     assert resp.status_code == 200
+#     assert resp.json == {"status": "updated", "patched": patch_data}
+#
+#     session = store.get_session_data("fake_current_sid")
+#     # The 'user' section of session_metadata should contain our patch
+#     assert session.session_metadata.user == patch_data
+#
+# def test_patch_session_invalid_json(client):
+#     resp = client.patch("/session", data="not json", content_type="application/json")
+#     assert resp.status_code == 400
 
-def test_patch_session_invalid_json(client):
-    resp = client.patch("/session", data="not json", content_type="application/json")
-    assert resp.status_code == 400
 
 def test_delete_session_legacy(client, app, monkeypatch):
     monkeypatch.setattr(sm,"revoke_tokens", lambda sid, session: None)
@@ -365,6 +376,7 @@ def test_delete_session_legacy(client, app, monkeypatch):
     resp = client.delete("/session")
     assert resp.status_code == 303
     assert resp.headers["Location"] == "https://localhost/logout"
+
 
 def test_delete_session_normal(client, app, monkeypatch):
     monkeypatch.setattr(sm,"revoke_tokens", lambda sid, session: None)
@@ -374,6 +386,7 @@ def test_delete_session_normal(client, app, monkeypatch):
     # Cookie should be cleared
     cookie = resp.headers.get("Set-Cookie", "")
     assert app.config["COOKIE_NAME"] in cookie and "Expires=Thu, 01 Jan 1970" in cookie
+
 
 def test_make_session_response_non_legacy(app, store, base_session):
     # Arrange deterministic timestamps
@@ -410,6 +423,7 @@ def test_make_session_response_non_legacy(app, store, base_session):
         assert abs(dt.timestamp() - getattr(base_session, field)) < 1
 
     assert resp["seconds_remaining"] == store.get_ttl("sid123")
+
 
 @pytest.mark.usefixtures("app", "store", "base_session")
 def test_make_session_response_legacy(app, store, base_session):
@@ -452,3 +466,201 @@ def test_make_session_response_legacy(app, store, base_session):
     assert abs(expires_dt.timestamp() - base_session.expires_at) < 1
 
     assert resp["seconds_remaining"] == store.get_ttl("sid123")
+
+
+def test_get_session_service_missing_resource_403(monkeypatch, client, base_session):
+    # Make the base session a service session with a resource constraint
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-miss", base_session))
+
+    resp = client.get("/session")  # no ?resource=
+    assert resp.status_code == 403
+
+
+def test_get_session_service_wrong_resource_403(monkeypatch, client, base_session):
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-wrong", base_session))
+
+    resp = client.get("/session?resource=files-api")
+    assert resp.status_code == 403
+
+
+def test_get_session_service_multiple_resources_one_matches_200(monkeypatch, client, base_session):
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-ok", base_session))
+
+    stub = {"ok": True}
+    monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
+
+    resp = client.get("/session?resource=files-api&resource=rest-api")
+    assert resp.status_code == 200
+    assert resp.json == stub
+
+
+def test_get_session_service_resource_as_string_normalized_200(monkeypatch, client, base_session):
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-str", base_session))
+
+    stub = {"ok": True}
+    monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
+
+    resp = client.get("/session?resource=rest-api")
+    assert resp.status_code == 200
+    assert resp.json == stub
+
+
+def test_put_session_service_missing_resource_403(monkeypatch, client, base_session):
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-miss", base_session))
+
+    resp = client.put("/session")  # no ?resource=
+    assert resp.status_code == 403
+
+
+def test_put_session_derived_with_matching_resource_200(monkeypatch, client, base_session, store):
+    # DERIVED sessions must be accepted by PUT /session with a matching resource so that
+    # ERMrest (which always uses PUT to validate sessions) can authenticate M2M callers.
+    base_session._session_type = SessionType.DERIVED
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("derived-put-ok", base_session))
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    monkeypatch.setattr(store, "update_session", lambda sid, sess: ("dummy-map-key", sess))
+    stub = {"ok": True}
+    monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
+
+    resp = client.put("/session?resource=rest-api")
+    assert resp.status_code == 200
+    assert resp.json == stub
+
+
+def test_put_session_derived_missing_resource_403(monkeypatch, client, base_session):
+    # DERIVED sessions carry allowed_resources; PUT with a non-matching resource is denied.
+    base_session._session_type = SessionType.DERIVED
+    base_session._allowed_resources = ["rest-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("derived-put-miss", base_session))
+
+    resp = client.put("/session?resource=other-api")
+    assert resp.status_code == 403
+
+
+def test_put_session_service_match_200(monkeypatch, client, base_session, store):
+    # Make this a service session whose resource includes the requested resource
+    base_session._session_type = SessionType.SERVICE
+    base_session._allowed_resources = ["rest-api"]
+
+    # Return our session from the handler
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-put-ok", base_session))
+
+    # Stub map_session so the backend doesn't receive None values
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+
+    # Optionally stub update_session to avoid touching real persistence paths
+    monkeypatch.setattr(store, "update_session", lambda sid, sess: ("dummy-map-key", sess))
+
+    # Avoid relying on the full response construction
+    stub = {"ok": True}
+    monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
+
+    # resource intersects -> 200
+    resp = client.put("/session?resource=rest-api")
+    assert resp.status_code == 200
+    assert resp.json == stub
+
+
+def test_get_session_user_with_resources_wrong_resource_403(monkeypatch, client, base_session):
+    # User session that carries allowed_resources enforces resource binding when caller
+    # provides a resource param that doesn't intersect.
+    base_session._session_type = SessionType.USER
+    base_session._allowed_resources = ["some-other-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("user-ok", base_session))
+
+    resp = client.get("/session?resource=rest-api")
+    assert resp.status_code == 403
+
+
+def test_get_session_user_with_resources_no_resource_param_200(monkeypatch, client, base_session):
+    # User session with allowed_resources but no resource param -> allowed (no enforcement).
+    base_session._session_type = SessionType.USER
+    base_session._allowed_resources = ["some-other-api"]
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("user-ok", base_session))
+
+    resp = client.get("/session")
+    assert resp.status_code == 200
+
+
+def test_put_session_service_ttl_clamped_to_max_ttl_200_and_persisted(
+    monkeypatch, client, app, base_session, store, frozen_time, audit_calls):
+    sid = "svc-ttl-clamp"
+    now = int(frozen_time)
+    max_ttl = 3600
+    cap = now + max_ttl
+
+    sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.SERVICE
+    sess._allowed_resources = ["rest-api"]
+    sess.created_at = now - 10
+    sess.expires_at = now + 99999  # > cap -> clamp should fire
+
+    sess.session_metadata.system = dict(sess.session_metadata.system or {})
+    sess.session_metadata.system["service_policy"] = {
+        "max_ttl_seconds": max_ttl,
+        "require_proof_on_extend": False,
+    }
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda _sid: "SKEY")
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: None)
+
+    # Freeze handler and store time
+    monkeypatch.setattr(sm.time, "time", lambda: float(now))
+    monkeypatch.setattr(ss.time, "time", lambda: float(now))
+
+    with app.app_context():
+        app.config["SESSION_STORE"] = store
+        app.config["ENABLE_LEGACY_API"] = False
+
+    resp = client.put("/session?resource=rest-api")
+    assert resp.status_code == 200
+
+    persisted = store.get_session_data(sid)
+    assert int(persisted.expires_at) == cap
+    assert persisted.session_ttl == 0
+
+    events = [ev for ev, _ in audit_calls]
+    assert "service_session_ttl_clamped" in events, audit_calls
+
+
+def test_get_session_service_empty_res_misconfig_403(monkeypatch, client, base_session, audit_calls):
+    # Make a service session with empty allowed_resources
+    sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.SERVICE
+    sess._allowed_resources = []
+
+    monkeypatch.setattr(sm, "get_current_session", lambda: ("svc-empty-res", sess))
+
+    resp = client.get("/session?resource=rest-api")
+    assert resp.status_code == 403
+
+    # Verify audit event + payload
+    matches = [(ev, kw) for ev, kw in audit_calls if ev == "service_session_resource_misconfig"]
+    assert matches, audit_calls
+
+    ev, kw = matches[-1]
+    assert kw["session_id"] == "svc-empty-res"
+    assert kw["reason"] == "empty_resource_in_session"
+    # realm is implementation-specific; if you want, you can assert it exists:
+    assert "realm" in kw

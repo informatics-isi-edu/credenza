@@ -14,10 +14,13 @@
 # limitations under the License.
 #
 from flask import Blueprint, Response, current_app
+from ...rest.helpers import ip_rate_limited, perf_logged
 
 metrics_blueprint = Blueprint("metrics", __name__)
 
 @metrics_blueprint.route("/metrics")
+@ip_rate_limited()
+@perf_logged(warn_ms=1000)
 def metrics():
     store = current_app.config["SESSION_STORE"]
     active = len(store.list_session_ids())

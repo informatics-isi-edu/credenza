@@ -16,23 +16,34 @@
 import os
 import json
 import logging
-from logging.handlers import SysLogHandler
 from pathlib import Path
 from threading import Thread
 from dotenv import dotenv_values
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from requests import RequestException, ConnectionError, Timeout
 from werkzeug.utils import import_string
 from werkzeug.exceptions import HTTPException, BadGateway, ServiceUnavailable
-from .api.oidc_client import OIDCClientFactory
+from werkzeug.middleware.proxy_fix import ProxyFix
+from .api.auth.client.adapters.adapter import list_adapters
+from .api.auth.client.client_registry import load_client_registry
+from .api.auth.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
-from .api.claim_mapper import build_realm_claim_maps
-from .api.util import AESGCMCodec, is_browser_client
+from .api.common.claim_mapper import build_realm_claim_maps
+from .api.common.util import check_client_scope_coverage
+from .api.common.rate_limit import FixedWindowJitterLimiter
+from .api.common.crypto import AESGCMCodec
+from .api.common.crypto import register_default_hashers
+from .rest.helpers import is_browser_client, get_request_id
 from .rest.session import session_blueprint
-from .rest.login_flow import login_blueprint
-from .rest.device_flow import device_blueprint
+from .rest.login import login_blueprint
+from .rest.device import device_blueprint
 from .rest.discovery import discovery_blueprint
+from .rest.token import token_blueprint
+from .rest.introspect import introspect_blueprint
+from .rest.metadata import metadata_blueprint
+from .rest.authorize import authorize_blueprint
+from .rest.consent import consent_blueprint
 from .telemetry.audit.logger import init_audit_logger
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker
@@ -54,7 +65,10 @@ def load_config(app):
         "CREDENZA_ENABLE_REFRESH_WORKER": "true",
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
         "CREDENZA_STORAGE_BACKEND": "memory",
-        "CREDENZA_AUDIT_USE_SYSLOG": "false",
+        "CREDENZA_AUDIT_USE_SYSLOG": "true",
+        "CREDENZA_APP_USE_SYSLOG": "true",
+        "CREDENZA_LEGACY_DEFAULT_RESOURCE": "urn:deriva:rest:service:all",
+        "CREDENZA_DERIVED_SESSION_MAX_TTL": "1800",
     }
 
     # Load .env from one of these locations, if it exists
@@ -108,6 +122,26 @@ def load_config(app):
     else:
         app.config["OIDC_IDP_PROFILES"] = {}
 
+    # Optional client registry (OAuth2/RS/M2M) config
+    logger.debug(f"Registered client authentication adapters: {set(list_adapters().keys())}")
+    client_registry_path = app.config.get("CLIENT_REGISTRY_FILE", "config/client_registry.json")
+    app.config["CLIENT_REGISTRY"] = load_client_registry(client_registry_path)
+
+    _default_realm = app.config.get("DEFAULT_REALM")
+    if _default_realm:
+        _realm_profile = app.config["OIDC_IDP_PROFILES"].get(_default_realm, {})
+        _issuable = _realm_profile.get("issuable_scopes")
+        if _issuable is not None:
+            check_client_scope_coverage(_issuable, app.config["CLIENT_REGISTRY"].clients)
+
+    # Optional global consent labels (scope and resource URI display names for the consent page)
+    consent_labels_path = app.config.get("CONSENT_LABELS_FILE", "config/consent_labels.json")
+    if os.path.exists(consent_labels_path):
+        with open(consent_labels_path) as f:
+            app.config["CONSENT_LABELS"] = json.load(f)
+    else:
+        app.config["CONSENT_LABELS"] = {}
+
     # Optional trusted issuers
     trusted_path = app.config.get("TRUSTED_ISSUERS_FILE", "config/oidc_idp_trusted_issuers.json")
     if os.path.exists(trusted_path):
@@ -119,7 +153,7 @@ def load_config(app):
     # Load the claim map
     app.config["IDP_CLAIM_MAPS"] = build_realm_claim_maps(app.config.get("OIDC_IDP_PROFILES"))
 
-    # create session augmentation provider map
+    # Create session augmentation provider map
     provider_map = {}
     default_provider = "credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider"
     for realm, prof in app.config["OIDC_IDP_PROFILES"].items():
@@ -129,44 +163,57 @@ def load_config(app):
         provider_map[realm] = import_string(cls_path)()
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = provider_map
 
+    # Load secrets hashers
+    register_default_hashers()
+
 def init_logging(app):
-    log_handler = logging.StreamHandler()
-    log_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+    """Configure the credenza app logger.
 
-    syslog_socket = "/dev/log"
-    if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
-        try:
-            log_handler = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
-            log_handler.ident = "credenza: "
-            log_handler.setFormatter(
-                logging.Formatter("[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
-            logger.propagate = False
-        except Exception as e:
-            # fallback to preconfigured StreamHandler
-            pass
+    Uses syslog (LOCAL1) when CREDENZA_APP_USE_SYSLOG is true and /dev/log is
+    accessible. Falls back to a stderr StreamHandler when syslog is disabled or
+    unavailable (local dev, Docker without rsyslog). Never adds both: that would
+    duplicate every log line when mod_wsgi also forwards stderr to syslog.
+    """
+    syslog_active = False
+    if app.config.get("APP_USE_SYSLOG", True):
+        syslog_socket = "/dev/log"
+        if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
+            from logging.handlers import SysLogHandler
 
-    logger.addHandler(log_handler)
+            try:
+                sh = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
+                sh.ident = "credenza: "
+                sh.setFormatter(
+                    logging.Formatter("[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+                logger.addHandler(sh)
+                syslog_active = True
+            except Exception:
+                pass
+
+    if not syslog_active:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"))
+        logger.addHandler(stream_handler)
+
+    logger.propagate = False
     logger.setLevel(logging.DEBUG if app.config.get("CREDENZA_DEBUG", app.config.get("DEBUG", False)) else logging.INFO)
 
-def load_serialized_kwargs(raw):
-   if not raw:
+def load_serialized_kwargs(input_kwargs):
+   if not input_kwargs:
       return {}
 
-   if isinstance(raw, dict):
-       return raw
+   if isinstance(input_kwargs, dict):
+       return input_kwargs
 
    try:
-      parsed = json.loads(raw)
-
+      parsed = json.loads(input_kwargs)
       if not isinstance(parsed, dict):
          logger.warning(f"Serialized kwargs should be a JSON object; got {type(parsed).__name__}; using empty dict")
          return {}
-
       return parsed
-
    except Exception as e:
-      logger.warning(f"Invalid JSON in serialized kwargs={raw!r}; using empty dict: {e}")
+      logger.warning(f"Invalid JSON in serialized kwargs={input_kwargs!r}; using empty dict: {e}")
       return {}
 
 def create_app():
@@ -203,6 +250,12 @@ def create_app():
             response.headers["Pragma"] = "no-cache"
         return response
 
+    @app.after_request
+    def add_rid(resp):
+        rid = getattr(g, "rid", None) or get_request_id(request.headers)
+        resp.headers.setdefault("X-Request-Id", rid)
+        return resp
+
     # Bootstrap app
     app.config.from_prefixed_env(prefix="CREDENZA")
     init_logging(app)
@@ -210,8 +263,17 @@ def create_app():
     # if logger.isEnabledFor(logging.DEBUG):
     #     logger.debug(f"Config loaded: {app.config}")
 
-    init_audit_logger(filename=app.config.get("AUDIT_LOGFILE_PATH", "credenza-audit.log"),
-                      use_syslog=app.config.get("AUDIT_USE_SYSLOG", False))
+    if app.config.get("ENABLE_PROXYFIX", False):
+        # Default: one proxy hop (Reverse Proxy -> Credenza)
+        proxy_depth = app.config.get("PROXYFIX_DEPTH", 1)
+        logger.info(f"Enabling ProxyFix with depth {proxy_depth}")
+        app.wsgi_app = ProxyFix(app.wsgi_app,
+                                x_for=proxy_depth,
+                                x_proto=proxy_depth,
+                                x_host=proxy_depth,
+                                x_port=proxy_depth)
+
+    init_audit_logger(use_syslog=app.config.get("AUDIT_USE_SYSLOG", True))
     app.config["OIDC_CLIENT_FACTORY"] = OIDCClientFactory(app.config["OIDC_IDP_PROFILES"])
 
     # To encrypt or not to encrypt (session data)
@@ -240,12 +302,23 @@ def create_app():
     app.register_blueprint(session_blueprint)
     app.register_blueprint(login_blueprint)
     app.register_blueprint(device_blueprint)
+    app.register_blueprint(token_blueprint)
+    app.register_blueprint(introspect_blueprint)
+    app.register_blueprint(metadata_blueprint)
+    app.register_blueprint(authorize_blueprint)
+    app.register_blueprint(consent_blueprint)
     app.register_blueprint(metrics_blueprint)
     if app.config.get("ENABLE_LEGACY_API", False):
         app.register_blueprint(discovery_blueprint)
 
     if app.config.get("ENABLE_HEALTH_CHECK", True):
         enable_healthcheck(app)
+
+    app.extensions["rate_limits"] = {
+        "10_per_min": FixedWindowJitterLimiter(limit=10, window_sec=60),
+        "30_per_min": FixedWindowJitterLimiter(limit=30, window_sec=60),
+        "60_per_min": FixedWindowJitterLimiter(limit=60, window_sec=60),
+    }
 
     return app
 
