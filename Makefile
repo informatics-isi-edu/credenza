@@ -2,7 +2,7 @@
 # this ugly hack necessitated by Ubuntu... grrr...
 SYSPREFIX=$(shell python3 -c 'import site;print(site.getsitepackages()[0])' | sed -e 's|/[^/]\+/[^/]\+/[^/]\+$$||')
 # try to find the architecture-neutral lib dir by looking for one of our expected prereqs... double grrr...
-PYLIBDIR=$(shell python3 -c 'import site;import os.path;print([d for d in site.getsitepackages() if os.path.exists(d+"/authlib")][0])')
+PYLIBDIR=$(shell python3 -c 'import site;import os.path;print([d for d in site.getsitepackages() if os.path.exists(d+"/flask")][0])')
 
 CONFDIR=/home/credenza/config
 

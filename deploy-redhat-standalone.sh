@@ -69,6 +69,10 @@ detect_mod_wsgi()
 
 # whitelist systems we think ought to work with this script
 case "$(cat /etc/redhat-release)" in
+    Red\ Hat\ Enterprise\ Linux\ release\ 9*)
+	detect_psycopg2
+	detect_mod_wsgi
+        ;;
     Rocky\ Linux\ release\ 8*)
 	detect_psycopg2
 	detect_mod_wsgi
@@ -110,11 +114,6 @@ mkdir -p /home/credenza/secrets \
     && chmod o= /home/credenza/secrets \
 	|| error Failed to provision /home/credenza/secrets sub-dir
 
-mkdir -p /home/credenza/state \
-    && chown credenza:apache /home/credenza/state \
-    && chmod o= /home/credenza/state \
-	|| error Failed to provision /home/credenza/state sub-dir
-
 pgusercnt=$(su -c "psql -q -t -A -c \"SELECT count(*) FROM pg_roles WHERE rolname = 'credenza'\"" - postgres)
 if [[ $? -ne 0 ]]
 then
@@ -144,8 +143,9 @@ fi
 cat > "${TMP_ENV}" <<EOF
 CREDENZA_DEFAULT_REALM=globus
 CREDENZA_ENABLE_LEGACY_API=true
-CREDENZA_ENABLE_REFRESH_WORKER=true
 CREDENZA_AUDIT_USE_SYSLOG=true
+CREDENZA_APP_USE_SYSLOG=true
+CREDENZA_ENABLE_REFRESH_WORKER=true
 CREDENZA_STORAGE_BACKEND=postgresql
 CREDENZA_STORAGE_BACKEND_URL=postgresql:///credenza
 CREDENZA_BASE_URL="https://$(hostname)/authn"
@@ -175,10 +175,6 @@ idempotent_semanage_add \
 idempotent_semanage_add \
     httpd_sys_content_t \
     '/home/credenza/secrets/.*'
-
-idempotent_semanage_add \
-    httpd_sys_rw_content_t \
-    '/home/credenza/state(/.*)?'
 
 restorecon -rv /home/credenza/
 
