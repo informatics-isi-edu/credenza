@@ -7,9 +7,9 @@ Decision Date: 2026-03-12
 
 ### Review History
 
-| Date       | Status   | Notes                                                              |
-|------------|----------|--------------------------------------------------------------------|
-| 2026-03-12 | Proposed | Initial draft covering authorization and delegation consent design |
+| Date       | Status   | Notes                                                                                  |
+|------------|----------|----------------------------------------------------------------------------------------|
+| 2026-03-12 | Proposed | Initial draft covering authorization and delegation consent design                     |
 | 2026-03-31 | Accepted | Implementation complete; architecture section updated to reflect actual implementation |
 
 ---

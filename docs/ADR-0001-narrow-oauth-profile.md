@@ -7,12 +7,12 @@ Decision Date: 2026-02-11
 
 ### Review History
 
-| Date       | Status   | Notes                                                                                |
-|------------|----------|--------------------------------------------------------------------------------------|
-| 2026-02-10 | Proposed | Draft including token exchange constraints and acceptance criteria                   |
-| 2026-02-11 | Amended  | Unified client registry and grant-based session model; clarified lifecycle semantics |
-| 2026-02-11 | Amended  | Added authorization code infrastructure and backend atomicity requirements           |
-| 2026-03-11 | Accepted | Phases 0-5 implemented (authorization code, token exchange, device flow, revocation) |
+| Date       | Status   | Notes                                                                                                        |
+|------------|----------|--------------------------------------------------------------------------------------------------------------|
+| 2026-02-10 | Proposed | Draft including token exchange constraints and acceptance criteria                                           |
+| 2026-02-11 | Amended  | Unified client registry and grant-based session model; clarified lifecycle semantics                         |
+| 2026-02-11 | Amended  | Added authorization code infrastructure and backend atomicity requirements                                   |
+| 2026-03-11 | Accepted | Phases 0-5 implemented (authorization code, token exchange, device flow, revocation)                         |
 | 2026-03-19 | Amended  | Revised token exchange resource policy (section 5.4) to support delegated intermediary pattern; see ADR-0002 |
 
 ---
