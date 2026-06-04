@@ -88,8 +88,8 @@ esac
 curl -s "https://$(hostname)/" > /dev/null \
     || error Failed to validate connectivity to "https://$(hostname)/"
 
-[[ -f /etc/httpd/conf.d/wsgi.conf ]] \
-    || error Failed to detect /etc/httpd/conf.d/wsgi.conf prerequisite
+[[ -f /etc/httpd/conf.d/wsgi.conf || -f /etc/httpd/conf.modules.d/10-wsgi-python3.conf ]] \
+    || error Failed to detect mod_wsgi config prerequisite \(checked /etc/httpd/conf.d/wsgi.conf and /etc/httpd/conf.modules.d/10-wsgi-python3.conf\)
 
 # TODO: change if we can use installed data resources instead of source tree
 [[ -f pyproject.toml ]] \
