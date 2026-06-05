@@ -16,6 +16,7 @@
 from __future__ import annotations
 import time
 import base64
+import json
 import logging
 import requests
 from datetime import datetime, timezone
@@ -64,6 +65,30 @@ def get_current_session(dont_abort:bool = False) -> Tuple[Optional[str], Optiona
 
     logger.debug(f"No active session found for {skey[:8]}...")
     return (None, None) if dont_abort else abort(404)
+
+
+def check_acr(userinfo: dict, required_acr: List[str]) -> List[str]:
+    """Check that the acr claim contains all required assurance URIs.
+
+    Returns the list of missing URIs -- empty means all requirements met.
+    """
+    acr_values = set((userinfo.get("acr") or "").split())
+    return [v for v in required_acr if v not in acr_values]
+
+
+def extract_jwt_txn(token: str) -> Optional[str]:
+    """Extract the txn claim from a JWT without signature verification.
+
+    Returns the txn string if present, None otherwise. Never raises -- tokens
+    that are opaque, malformed, or simply lack a txn claim return None silently.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims.get("txn") or None
+    except Exception:
+        return None
 
 
 def get_realm(realm=None) -> str:
@@ -154,7 +179,9 @@ def refresh_access_token(sid, session):
             session.session_metadata.system["refresh_token_expires_at"] = session.absolute_expires_at
 
         logger.debug(f"Access token refresh for session {sid} for user {user} ({sub}) on realm {realm} complete")
-        audit_event("access_token_refreshed", session_id=sid, user=user, sub=sub, realm=realm)
+        txn = extract_jwt_txn(refreshed["access_token"])
+        audit_event("access_token_refreshed", session_id=sid, user=user, sub=sub, realm=realm,
+                    **({"txn": txn} if txn else {}))
         updated = True
 
     return updated
@@ -203,12 +230,14 @@ def refresh_additional_tokens(sid, session):
         })
         updated = True
 
+        txn = extract_jwt_txn(refreshed["access_token"])
         audit_event("additional_token_refresh_success",
                     sid=sid,
                     user=user,
                     sub=sub,
                     scope=scope,
-                    expires_at=datetime.fromtimestamp(refreshed["expires_at"], timezone.utc).isoformat())
+                    expires_at=datetime.fromtimestamp(refreshed["expires_at"], timezone.utc).isoformat(),
+                    **({"txn": txn} if txn else {}))
     session.additional_tokens = tokens
 
     return updated
@@ -218,9 +247,14 @@ def revoke_tokens(sid, session):
     if session.is_service():
         return
 
+    realm = session.realm
+    _profile = current_app.config.get("OIDC_IDP_PROFILES", {}).get(realm, {})
+    if _profile.get("skip_token_revocation"):
+        logger.debug(f"Skipping token revocation for realm={realm} (skip_token_revocation=true)")
+        return
+
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
-    realm = session.realm
     client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(realm, native_client=session.is_device())
     try:
         # try to revoke all tokens associated with the session
@@ -395,9 +429,12 @@ def enrich_userinfo_from_endpoint(
         Enriched userinfo dict.
     """
     missing_before = [c for c in fallback_claims if not userinfo.get(c)]
+    txn = extract_jwt_txn(access_token)
 
     try:
         endpoint_data = client.fetch_userinfo(access_token)
+        audit_event("userinfo_fetched", realm=realm, sub=sub,
+                    **({"txn": txn} if txn else {}))
     except Exception as exc:
         logger.warning(
             "userinfo fallback failed for realm=%s sub=%s missing=%s: %s",
@@ -436,15 +473,9 @@ def enrich_userinfo_from_endpoint(
             missing_claims=missing_after,
         )
     else:
-        logger.info(
+        logger.debug(
             "userinfo fallback filled claims for realm=%s sub=%s filled=%s",
-            realm, sub, missing_before,
-        )
-        audit_event(
-            "userinfo_fallback_filled",
-            realm=realm,
-            sub=sub,
-            filled_claims=filled,
+            realm, sub, filled,
         )
 
     return userinfo

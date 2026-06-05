@@ -30,6 +30,8 @@ from ..api.common.util import (
     augment_session,
     enrich_userinfo_from_endpoint,
     get_missing_scope_claims,
+    extract_jwt_txn,
+    check_acr,
     revoke_tokens,
     safe_referrer,
     is_transient_request_error
@@ -164,26 +166,38 @@ def callback():
         # for the scopes that were requested. Fires automatically; opt out per
         # realm with skip_userinfo_fallback: true in the IDP profile. Never aborts
         # -- the session is created in degraded form if the endpoint also fails.
-        _profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
-        if not _profile.get("skip_userinfo_fallback"):
-            _missing = get_missing_scope_claims(
-                _profile.get("scopes", ""),
+        profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
+        if not profile.get("skip_userinfo_fallback"):
+            missing = get_missing_scope_claims(
+                profile.get("scopes", ""),
                 userinfo,
-                _profile.get("scope_expected_claims"),
+                profile.get("scope_expected_claims"),
             )
-            if _missing:
+            if missing:
                 logger.debug(
                     "userinfo fallback triggered for realm=%s sub=%s missing=%s",
-                    realm, userinfo.get("sub"), _missing,
+                    realm, userinfo.get("sub"), missing,
                 )
                 userinfo = enrich_userinfo_from_endpoint(
                     client,
                     tokens.get("access_token"),
                     userinfo,
-                    _missing,
+                    missing,
                     realm=realm,
                     sub=userinfo.get("sub"),
                 )
+
+        # ACR assertion: reject login if the ID token does not meet configured assurance requirements.
+        required_acr = profile.get("required_acr")
+        if required_acr:
+            failed_acr = check_acr(userinfo, required_acr)
+            if failed_acr:
+                audit_event("login_acr_rejected",
+                            realm=realm,
+                            sub=userinfo.get("sub"),
+                            acr=userinfo.get("acr"),
+                            failed_requirements=failed_acr)
+                abort(403, description="Insufficient authentication assurance level")
 
         # Augment the session, if applicable
         userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
@@ -206,13 +220,15 @@ def callback():
 
         sub = userinfo.get("sub")
         user = userinfo.get("email")
+        txn = extract_jwt_txn(tokens.get("access_token", ""))
         logger.info(f"Login successful for user {user} ({sub}) with session id {sid} on realm {realm}")
         audit_event("login",
                     session_id=sid,
                     user=user,
                     sub=sub,
                     scopes=get_effective_scopes(session_data),
-                    realm=realm)
+                    realm=realm,
+                    **({"txn": txn} if txn else {}))
 
         if metadata.get("augmentation_deferred", False):
             g.session_key = session_key

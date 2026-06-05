@@ -19,6 +19,22 @@
     },
     "client_secret_file": "secrets/cognito_client_secret.json"
   },
+  "ras": {
+    "discovery_url": "https://stsstg.nih.gov/.well-known/openid-configuration",
+    "userinfo_url": "https://stsstg.nih.gov/openid/connect/v1.1/userinfo",
+    "logout_url": "https://authtest.nih.gov/siteminderagent/smlogout.asp",
+    "scopes": "openid email profile federated_identities_ial2 ga4gh_passport_v1",
+    "scope_expected_claims": {
+      "profile": ["name", "preferred_username", "federated_identities_ial2"]
+    },
+    "request_offline_access_scope_in_device_flow": false,
+    "skip_token_revocation": true,
+    "required_acr": [
+      "https://stsstg.nih.gov/assurance/aal/2",
+      "https://stsstg.nih.gov/assurance/ial/2"
+    ],
+    "client_secret_file": "secrets/ras_client_secret.json"
+  },
   "globus": {
     "discovery_url": "https://auth.globus.org/.well-known/openid-configuration",
     "introspect_url": "https://auth.globus.org/v2/oauth2/token/introspect",
