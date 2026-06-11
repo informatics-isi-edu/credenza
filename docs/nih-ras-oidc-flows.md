@@ -4,7 +4,9 @@
 authenticates users against the NIH Research Authorization Service (RAS) / NIH Login
 identity provider, for two distinct client experiences:
 
-1. **Browser flow** -- OAuth 2.1 Authorization Code with PKCE, for interactive web clients.
+1. **Browser sign-in** -- two variants over the same upstream RAS login: a legacy
+   session-cookie login for webauthn consumers (the path under active test, Sec. 3 A1) and
+   an OAuth 2.1 Authorization Code + PKCE flow for OAuth-native clients (Sec. 3 A2).
 2. **Device flow** -- OAuth 2.0 Device Authorization Grant (RFC 8628), for CLIs, headless
    tools, and input-constrained devices.
 
@@ -18,6 +20,15 @@ RAS-specific claims (`federated_identities_ial2`).
 > (`stsstg.nih.gov`). RAS **production** (`sts.nih.gov`) has **not** been tested. Endpoints,
 > assurance URIs, claim shapes, and especially refresh-token behavior (Sec. 4.3) may differ in
 > production and must be re-validated there before any production reliance.
+
+> **Terminology -- "webauthn".** Throughout this document, *webauthn* refers to DERIVA's
+> legacy authentication / session-broker service and its session API -- the `client` /
+> `attributes` document returned by `GET /session` that DERIVA components consume for
+> identity and group/ACL decisions. It is **not** the W3C Web Authentication standard
+> (WebAuthn / FIDO2, i.e. passkeys and security keys); the two are unrelated despite the
+> shared name. (The W3C standard may separately appear upstream at the NIH Login / login.gov
+> authenticator layer as an AAL2 MFA method -- that is a distinct concern from DERIVA's
+> `webauthn` session service named here.)
 
 ---
 
@@ -33,22 +44,24 @@ flowchart LR
     Z["Credenza<br/>(AS + RP broker)"]
     R["RAS<br/>(NIH Login OP)"]
 
-    C -->|"/authorize, then /token"| Z
-    Z -.->|"redirect + code, then session token"| C
+    C -->|"A1: /login<br/>A2: /authorize + /token"| Z
+    Z -.->|"A1: Set-Cookie session<br/>A2: code, then session token"| C
     Z ==>|"upstream /authorize, then /token"| R
     R -.->|"code, then id_token"| Z
 ```
 
-- **Downstream plane** (`C <-> Z`): Credenza is the OAuth 2.1 Authorization Server / broker.
+- **Downstream plane** (`C <-> Z`): Credenza is the session broker -- either a plain OIDC RP
+  issuing a session cookie (legacy webauthn login, Sec. 3 A1) or an OAuth 2.1 Authorization
+  Server issuing codes/tokens (Sec. 3 A2).
 - **Upstream plane** (`Z <-> R`): Credenza is the OIDC Relying Party to RAS.
 
 Credenza spans both planes. PKCE, authorization codes, `state`, and `nonce` exist
 *independently* on each.
 
-| Plane          | Credenza role                    | Peer                | Auth-code                              | PKCE                                                                 | nonce / state                                               |
-|----------------|----------------------------------|---------------------|----------------------------------------|----------------------------------------------------------------------|-------------------------------------------------------------|
-| **Downstream** | Authorization Server (OAuth 2.1) | Client app / device | Credenza-issued, single-use, 5 min TTL | Client supplies `code_challenge` (S256); required for public clients | client `state` echoed back                                  |
-| **Upstream**   | OIDC Relying Party               | RAS OP              | RAS-issued, exchanged once by Credenza | Credenza generates `code_verifier` per login                         | Credenza generates `nonce` + `state`, validates in ID token |
+| Plane          | Credenza role                                     | Peer                                       | Auth-code                                                                    | PKCE                                                                                                                                                                          | nonce / state                                               |
+|----------------|---------------------------------------------------|--------------------------------------------|------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------|
+| **Downstream** | OIDC RP + session broker (A1) / OAuth 2.1 AS (A2) | Webauthn consumer (A1) / OAuth client (A2) | A1: session cookie (no code); A2: Credenza-issued single-use code, 5 min TTL | A2: client supplies `code_challenge` (S256), required for public clients. A1: no downstream client PKCE -- but the upstream RAS exchange uses PKCE in both (see Upstream row) | client `state` echoed back (A2)                             |
+| **Upstream**   | OIDC Relying Party                                | RAS OP                                     | RAS-issued, exchanged once by Credenza                                       | Credenza generates `code_verifier` per login                                                                                                                                  | Credenza generates `nonce` + `state`, validates in ID token |
 
 The bearer token Credenza ultimately returns to the client is an **opaque Credenza
 session key**, never the RAS access/ID token. RAS tokens are held server-side in the
@@ -59,8 +72,7 @@ introspect Credenza, not RAS.
 
 ## 2. RAS realm configuration
 
-The upstream relationship is declared as a realm in `oidc_idp_profiles.json`. The live
-`nih-ras` profile:
+The upstream relationship is declared as a realm in `oidc_idp_profiles.json`. The `nih-ras` profile:
 
 ```json
 {
@@ -84,6 +96,7 @@ The upstream relationship is declared as a realm in `oidc_idp_profiles.json`. Th
 }
 ```
 
+
 | Setting                                                 | Compliance / compatibility role                                                                                                                                                                                                                    |
 |---------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `discovery_url`                                         | RFC 8414 / OIDC Discovery. Credenza fetches the RAS `authorization_endpoint`, `token_endpoint`, `jwks_uri`, etc. at startup; no endpoints are hardcoded.                                                                                           |
@@ -97,9 +110,52 @@ The upstream relationship is declared as a realm in `oidc_idp_profiles.json`. Th
 
 ---
 
-## 3. Flow A -- Browser Authorization Code + PKCE
+## 3. Flow A -- Browser sign-in
+
+Credenza supports two downstream browser sign-in variants over the **same** upstream RAS
+OIDC login. They differ only at the entry point (Sec. 3.2) and at session delivery
+(Sec. 3.4); the upstream RAS leg (Sec. 3.3) is identical, and both create the same
+`SessionType.USER` session.
+
+- **(A1) Legacy session-cookie login (`rest/login.py`).** Credenza acts purely as an OIDC
+  Relying Party and session broker: `GET /login` -> RAS -> `/callback` sets a session
+  cookie and redirects to the caller, which then reads `GET /session` in the legacy
+  webauthn shape (`client` / `attributes`). **This is the path under active test and the
+  primary rollout target** -- it lets NIH-RAS drop in as a webauthn-compatible replacement
+  for Globus for DERIVA and other existing webauthn consumers, with no client-side change.
+- **(A2) OAuth 2.1 Authorization Code + PKCE (`rest/authorize.py` + `rest/token.py`).** The
+  downstream OAuth Authorization Server path for OAuth-native clients: `GET /authorize`
+  (client supplies a PKCE challenge) -> RAS -> `/callback` mints a single-use authorization
+  code -> the client redeems it at `POST /token` for an opaque session key.
 
 ### 3.1 Sequence
+
+**(A1) Legacy session-cookie login (primary / under test):**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Browser (webauthn consumer, e.g. DERIVA)
+    participant Z as Credenza (OIDC RP / session broker)
+    participant R as RAS (NIH Login OP)
+
+    C->>Z: GET /login?referrer=...
+    Z->>Z: Generate state + upstream nonce + code_verifier (PKCE),<br/>store authn_request_ctx (no oauth_client_id)
+    Z-->>C: 302 -> RAS authorization_endpoint (upstream PKCE)
+    C->>R: GET RAS /authorize
+    Note over R: User authenticates at NIH Login (AAL2 / IAL2)
+    R-->>C: 302 -> Credenza /callback?code&state
+    C->>Z: GET /callback?code&state
+    Z->>R: POST RAS /token (code + Credenza code_verifier)
+    R-->>Z: id_token, access_token (+ userinfo claims)
+    Z->>Z: Validate id_token + nonce, enforce required_acr (AAL2+IAL2), userinfo fallback
+    Z->>Z: Create USER session (SessionType.USER)
+    Z-->>C: 302 -> referrer + Set-Cookie session key (HttpOnly, Secure, SameSite=Lax)
+    C->>Z: GET /session (cookie)
+    Z-->>C: legacy webauthn session (client / attributes)
+```
+
+**(A2) OAuth 2.1 Authorization Code + PKCE (OAuth-native clients):**
 
 ```mermaid
 sequenceDiagram
@@ -129,26 +185,40 @@ sequenceDiagram
     Z-->>C: session document (identities, scopes, ...)
 ```
 
-### 3.2 Step 1 -- `GET /authorize` (downstream, Credenza as AS)
+### 3.2 Step 1 -- Browser entry (two variants)
 
-Validated strictly before any redirect (`rest/authorize.py`):
+**(A1) `GET /login` -- legacy session-cookie login (the path under test).** Handled by
+`rest/login.py`. There is no downstream client, `redirect_uri`, or client-side PKCE to
+negotiate -- Credenza is itself the consumer's broker. The only input is an optional
+`referrer`. If a valid session cookie already exists the request short-circuits to a
+redirect. Otherwise, Credenza generates `state` (a UUID), an upstream `nonce`, and an
+upstream `code_verifier`, stores a minimal `authn_request_ctx` with **no** `oauth_*` keys
+(so `is_oauth_flow` is false at the callback), and 302-redirects to RAS.
+
+**(A2) `GET /authorize` -- OAuth 2.1 AS (for OAuth-native clients).** Handled by
+`rest/authorize.py`, with strict validation before any redirect:
 
 - `client_id` -- must exist and be enabled in the client registry (else `400`/`401`, **no
   redirect**, because the `redirect_uri` is not yet trusted).
 - `redirect_uri` -- must **exactly** match a registered `allowed_redirect_uris` entry.
 - `response_type` -- must be `code`.
-- **PKCE** -- `code_challenge` is **required for public clients**; `code_challenge_method`
+- `code_challenge` -- **PKCE** is required for public clients; `code_challenge_method`
   must be `S256` (the `plain` method is rejected for everyone).
 - `scope` / `resource` -- must be within the client's `allowed_scopes` / `allowed_resources`.
 
-After validation, Credenza opens the **upstream** leg to RAS via
-`create_authorization_url(use_pkce=True, state=oidc_state, nonce=...)`, generating its own
-upstream `code_verifier` and `nonce`. All cross-leg state is stashed in a transient
-`authn_request_ctx` keyed by the upstream `oidc_state`:
+Both variants then open the **upstream** leg to RAS via
+`create_authorization_url(use_pkce=ENABLE_PKCE, state=..., nonce=...)`, generating Credenza's
+own upstream `code_verifier` and `nonce`, and stash them in a transient `authn_request_ctx`
+keyed by the upstream `state`. **PKCE on the RAS exchange is on by default (`ENABLE_PKCE`)
+for both A1 and A2** -- the legacy `/login` path is not a weaker exchange; it simply has no
+*downstream* client-PKCE leg because there is no downstream OAuth client. The A2 path additionally records the `oauth_*` keys that
+later drive code issuance:
 
 ```text
-authn_request_ctx[oidc_state] = {
+authn_request_ctx[state] = {
   nonce, code_verifier, scope, realm, redirect_uri (=/callback),
+  referrer,                                            # A1 (legacy login) only
+  # --- A2 (OAuth AS) only: ---
   oauth_client_id, oauth_redirect_uri, oauth_state,
   oauth_scope, oauth_resources,
   oauth_code_challenge, oauth_code_challenge_method,   # the CLIENT's PKCE challenge
@@ -156,13 +226,15 @@ authn_request_ctx[oidc_state] = {
 }
 ```
 
-The client's PKCE challenge is carried here and later copied into the issued code payload --
-it is verified at `/token` time, not now.
+The presence of `oauth_client_id` is exactly what the callback uses to tell the two paths
+apart (`is_oauth_flow`). For A2 the client's PKCE challenge is carried here and verified at
+`/token` time (not now).
 
-### 3.3 Step 2 -- `GET /callback` (upstream, Credenza as RP)
+### 3.3 Step 2 -- `GET /callback` (upstream RAS leg, shared by A1 and A2)
 
-RAS redirects back with its authorization code. Credenza
-(`rest/login.py`):
+RAS redirects back with its authorization code to the single `/callback` in `rest/login.py`.
+Both variants run identical upstream processing here and only branch on `is_oauth_flow` at
+the very end (Sec. 3.4):
 
 1. Looks up `authn_request_ctx` by `state`.
 2. Exchanges the RAS code at the RAS token endpoint, presenting the **upstream**
@@ -174,12 +246,39 @@ RAS redirects back with its authorization code. Credenza
 5. **UserInfo fallback** -- `get_missing_scope_claims()` checks the ID token against
    `scope_expected_claims`. If `federated_identities_ial2` is absent, Credenza calls the
    RAS `userinfo_url` (bearer = RAS access token) and merges the result.
-6. Creates a `SessionType.USER` session holding the RAS tokens + userinfo, bound to the
-   `oauth_resources` / `oauth_session_ttl` from the original `/authorize`.
+6. Creates a `SessionType.USER` session holding the RAS tokens + userinfo. For A2 the
+   session is bound to the `oauth_resources` / `oauth_session_ttl` from the original
+   `/authorize`; for A1 (`/login`) it follows the default interactive session policy.
 
-### 3.4 Step 3 -- single-use authorization code issuance
+### 3.4 Step 3 -- session delivery (where A1 and A2 diverge)
 
-Credenza mints its **own** downstream authorization code (distinct from the RAS code):
+**(A1) Legacy cookie -- the path under test.** The callback sets a session **cookie** and
+302-redirects to the `referrer`. There is no authorization code and no `/token` call: the
+consumer is now authenticated and reads `GET /session` (cookie-authenticated) in the legacy
+webauthn shape. Sec. 3.5 does **not** apply to A1.
+
+What the cookie contains: **only the opaque Credenza session key** -- a random, unguessable
+lookup token into the server-side session store. The RAS access/ID/refresh tokens and the
+userinfo (including `federated_identities_ial2`) are **never** placed in the cookie; they
+are held server-side in the session record (AES-GCM encrypted at rest) and are reachable
+only by presenting the session key. The cookie is therefore a bearer credential for the
+Credenza session, not a token container.
+
+Cookie attributes (`rest/login.py`):
+
+- `HttpOnly` -- not readable from JavaScript, mitigating session-key theft via XSS.
+- `Secure` -- transmitted only over HTTPS.
+- `SameSite=Lax` -- withheld on cross-site subrequests (CSRF mitigation) while still sent on
+  top-level navigations, so the post-login redirect to the consumer works.
+- `Domain` -- from `COOKIE_DOMAIN`: unset = host-only (exact FQDN); `true` = the registrable
+  base domain (computed via the public suffix list) so one session can be shared across
+  sibling service subdomains; or an explicit domain string.
+- name from `COOKIE_NAME`; no `Max-Age`/`Expires`, so it is a **session cookie** (dropped
+  when the browser closes) while the authoritative lifetime is the server-side session TTL.
+  `GET /logout` clears it (empty value, past expiry, same `Secure`/`HttpOnly`/`SameSite`).
+
+**(A2) Single-use authorization code.** Credenza instead mints its **own** downstream
+authorization code (distinct from the RAS code):
 
 ```text
 auth_code = token_urlsafe(32)
@@ -194,9 +293,10 @@ It then 302-redirects to the client's `redirect_uri` with `code` and the echoed 
 `state`. (If the client requires consent, an ADR-0002 consent interstitial is inserted
 first; the code is issued only after approval.)
 
-### 3.5 Step 4 -- `POST /token` (`grant_type=authorization_code`)
+### 3.5 Step 4 -- `POST /token` (`grant_type=authorization_code`, A2 only)
 
-`_handle_authorization_code_grant` (`rest/token.py`) performs, in order:
+(Applies only to the OAuth-AS variant; the legacy login path already delivered the session
+via cookie in Sec. 3.4.) `_handle_authorization_code_grant` (`rest/token.py`) performs, in order:
 
 1. **Atomic consume** -- `consume_authorization_code(code)` is a single read-and-delete.
    The code is destroyed on first use; a replay returns `invalid_grant`. Atomicity is
@@ -223,7 +323,8 @@ the session minted during `/callback`.
 
 ### 3.6 `GET /session` excerpt (browser / USER session)
 
-> _`GET /session` response for a `nih-ras` USER session._
+> _`GET /session` response for a `nih-ras` USER session -- legacy webauthn shape
+> (`client` / `attributes`), as the A1 cookie path returns it under `ENABLE_LEGACY_API`._
 
 ```json
 {
@@ -325,7 +426,9 @@ Response:
 
 ### 4.3 Step 2 -- user verification + upstream RAS login
 
-The user opens `verification_uri`. `verify_device`:
+The user opens `verification_uri`. 
+
+The `verify_device` function:
 
 - **single-use** consumes the `user_code -> device_code` mapping
   (`consume_usercode_mapping`); a second use of the same `user_code` returns `404`.
@@ -338,7 +441,7 @@ The user opens `verification_uri`. `verify_device`:
   `access_type=offline`, which is the mechanism RAS actually keys refresh-token issuance
   off of (see the note below).
 
-`device_callback` then mirrors the browser callback: RAS code exchange (with PKCE),
+The `device_callback` function then mirrors the browser callback: RAS code exchange (with PKCE),
 ID-token + nonce validation, **`required_acr` enforcement (AAL2 + IAL2)**, userinfo
 fallback for `federated_identities_ial2`, and creation of a `SessionType.DEVICE` session.
 The flow is marked `verified` with the session key attached, and the PKCE verifier / nonce
@@ -536,7 +639,7 @@ detail) sub-blocks, keyed by source provider (e.g. `login.gov`):
 }
 ```
 
-`RasSessionAugmentationProvider.build_identities()` canonicalizes this **at render time**
+The `RasSessionAugmentationProvider.build_identities()` function gocanonicalizes this **at render time**
 (a pure transform of stored claims; nothing extra is persisted) into a map keyed by the
 identity id (`sources[src].identity_username`, matching RAS's own
 `default_identity` / `authenticated_identity` handle):
@@ -580,6 +683,7 @@ or the `LEGACY_IDENTITY_DETAIL` opt-in.
 | RAS identity claims                                             | `federated_identities_ial2` scope + UserInfo fallback + `RasSessionAugmentationProvider`                                                               | `ras_provider.py`                                 |
 | Device grant (RFC 8628)                                         | `device_code`/`user_code`, `interval`, `slow_down`, `authorization_pending`, `expired_token`                                                           | `rest/device.py`, `rest/token.py`                 |
 | No upstream token leakage                                       | downstream bearer = opaque Credenza session key                                                                                                        | `rest/token.py`                                   |
+| Session cookie hardening (A1)                                   | cookie holds only the opaque session key (no RAS tokens/claims); `HttpOnly`, `Secure`, `SameSite=Lax`; tokens held server-side (AES-GCM at rest)       | `rest/login.py`                                   |
 | Token revocation peculiarity                                    | `skip_token_revocation` (RAS has no standard RFC 7009 endpoint)                                                                                        | `oidc_idp_profiles.json`                          |
 | Refresh rotation + dead-grant eviction                          | rotated refresh token persisted each cycle; worker evicts on terminal OAuth error or after `MAX_REFRESH_FAILURES` (`session_evicted_refresh_failures`) | `refresh/refresh_worker.py`, `api/common/util.py` |
 
@@ -590,7 +694,8 @@ or the `LEGACY_IDENTITY_DETAIL` opt-in.
 | Endpoint                                  | Method  | Plane      | Purpose                                                                     |
 |-------------------------------------------|---------|------------|-----------------------------------------------------------------------------|
 | `/.well-known/oauth-authorization-server` | GET     | Downstream | RFC 8414 AS metadata                                                        |
-| `/authorize`                              | GET     | Downstream | OAuth 2.1 Authorization Code + PKCE                                         |
+| `/login`                                  | GET     | Downstream | Legacy session-cookie login (A1, webauthn consumers -- the path under test) |
+| `/authorize`                              | GET     | Downstream | OAuth 2.1 Authorization Code + PKCE (A2)                                    |
 | `/callback`                               | GET     | Upstream   | RAS OIDC redirect handler (browser)                                         |
 | `/token`                                  | POST    | Downstream | `authorization_code`, `device_code`, `token-exchange`, `client_credentials` |
 | `/device_authorization` (`/device/start`) | POST    | Downstream | RFC 8628 device authorization request                                       |
