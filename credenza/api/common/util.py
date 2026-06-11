@@ -145,6 +145,40 @@ def get_tokens_by_scope(session: SessionData) -> dict:
     return tokens
 
 
+# OAuth error codes that mean the refresh grant is permanently dead -- retrying
+# will never succeed, so the session should be evicted on the first occurrence
+# rather than waiting out the consecutive-failure counter.
+TERMINAL_REFRESH_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+
+def _record_refresh_failure(session, exc) -> None:
+    """Track a failed upstream refresh on the session metadata.
+
+    Increments a consecutive-failure counter and records the last error so the
+    refresh worker can decide to give up and evict (see run_refresh_worker).
+    `last_refresh_error_terminal` flags hard OAuth errors that warrant immediate
+    eviction.
+    """
+    err_code = getattr(exc, "error", None)
+    if not isinstance(err_code, str):
+        err_code = None
+    sys_meta = session.session_metadata.system
+    sys_meta["refresh_failure_count"] = sys_meta.get("refresh_failure_count", 0) + 1
+    sys_meta["last_refresh_failure_at"] = int(time.time())
+    sys_meta["last_refresh_error"] = (err_code or str(exc))[:200]
+    sys_meta["last_refresh_error_terminal"] = err_code in TERMINAL_REFRESH_ERRORS
+
+
+def _clear_refresh_failures(session) -> None:
+    """Reset the consecutive-failure tracking after a successful refresh."""
+    sys_meta = session.session_metadata.system
+    if sys_meta.get("refresh_failure_count"):
+        sys_meta["refresh_failure_count"] = 0
+        sys_meta.pop("last_refresh_failure_at", None)
+        sys_meta.pop("last_refresh_error", None)
+        sys_meta.pop("last_refresh_error_terminal", None)
+
+
 def refresh_access_token(sid, session):
     sub = session.userinfo.get("sub")
     user = session.userinfo.get("email")
@@ -162,10 +196,13 @@ def refresh_access_token(sid, session):
         try:
             refreshed = client.refresh_access_token(refresh_token=session.refresh_token)
         except Exception as e:
+            _record_refresh_failure(session, e)
             logger.warning(
                 f"Access token refresh failed for session {sid} for user {user} {sub} on realm {realm}: {e}")
             audit_event("access_token_refresh_failed",
-                        session_id=sid, user=user, sub=sub, realm=realm, error=str(e))
+                        session_id=sid, user=user, sub=sub, realm=realm, error=str(e),
+                        failure_count=session.session_metadata.system.get("refresh_failure_count"),
+                        terminal=session.session_metadata.system.get("last_refresh_error_terminal", False))
             return updated
 
         # update tokens and metadata
@@ -178,6 +215,7 @@ def refresh_access_token(sid, session):
             session.absolute_expires_at = now + refresh_expires_in
             session.session_metadata.system["refresh_token_expires_at"] = session.absolute_expires_at
 
+        _clear_refresh_failures(session)
         logger.debug(f"Access token refresh for session {sid} for user {user} ({sub}) on realm {realm} complete")
         txn = extract_jwt_txn(refreshed["access_token"])
         audit_event("access_token_refreshed", session_id=sid, user=user, sub=sub, realm=realm,

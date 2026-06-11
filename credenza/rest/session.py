@@ -262,9 +262,22 @@ def _format_attributes(claim_names: list, attributes: list, session: SessionData
     return attributes
 
 
+def _canonical_identities(session: SessionData) -> dict:
+    """Build the canonical identities map for a session at render time.
+
+    Linked-identity canonicalization is a pure transform of claims already in
+    userinfo (no I/O), so it is computed on demand via the realm's augmentation
+    provider rather than persisted into the session. Returns a dict keyed by
+    canonical identity id whose values hold per-identity detail.
+    """
+    provider = get_augmentation_provider(session.realm)
+    return provider.build_identities(session.userinfo) if provider else {}
+
+
 def make_session_response(sid, session: SessionData):
     response = {}
     store = current_app.config["SESSION_STORE"]
+    canonical_identities = _canonical_identities(session)
 
     if current_app.config.get("ENABLE_LEGACY_API", False):
         issuer =             _claim(session, "iss", session.userinfo.get("iss"))
@@ -275,20 +288,19 @@ def make_session_response(sid, session: SessionData):
 
         # format "client" object
         client_id = f"{issuer}/{sub}" if issuer else sub
-        client = {
-            "id": client_id,
-            "display_name": preferred_username,
-            "full_name": full_name,
-            "email": email,
-        }
+        client = {"id": client_id,
+                  "display_name": preferred_username,
+                  "full_name": full_name,
+                  "email": email}
 
-        identity_set = session.userinfo.get("identity_set", session.userinfo.get("identity_set_detail"))
-        identities = []
-        if identity_set:
-            for ident in identity_set:
-                ident_sub = ident.get("sub", ident.get("id", ident.get("userid")))
-                identities.append(f"{issuer}/{ident_sub}" if issuer else ident_sub)
-        client["identities"] = identities
+        # The legacy webauthn contract is a flat list of identity-id strings, so
+        # default to the ids (the keys of the canonical identities map) to avoid
+        # breaking existing consumers. Deployments that want the full detail
+        # objects can opt in via LEGACY_IDENTITY_DETAIL.
+        if current_app.config.get("LEGACY_IDENTITY_DETAIL", False):
+            client["identities"] = canonical_identities
+        else:
+            client["identities"] = list(canonical_identities.keys())
         response["client"] = client
 
         # format "attributes" array
@@ -334,6 +346,7 @@ def make_session_response(sid, session: SessionData):
                 "userid":             userid,
                 "groups":             groups,
                 "roles":              roles,
+                "identities":         canonical_identities,
                 "scopes":             get_effective_scopes(session),
                 "resources":          session.allowed_resources,
                 "metadata":           session.session_metadata.to_dict(),

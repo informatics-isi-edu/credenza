@@ -26,6 +26,25 @@ from credenza.api.session.storage.session_store import SessionType
 from credenza.api.common.util import get_effective_scopes
 
 
+# Canonical identities are built at render time via the realm's augmentation
+# provider. Provider canonicalization is covered by the provider unit tests; the
+# renderer tests stub the lookup to a fixed map to isolate rendering behavior.
+FIXED_IDENTITIES = {
+    "https://issuer/i1": {
+        "sub": "i1", "iss": "https://issuer", "username": "i1@example.edu",
+        "name": "Identity One", "email": "i1@example.edu", "provider": "Example University",
+    }
+}
+
+
+class _StubIdentityProvider:
+    def __init__(self, identities):
+        self._identities = identities
+
+    def build_identities(self, userinfo):
+        return self._identities
+
+
 @pytest.fixture
 def app(app, fake_current_session, monkeypatch):
     app.register_blueprint(session_blueprint)
@@ -388,13 +407,15 @@ def test_delete_session_normal(client, app, monkeypatch):
     assert app.config["COOKIE_NAME"] in cookie and "Expires=Thu, 01 Jan 1970" in cookie
 
 
-def test_make_session_response_non_legacy(app, store, base_session):
+def test_make_session_response_non_legacy(app, store, base_session, monkeypatch):
     # Arrange deterministic timestamps
     base_session.created_at = 1000000
     base_session.updated_at = 1000500
     base_session.expires_at = 1001000
 
     app.config["ENABLE_LEGACY_API"] = False
+    monkeypatch.setattr(sm, "get_augmentation_provider",
+                        lambda realm: _StubIdentityProvider(FIXED_IDENTITIES))
 
     with app.app_context():
         resp = sm.make_session_response("sid123", base_session)
@@ -411,6 +432,10 @@ def test_make_session_response_non_legacy(app, store, base_session):
     assert resp["groups"] == base_session.userinfo["groups"]
     assert resp["roles"] == base_session.userinfo["roles"]
 
+    # Modern response exposes the full canonical identities map (built at
+    # render time by the realm's augmentation provider).
+    assert resp["identities"] == FIXED_IDENTITIES
+
     # Scopes and metadata
     assert resp["scopes"] == get_effective_scopes(base_session)
     assert resp["metadata"] == base_session.session_metadata.to_dict()
@@ -426,13 +451,15 @@ def test_make_session_response_non_legacy(app, store, base_session):
 
 
 @pytest.mark.usefixtures("app", "store", "base_session")
-def test_make_session_response_legacy(app, store, base_session):
+def test_make_session_response_legacy(app, store, base_session, monkeypatch):
     # Arrange deterministic timestamps
     base_session.created_at = 1000000
     base_session.updated_at = 1000500
     base_session.expires_at = 1001000
 
     app.config["ENABLE_LEGACY_API"] = True
+    monkeypatch.setattr(sm, "get_augmentation_provider",
+                        lambda realm: _StubIdentityProvider(FIXED_IDENTITIES))
 
     with app.app_context():
         resp = sm.make_session_response("sid123", base_session)
@@ -447,9 +474,10 @@ def test_make_session_response_legacy(app, store, base_session):
     assert client_info["full_name"] == base_session.userinfo["name"]
     assert client_info["email"] == base_session.userinfo["email"]
 
-    # Identities from identity_set
-    expected_idents = [f"{issuer}/{ident['sub']}" for ident in base_session.userinfo["identity_set"]]
-    assert resp["client"]["identities"] == expected_idents
+    # Legacy default: a flat list of identity-id strings (the keys of the
+    # canonical identities map), preserving the existing webauthn contract.
+    assert resp["client"]["identities"] == list(FIXED_IDENTITIES.keys())
+    assert "https://issuer/i1" in resp["client"]["identities"]
 
     # 'attributes' array contains client then groups
     attrs = resp["attributes"]
@@ -466,6 +494,21 @@ def test_make_session_response_legacy(app, store, base_session):
     assert abs(expires_dt.timestamp() - base_session.expires_at) < 1
 
     assert resp["seconds_remaining"] == store.get_ttl("sid123")
+
+
+@pytest.mark.usefixtures("app", "store", "base_session")
+def test_make_session_response_legacy_identity_detail(app, store, base_session, monkeypatch):
+    # With LEGACY_IDENTITY_DETAIL enabled, the legacy response carries the full
+    # canonical identities map rather than just the id strings.
+    app.config["ENABLE_LEGACY_API"] = True
+    app.config["LEGACY_IDENTITY_DETAIL"] = True
+    monkeypatch.setattr(sm, "get_augmentation_provider",
+                        lambda realm: _StubIdentityProvider(FIXED_IDENTITIES))
+
+    with app.app_context():
+        resp = sm.make_session_response("sid123", base_session)
+
+    assert resp["client"]["identities"] == FIXED_IDENTITIES
 
 
 def test_get_session_service_missing_resource_403(monkeypatch, client, base_session):

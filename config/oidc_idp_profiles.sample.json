@@ -19,7 +19,7 @@
     },
     "client_secret_file": "secrets/cognito_client_secret.json"
   },
-  "ras": {
+  "nih-ras": {
     "discovery_url": "https://stsstg.nih.gov/.well-known/openid-configuration",
     "userinfo_url": "https://stsstg.nih.gov/openid/connect/v1.1/userinfo",
     "logout_url": "https://authtest.nih.gov/siteminderagent/smlogout.asp",
@@ -33,6 +33,7 @@
       "https://stsstg.nih.gov/assurance/aal/2",
       "https://stsstg.nih.gov/assurance/ial/2"
     ],
+    "session_augmentation_provider": "credenza.api.session.augmentation.ras_provider:RasSessionAugmentationProvider",
     "client_secret_file": "secrets/ras_client_secret.json"
   },
   "globus": {

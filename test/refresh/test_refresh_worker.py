@@ -425,6 +425,166 @@ def test_refresh_preserves_absolute_cap_when_refresh_expires_in_is_zero(
     )
 
 
+class _OAuthLikeError(Exception):
+    """Mimics authlib's OAuthError, which carries an `.error` code attribute."""
+    def __init__(self, error_code):
+        self.error = error_code
+        super().__init__(f"{error_code}: simulated")
+
+
+def _refreshing_session(device_session, now):
+    sess = copy.deepcopy(device_session)
+    sess.refresh_token = "rt_x"
+    sess.session_metadata.system.update({
+        "allow_automatic_refresh": True,
+        "access_token_expires_at": now + 100,  # within threshold -> triggers refresh
+    })
+    sess.absolute_expires_at = now + 100000
+    sess.expires_at = now + 100000
+    return sess
+
+
+def test_terminal_refresh_error_evicts_immediately(app, store, device_session, factory,
+                                                   profiles, audit_calls, frozen_time, monkeypatch):
+    sid = "S_TERM"
+    now = frozen_time
+    app.config["OIDC_CLIENT_FACTORY"] = factory
+    app.config["OIDC_IDP_PROFILES"] = profiles
+
+    sess = _refreshing_session(device_session, now)
+    monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+    deleted = []
+    monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
+    updated = []
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+
+    class TerminalClient:
+        def refresh_access_token(self, refresh_token):
+            raise _OAuthLikeError("invalid_grant")
+
+    monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: TerminalClient())
+    monkeypatch.setattr(rw, "refresh_additional_tokens", lambda sid, session: False)
+
+    with app.app_context():
+        with pytest.raises(StopIteration):
+            run_refresh_worker(app)
+
+    # invalid_grant is terminal -> evicted on the first failure, not persisted.
+    assert sid in deleted
+    assert not updated
+    assert any(ev == "session_evicted_refresh_failures"
+               and kw.get("terminal") is True and kw.get("failure_count") == 1
+               for ev, kw in audit_calls), audit_calls
+
+
+def test_consecutive_failures_evict_at_threshold(app, store, device_session, factory,
+                                                 profiles, audit_calls, frozen_time, monkeypatch):
+    sid = "S_FLAKY"
+    now = frozen_time
+    app.config["OIDC_CLIENT_FACTORY"] = factory
+    app.config["OIDC_IDP_PROFILES"] = profiles
+    app.config["MAX_REFRESH_FAILURES"] = 1  # evict after a single non-terminal failure
+
+    sess = _refreshing_session(device_session, now)
+    monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+    deleted = []
+    monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
+    monkeypatch.setattr(store, "update_session", lambda s, sd: None)
+
+    class FlakyClient:
+        def refresh_access_token(self, refresh_token):
+            raise RuntimeError("network blip")  # no .error attr -> non-terminal
+
+    monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: FlakyClient())
+    monkeypatch.setattr(rw, "refresh_additional_tokens", lambda sid, session: False)
+
+    with app.app_context():
+        with pytest.raises(StopIteration):
+            run_refresh_worker(app)
+
+    assert sid in deleted
+    assert any(ev == "session_evicted_refresh_failures"
+               and kw.get("terminal") is False and kw.get("failure_count") == 1
+               for ev, kw in audit_calls), audit_calls
+
+
+def test_failure_below_threshold_persists_counter(app, store, device_session, factory,
+                                                  profiles, audit_calls, frozen_time, monkeypatch):
+    sid = "S_BELOW"
+    now = frozen_time
+    app.config["OIDC_CLIENT_FACTORY"] = factory
+    app.config["OIDC_IDP_PROFILES"] = profiles
+    app.config["MAX_REFRESH_FAILURES"] = 3
+
+    sess = _refreshing_session(device_session, now)
+    monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+    deleted = []
+    monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
+    updated = []
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+
+    class FlakyClient:
+        def refresh_access_token(self, refresh_token):
+            raise RuntimeError("network blip")
+
+    monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: FlakyClient())
+    monkeypatch.setattr(rw, "refresh_additional_tokens", lambda sid, session: False)
+
+    with app.app_context():
+        with pytest.raises(StopIteration):
+            run_refresh_worker(app)
+
+    # One failure, threshold not reached: not evicted, but counter persisted.
+    assert sid not in deleted
+    assert len(updated) == 1
+    _, new_sess = updated[0]
+    assert new_sess.session_metadata.system["refresh_failure_count"] == 1
+    assert new_sess.session_metadata.system["last_refresh_error_terminal"] is False
+    # A failure-only pass is not a "session updated" event.
+    assert not any(ev == "device_session_updated" for ev, _ in audit_calls)
+
+
+def test_successful_refresh_clears_failure_counter(app, store, device_session, factory,
+                                                   profiles, audit_calls, frozen_time, monkeypatch):
+    sid = "S_RESET"
+    now = frozen_time
+    app.config["OIDC_CLIENT_FACTORY"] = factory
+    app.config["OIDC_IDP_PROFILES"] = profiles
+
+    sess = _refreshing_session(device_session, now)
+    sess.session_metadata.system.update({
+        "refresh_failure_count": 2,
+        "last_refresh_error": "network blip",
+        "last_refresh_error_terminal": False,
+    })
+    monkeypatch.setattr(store, "list_session_ids", lambda: [sid])
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+    deleted = []
+    monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
+    updated = []
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+
+    class GoodClient:
+        def refresh_access_token(self, refresh_token):
+            return {"access_token": "a", "refresh_token": "b", "expires_at": now + 3600}
+
+    monkeypatch.setattr(factory, "get_client", lambda realm, **kwargs: GoodClient())
+    monkeypatch.setattr(rw, "refresh_additional_tokens", lambda sid, session: False)
+
+    with app.app_context():
+        with pytest.raises(StopIteration):
+            run_refresh_worker(app)
+
+    assert sid not in deleted
+    assert len(updated) == 1
+    _, new_sess = updated[0]
+    assert new_sess.session_metadata.system.get("refresh_failure_count", 0) == 0
+    assert "last_refresh_error" not in new_sess.session_metadata.system
+
+
 def test_worker_survives_pass_exception(app,
                                         store,
                                         profiles,

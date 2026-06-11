@@ -199,6 +199,116 @@ def test_enrich_userinfo_globus_with_tokens(monkeypatch, app):
         assert any(item.get("display_name") == g["name"] for item in userinfo["groups"])
 
 
+def test_enrich_userinfo_globus_extends_existing_groups(monkeypatch, app):
+    existing = {"id": "https://auth.globus.org/existing", "display_name": "Existing Group"}
+    userinfo = {"iss": GlobusSessionAugmentationProvider.GLOBUS_ISSUER, "groups": [existing]}
+    additional_tokens = {GlobusSessionAugmentationProvider.GLOBUS_GROUPS_SCOPE: {"access_token": "grp_token"}}
+    sample_groups = [{"id": "g1", "name": "Group One"}, {"id": "g2", "name": "Group Two"}]
+    mock_resp = SimpleNamespace(status_code=200, json=lambda: sample_groups, raise_for_status=lambda: None)
+    monkeypatch.setattr(requests, "get", lambda url, headers, timeout=None: mock_resp)
+
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        result = provider.enrich_userinfo(userinfo, additional_tokens)
+
+    assert result is True
+    # Pre-existing groups are preserved; fetched groups are appended (extend branch).
+    assert existing in userinfo["groups"]
+    assert len(userinfo["groups"]) == 1 + len(sample_groups)
+    for g in sample_groups:
+        assert any(item.get("display_name") == g["name"] for item in userinfo["groups"])
+
+
+def test_enrich_userinfo_globus_identity_set_detail(app):
+    iss = GlobusSessionAugmentationProvider.GLOBUS_ISSUER
+    userinfo = {
+        "iss": iss,
+        "identity_set_detail": [
+            {"sub": "b25a8b75", "username": "jdoe@university.edu", "name": "Jane Doe",
+             "email": "jdoe@university.edu",
+             "identity_provider_display_name": "University of Research"},
+            {"sub": "c8e3100a", "username": "jane.doe@gmail.com", "name": "Jane Doe",
+             "email": "jane.doe@gmail.com",
+             "identity_provider_display_name": "Google"},
+        ],
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        idents = provider.build_identities(userinfo)
+
+    assert set(idents) == {f"{iss}/b25a8b75", f"{iss}/c8e3100a"}
+    first = idents[f"{iss}/b25a8b75"]
+    assert first["sub"] == "b25a8b75"
+    assert first["iss"] == iss
+    assert first["username"] == "jdoe@university.edu"
+    assert first["email"] == "jdoe@university.edu"
+    assert first["provider"] == "University of Research"
+    # build_identities is a pure transform: it does not mutate userinfo.
+    assert "identities" not in userinfo
+
+
+def test_enrich_userinfo_globus_identity_set_summary(app):
+    iss = GlobusSessionAugmentationProvider.GLOBUS_ISSUER
+    userinfo = {
+        "iss": iss,
+        "identity_set": [
+            "urn:globus:auth:identity:b25a8b75",
+            "urn:globus:auth:identity:c8e3100a",
+        ],
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        idents = provider.build_identities(userinfo)
+
+    assert set(idents) == {f"{iss}/b25a8b75", f"{iss}/c8e3100a"}
+    # Summary entries (URN strings) carry no profile detail.
+    for detail in idents.values():
+        assert set(detail.keys()) == {"sub", "iss"}
+
+
+def test_enrich_userinfo_globus_identity_merge_prefers_detail(app):
+    iss = GlobusSessionAugmentationProvider.GLOBUS_ISSUER
+    userinfo = {
+        "iss": iss,
+        "identity_set": [
+            "urn:globus:auth:identity:b25a8b75",
+            "urn:globus:auth:identity:summaryonly",
+        ],
+        "identity_set_detail": [
+            {"sub": "b25a8b75", "username": "jdoe@university.edu"},
+        ],
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        idents = provider.build_identities(userinfo)
+
+    # Detailed entry wins for the overlapping id.
+    assert idents[f"{iss}/b25a8b75"]["username"] == "jdoe@university.edu"
+    # Summary-only id is still present, minimally.
+    assert set(idents[f"{iss}/summaryonly"].keys()) == {"sub", "iss"}
+
+
+def test_enrich_userinfo_globus_identity_skips_malformed(app):
+    iss = GlobusSessionAugmentationProvider.GLOBUS_ISSUER
+    userinfo = {
+        "iss": iss,
+        "identity_set_detail": [
+            "not-a-dict",                       # non-dict entry -> skipped
+            {"username": "no-sub@example.edu"},  # missing sub -> skipped
+            {"sub": "good1", "username": "u@example.edu"},  # valid
+        ],
+        "identity_set": [
+            12345,                               # non-str entry -> skipped
+            "urn:globus:auth:identity:good2",    # valid
+        ],
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        idents = provider.build_identities(userinfo)
+
+    assert set(idents) == {f"{iss}/good1", f"{iss}/good2"}
+
+
 def test_fetch_dependent_tokens_not_globus(app):
     userinfo = {"iss": "https://other-issuer", "email": "u@example.com"}
     with app.app_context():
