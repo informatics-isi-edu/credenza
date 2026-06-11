@@ -50,10 +50,10 @@ flowchart LR
     R -.->|"code, then id_token"| Z
 ```
 
-- **Downstream plane** (`C <-> Z`): Credenza is the session broker -- either a plain OIDC RP
+- **Downstream plane** (`Client <-> Credenza`): Credenza is the session broker -- either a plain OIDC RP
   issuing a session cookie (legacy webauthn login, Sec. 3 A1) or an OAuth 2.1 Authorization
   Server issuing codes/tokens (Sec. 3 A2).
-- **Upstream plane** (`Z <-> R`): Credenza is the OIDC Relying Party to RAS.
+- **Upstream plane** (`Credenza <-> RAS`): Credenza is the OIDC Relying Party to RAS.
 
 Credenza spans both planes. PKCE, authorization codes, `state`, and `nonce` exist
 *independently* on each.
