@@ -61,6 +61,7 @@ def load_config(app):
     env_config = {
         "CREDENZA_DEFAULT_REALM": "default",
         "CREDENZA_ENABLE_PKCE": "true",
+        "CREDENZA_LOOPBACK_REDIRECT_ANY_PORT": "true",
         "CREDENZA_ENABLE_LEGACY_API": "false",
         "CREDENZA_ENABLE_REFRESH_WORKER": "true",
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
