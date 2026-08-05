@@ -15,7 +15,8 @@
 #
 import pytest
 import uuid
-from flask import jsonify, g
+
+from flask import Response, jsonify, g
 from credenza.api import common
 from credenza.rest import helpers
 
@@ -25,6 +26,27 @@ def test_make_json_response_body_and_status():
     res = helpers.make_json_response(payload)
     assert res.get_json() == payload
     assert res.mimetype == "application/json"
+
+
+@pytest.mark.parametrize("has_cookie,has_auth,expected_vary", [
+    (False, False, None),
+    (True, False, "Cookie"),
+    (False, True, "Authorization"),
+    (True, True, "Cookie, Authorization"),
+])
+def test_set_auth_cache_headers(has_cookie, has_auth, expected_vary):
+    response = Response("ok")
+    result = helpers.set_auth_cache_headers(response, has_cookie, has_auth)
+
+    assert result is response
+    if expected_vary is None:
+        assert "Cache-Control" not in response.headers
+        assert "Pragma" not in response.headers
+        assert "Vary" not in response.headers
+    else:
+        assert response.headers["Cache-Control"] == "private, no-store, must-revalidate"
+        assert response.headers["Pragma"] == "no-cache"
+        assert response.headers["Vary"] == expected_vary
 
 
 @pytest.mark.parametrize("host,config,expected", [

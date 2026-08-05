@@ -34,7 +34,7 @@ from .api.common.util import check_client_scope_coverage
 from .api.common.rate_limit import FixedWindowJitterLimiter
 from .api.common.crypto import AESGCMCodec
 from .api.common.crypto import register_default_hashers
-from .rest.helpers import is_browser_client, get_request_id
+from .rest.helpers import is_browser_client, get_request_id, set_auth_cache_headers
 from .rest.session import session_blueprint
 from .rest.login import login_blueprint
 from .rest.device import device_blueprint
@@ -246,10 +246,9 @@ def create_app():
 
     @app.after_request
     def apply_secure_headers(response):
-        if app.config["COOKIE_NAME"] in request.cookies:
-            response.headers["Cache-Control"] = "private, no-store, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
-        return response
+        has_cookie = app.config["COOKIE_NAME"] in request.cookies
+        has_auth = "Authorization" in request.headers
+        return set_auth_cache_headers(response, has_cookie, has_auth)
 
     @app.after_request
     def add_rid(resp):
