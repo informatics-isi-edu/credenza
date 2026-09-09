@@ -70,6 +70,8 @@ def load_config(app):
         "CREDENZA_APP_USE_SYSLOG": "true",
         "CREDENZA_LEGACY_DEFAULT_RESOURCE": "urn:deriva:rest:service:all",
         "CREDENZA_DERIVED_SESSION_MAX_TTL": "1800",
+        "CREDENZA_MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS": "86400",
+        "CREDENZA_LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS": "1209600",
     }
 
     # Load .env from one of these locations, if it exists

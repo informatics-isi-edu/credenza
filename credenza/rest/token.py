@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 DERIVED_SESSION_MAX_TTL = 1800  # 30-minute hard cap for derived (exchanged) sessions
 SUBJECT_TOKEN_TYPE_ACCESS = "urn:ietf:params:oauth:token-type:access_token"
+MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS = 86400  # server-wide ceiling on client_rec.absolute_session_lifetime_seconds
+LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS = 1209600  # 14 days; matches the offline_access refresh-token convention
 
 token_blueprint = Blueprint("token", __name__)
 
@@ -225,6 +227,28 @@ def _handle_client_credentials_grant(proof_ctx: ProofContext,
     # Clamp the requested TTL to the client's max_session_ttl_seconds.
     ttl = validate_and_clamp_ttl(proof_ctx=proof_ctx, client_rec=client_rec, subject=sub)
 
+    # Clamp the client's configured absolute lifetime to a server-wide ceiling. Unset
+    # (None) resolves to the ceiling itself via clamp_ttl(), preserving today's default
+    # behavior for any client that doesn't explicitly configure this field.
+    absolute_ceiling = current_app.config.get("MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS",
+                                              MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS)
+    absolute_ttl = clamp_ttl(absolute_ceiling, client_rec.absolute_session_lifetime_seconds)
+
+    # Non-blocking signal for review: flag configurations granting an unusually long
+    # M2M session lifetime, without stopping the issuance itself.
+    long_lifetime_threshold = current_app.config.get("LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS",
+                                                      LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS)
+    if absolute_ttl > long_lifetime_threshold:
+        audit_event(
+            "token_issued_long_absolute_lifetime",
+            request_id=get_request_id(),
+            realm=client_rec.realm,
+            client_id=client_id,
+            sub=sub,
+            absolute_ttl=absolute_ttl,
+            threshold=long_lifetime_threshold,
+        )
+
     # Build the userinfo dict: start from the subject, merge client and adapter additional claims.
     userinfo = merge_userinfo({"sub": sub}, client_rec, adapter_additional_claims)
 
@@ -239,6 +263,7 @@ def _handle_client_credentials_grant(proof_ctx: ProofContext,
         allowed_resources=resources,
         expires_at=int(time.time()) + ttl,
         session_ttl=ttl,
+        absolute_session_lifetime_secs=absolute_ttl,
         metadata=metadata
     )
 
@@ -251,7 +276,8 @@ def _handle_client_credentials_grant(proof_ctx: ProofContext,
         sub=sub,
         resources=resources,
         scopes=scopes,
-        ttl=ttl
+        ttl=ttl,
+        absolute_ttl=absolute_ttl
     )
 
     return jsonify({"access_token": skey,
