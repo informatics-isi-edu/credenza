@@ -90,7 +90,7 @@ token lifecycle across the deployment.
 * #### [ADR-0004: private_key_jwt Client Authentication](docs/ADR-0004-private-key-jwt-client-auth.md) — RFC 7523 asymmetric JWT adapter (blue-sky)
 * #### [ADR-0005: NIH-RAS Integration](docs/ADR-0005-nih-ras-integration.md) — NIH RAS IDP support and GA4GH Passport/Visa session augmentation for controlled-access biomedical data
 * #### [ADR-0006: Dependent Token Vending](docs/ADR-0006-dependent-token-vending.md) — secure client retrieval of upstream auxiliary tokens (e.g., Globus dependent tokens) via token exchange
-* #### [ADR-0007: Refreshable Derived Sessions](docs/ADR-0007-refreshable-derived-sessions.md) — opt-in refresh tokens for derived sessions with three-tier wall-clock cap; enables long-running API workloads against IDPs without offline_access (e.g., NIH RAS)
+* #### [ADR-0007: Refreshable Derived Sessions](docs/ADR-0007-refreshable-derived-sessions.md) — opt-in refresh tokens for derived sessions with three-tier wall-clock cap; enables long-running API workloads at delegated intermediaries (e.g., MCP servers acting on behalf of authenticated users)
 * #### [ADR-0008: Cross-Credenza Federation](docs/ADR-0008-cross-credenza-token-exchange.md) — peer introspection fallback for split deployments where tokens issued by one Credenza instance must be validated by another
 
 ### Project Status

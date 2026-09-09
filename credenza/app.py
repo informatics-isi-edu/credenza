@@ -34,7 +34,7 @@ from .api.common.util import check_client_scope_coverage
 from .api.common.rate_limit import FixedWindowJitterLimiter
 from .api.common.crypto import AESGCMCodec
 from .api.common.crypto import register_default_hashers
-from .rest.helpers import is_browser_client, get_request_id
+from .rest.helpers import is_browser_client, get_request_id, set_auth_cache_headers
 from .rest.session import session_blueprint
 from .rest.login import login_blueprint
 from .rest.device import device_blueprint
@@ -61,6 +61,7 @@ def load_config(app):
     env_config = {
         "CREDENZA_DEFAULT_REALM": "default",
         "CREDENZA_ENABLE_PKCE": "true",
+        "CREDENZA_LOOPBACK_REDIRECT_ANY_PORT": "true",
         "CREDENZA_ENABLE_LEGACY_API": "false",
         "CREDENZA_ENABLE_REFRESH_WORKER": "true",
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
@@ -69,6 +70,8 @@ def load_config(app):
         "CREDENZA_APP_USE_SYSLOG": "true",
         "CREDENZA_LEGACY_DEFAULT_RESOURCE": "urn:deriva:rest:service:all",
         "CREDENZA_DERIVED_SESSION_MAX_TTL": "1800",
+        "CREDENZA_MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS": "86400",
+        "CREDENZA_LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS": "1209600",
     }
 
     # Load .env from one of these locations, if it exists
@@ -245,10 +248,9 @@ def create_app():
 
     @app.after_request
     def apply_secure_headers(response):
-        if app.config["COOKIE_NAME"] in request.cookies:
-            response.headers["Cache-Control"] = "private, no-store, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
-        return response
+        has_cookie = app.config["COOKIE_NAME"] in request.cookies
+        has_auth = "Authorization" in request.headers
+        return set_auth_cache_headers(response, has_cookie, has_auth)
 
     @app.after_request
     def add_rid(resp):

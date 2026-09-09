@@ -29,6 +29,10 @@ from ..api.common.util import (
     get_effective_scopes,
     get_request_resource_args,
     augment_session,
+    enrich_userinfo_from_endpoint,
+    get_missing_scope_claims,
+    extract_jwt_txn,
+    check_acr,
     strtobool
 )
 
@@ -249,6 +253,41 @@ def device_callback():
         logger.error(f"{msg}: {e}")
         abort(400, description=msg)
 
+    # Fallback to IDP userinfo endpoint if the ID token is missing key claims.
+    # Same logic as the browser login path -- opt out per realm with skip_userinfo_fallback: true.
+    profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
+    if not profile.get("skip_userinfo_fallback"):
+        missing = get_missing_scope_claims(
+            profile.get("scopes", ""),
+            userinfo,
+            profile.get("scope_expected_claims"),
+        )
+        if missing:
+            logger.debug(
+                "userinfo fallback triggered for realm=%s sub=%s missing=%s",
+                realm, userinfo.get("sub"), missing,
+            )
+            userinfo = enrich_userinfo_from_endpoint(
+                client,
+                tokens.get("access_token"),
+                userinfo,
+                missing,
+                realm=realm,
+                sub=userinfo.get("sub"),
+            )
+
+    # ACR assertion: reject login if the ID token does not meet configured assurance requirements.
+    required_acr = profile.get("required_acr")
+    if required_acr:
+        failed_acr = check_acr(userinfo, required_acr)
+        if failed_acr:
+            audit_event("device_login_acr_rejected",
+                        realm=realm,
+                        sub=userinfo.get("sub"),
+                        acr=userinfo.get("acr"),
+                        failed_requirements=failed_acr)
+            abort(403, description="Insufficient authentication assurance level")
+
     # Determine refresh expiration
     now = int(time.time())
     absolute_session_lifetime_secs = tokens.get("refresh_expires_in")
@@ -300,6 +339,7 @@ def device_callback():
 
     sub = userinfo.get("sub")
     user = userinfo.get("email")
+    txn = extract_jwt_txn(tokens.get("access_token", ""))
     logger.info(f"Device login successful for user {user} ({sub}) with session id {session_id} on realm {realm}")
     audit_event("device_login",
                 session_id=session_id,
@@ -309,7 +349,8 @@ def device_callback():
                 allowed_resources=session_data.allowed_resources,
                 realm=realm,
                 offline_access=offline_granted,
-                refresh_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at, timezone.utc).isoformat())
+                refresh_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at, timezone.utc).isoformat(),
+                **({"txn": txn} if txn else {}))
 
     return render_template_string(SUCCESS_HTML)
 
