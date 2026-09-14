@@ -369,7 +369,7 @@ def merge_additional_claims(userinfo: Dict[str, Any],
         return merged, changes
 
     norm = _normalize_additional_claims(additional_claims, claim_map)
-    logger.debug("normalized_additional_claims: %s", norm)
+    logger.debug("normalized_additional_claims keys: %s", sorted(norm.keys()))
 
     #  log whether we're enforcing an allowlist (helps with auditing)
     logger.debug("merge_additional_claims: allowed_claims=%s (None => permit all)", allowed_claims)

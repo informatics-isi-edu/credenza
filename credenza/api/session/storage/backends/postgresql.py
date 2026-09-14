@@ -15,6 +15,7 @@
 #
 import os
 import psycopg2
+import psycopg2.extensions
 import psycopg2.pool
 import logging
 import time
@@ -23,6 +24,24 @@ from typing import Optional, List, Iterable, Union, Any
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_dsn(dsn):
+    """Render a libpq DSN for logging with any password removed.
+
+    The configured connection URL embeds the database password, so it must
+    never be logged verbatim. A parse failure yields a placeholder rather than
+    falling back to the original string, so a malformed DSN cannot leak either.
+    """
+    if not dsn:
+        return "<empty dsn>"
+    try:
+        params = psycopg2.extensions.parse_dsn(dsn)
+    except Exception:
+        return "<unparseable dsn>"
+    params.pop("password", None)
+    return " ".join(f"{k}={v}" for k, v in sorted(params.items()))
+
+
 class connection (psycopg2.extensions.connection):
     """Customized pyscopg2 connection factory
 
@@ -30,7 +49,7 @@ class connection (psycopg2.extensions.connection):
     """
     def __init__(self, dsn):
         psycopg2.extensions.connection.__init__(self, dsn)
-        logger.debug(f"Initializing new connection for PostgreSQL: dsn={self.dsn}")
+        logger.debug(f"Initializing new connection for PostgreSQL: dsn={_safe_dsn(self.dsn)}")
         with self.cursor() as cur:
             self._idempotent_ddl(cur)
             self._prepare_stmts(cur)
@@ -82,19 +101,21 @@ class PostgreSQLBackend:
         self.dsn = url
         self.trace = trace
         self.pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, dsn=self.dsn, connection_factory=connection)
-        logger.debug(f"Using threaded connection pool for PostgreSQL: minconn={minconn} maxconn={maxconn} url={self.dsn}")
+        logger.debug(f"Using threaded connection pool for PostgreSQL: "
+                     f"minconn={minconn} maxconn={maxconn} url={_safe_dsn(self.dsn)}")
 
     def _get_conn(self):
         conn = self.pool.getconn()
         if self.trace:
-            logger.debug(f"Got pooled connection dsn={conn.dsn} status={conn.status}")
+            logger.debug(f"Got pooled connection dsn={_safe_dsn(conn.dsn)} status={conn.status}")
         conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_READ_COMMITTED)
         return conn
 
     def _put_conn(self, conn, close=False):
         if conn is not None:
             if self.trace:
-                logger.debug(f"Returning connection to pool dsn={conn.dsn} status={conn.status} close={close}")
+                logger.debug(f"Returning connection to pool dsn={_safe_dsn(conn.dsn)} "
+                             f"status={conn.status} close={close}")
             self.pool.putconn(conn, close=close)
 
     def close(self):
@@ -102,7 +123,7 @@ class PostgreSQLBackend:
         Close the backend and clear resources.
         """
         if self.pool is not None:
-            logger.debug(f"Shutting down connection pool for dsn={self.dsn}")
+            logger.debug(f"Shutting down connection pool for dsn={_safe_dsn(self.dsn)}")
             pool = self.pool
             self.pool = None
             pool.closeall()

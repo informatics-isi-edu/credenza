@@ -20,7 +20,7 @@ import requests
 from types import SimpleNamespace
 from authlib.integrations.requests_client import OAuth2Session
 from authlib.jose import jwt
-from credenza.api.auth.oidc_client import OIDCClientFactory, OIDCClient
+from credenza.api.auth.oidc_client import OIDCClientFactory, OIDCClient, _claims_summary
 
 # Shared profile fixtures
 @pytest.fixture
@@ -343,3 +343,40 @@ def test_create_auth_url_device_scope_already_has_offline_access(client, monkeyp
 
     assert fake_sess.called_with_kwargs["code_verifier"] == "VERIFXYZ"
     assert fake_sess.called_with_kwargs["nonce"] == "NN"
+
+
+def test_claims_summary_omits_claim_values():
+    """
+    _claims_summary must expose claim names but not their values.
+
+    Decoded token payloads carry email, display name, group and role
+    memberships, and RAS passport/visa entitlements. These are logged at DEBUG,
+    which is enabled in at least one production deployment, so withholding the
+    values is a security invariant.
+    """
+    claims = {
+        "sub": "user-123",
+        "iss": "https://idp.example.org",
+        "aud": "cid",
+        "exp": 1234567890,
+        "email": "someone@example.org",
+        "name": "Some One",
+        "groups": ["cz-admins", "m2m-deriva-data-ingest"],
+        "ga4gh_passport_v1": ["a.visa.jwt.value"],
+    }
+    rendered = _claims_summary(claims)
+
+    # sensitive values withheld
+    for secret in ("someone@example.org", "Some One", "cz-admins",
+                   "m2m-deriva-data-ingest", "a.visa.jwt.value"):
+        assert secret not in rendered
+
+    # routing claims and claim names retained for diagnostics
+    assert "sub=user-123" in rendered
+    assert "iss=https://idp.example.org" in rendered
+    assert "email" in rendered and "groups" in rendered
+
+
+def test_claims_summary_survives_bad_input():
+    """A summary failure must not raise into the caller's validation path."""
+    assert _claims_summary(None) == "<claims unavailable>"
