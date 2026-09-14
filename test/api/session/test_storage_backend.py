@@ -25,7 +25,7 @@ from credenza.api.session.storage.backends.memory import MemoryBackend
 from credenza.api.session.storage.backends.redis import RedisBackend
 from credenza.api.session.storage.backends.valkey import ValkeyBackend
 from credenza.api.session.storage.backends.sqlite import SQLiteBackend
-from credenza.api.session.storage.backends.postgresql import PostgreSQLBackend
+from credenza.api.session.storage.backends.postgresql import PostgreSQLBackend, _safe_dsn
 
 postgresql = testing.postgresql.Postgresql() if platform.system() != 'Windows' else None
 
@@ -162,3 +162,38 @@ def test_backend_consume_type_and_empty_value(backend):
     assert val == b"", "consume() should return the empty bytes value that was stored"
     # subsequent operations confirm removal
     assert backend.get(key_empty) is None
+
+
+@pytest.mark.parametrize("dsn", [
+    "postgresql://credenza:sup3rs3cr3t@db.example.org/credenza",
+    "host=db.example.org user=credenza password=sup3rs3cr3t dbname=credenza",
+])
+def test_safe_dsn_removes_password(dsn):
+    """
+    _safe_dsn must never emit the password, in URL or keyword DSN form.
+
+    The configured connection URL embeds the database password, and the
+    backend logs the DSN at DEBUG on pool setup, connection checkout/return,
+    and shutdown. This is a security invariant, not a formatting preference.
+    """
+    rendered = _safe_dsn(dsn)
+    assert "sup3rs3cr3t" not in rendered
+    assert "password" not in rendered
+    # still useful for diagnostics
+    assert "db.example.org" in rendered
+    assert "credenza" in rendered
+
+
+@pytest.mark.parametrize("dsn,expected", [
+    ("", "<empty dsn>"),
+    (None, "<empty dsn>"),
+    ("not a valid dsn", "<unparseable dsn>"),
+])
+def test_safe_dsn_never_falls_back_to_input(dsn, expected):
+    """
+    A DSN that cannot be parsed must yield a placeholder, never the input.
+
+    Falling back to the original string on a parse failure would reintroduce
+    the leak for exactly the malformed values most likely to be misconfigured.
+    """
+    assert _safe_dsn(dsn) == expected

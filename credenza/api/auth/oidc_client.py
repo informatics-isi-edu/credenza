@@ -24,6 +24,23 @@ from authlib.jose import jwt, JsonWebKey
 
 logger = logging.getLogger(__name__)
 
+
+def _claims_summary(claims):
+    """Summarize token claims for logging without emitting their values.
+
+    A decoded token payload carries identity and authorization data -- email,
+    name, group and role memberships, and for the RAS realm the passport and
+    visa claims describing dataset entitlements. Only the routing claims needed
+    to correlate a request are logged, plus the set of claim names present.
+    """
+    try:
+        return (f"sub={claims.get('sub')} iss={claims.get('iss')} "
+                f"aud={claims.get('aud')} exp={claims.get('exp')} "
+                f"claim_names={sorted(claims.keys())}")
+    except Exception:
+        return "<claims unavailable>"
+
+
 class OIDCClientFactory:
     def __init__(self, profile_map):
         """
@@ -207,7 +224,7 @@ class OIDCClient:
                 "nonce": {"value": nonce} if nonce else {"essential": False}
             }
         )
-        logger.debug(f"Validating ID token claims: {claims}")
+        logger.debug(f"Validating ID token claims: {_claims_summary(claims)}")
         claims.validate(leeway=120)
         return dict(claims)
 
@@ -301,5 +318,5 @@ class OIDCClient:
         if expected_iss and actual_iss and actual_iss.rstrip("/") != expected_iss.rstrip("/"):
             raise ValueError(f"Issuer mismatch: expected {expected_iss}, got {actual_iss}")
 
-        logger.debug(f"Validated access token claims: {claims}")
+        logger.debug(f"Validated access token claims: {_claims_summary(claims)}")
         return dict(claims)
