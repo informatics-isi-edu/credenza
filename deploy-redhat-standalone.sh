@@ -25,10 +25,11 @@
 
 TMP_ENV=$(mktemp /tmp/credenza.env.XXXXXX)
 TMP_OIDC=$(mktemp /tmp/oidc_idp_profiles.json.XXXXX)
+TMP_KEY=$(mktemp /tmp/encryption_key.json.XXXXXX)
 
 cleanup()
 {
-    rm -f "${TMP_ENV}" "${TMP_OIDC}"
+    rm -f "${TMP_ENV}" "${TMP_OIDC}" "${TMP_KEY}"
 }
 
 trap cleanup 0
@@ -130,9 +131,13 @@ then
     error Failed to test for presence of credenza postgresql DB
 fi
 
-[[ $pgdbcnt -eq 1 ]] \
-    || su -c "createdb -O credenza credenza" - postgres \
-    || error Failed to create credenza postgresql DB
+if [[ $pgdbcnt -eq 1 ]]
+then
+    CREDENZA_DB_CREATED=false
+else
+    su -c "createdb -O credenza credenza" - postgres || error Failed to create credenza postgresql DB
+    CREDENZA_DB_CREATED=true
+fi
 
 # idempotently deploy default configs
 [[ -f /etc/httpd/conf.d/wsgi_credenza.conf ]] \
@@ -176,8 +181,44 @@ idempotent_semanage_add \
     httpd_sys_content_t \
     '/home/credenza/secrets/.*'
 
+# Session encryption key. Generate one only when this run also created the database, the one
+# state in which no encrypted session data can exist yet. If the database was already present,
+# a missing key file may mean the key was lost rather than never set, and generating a new one
+# would silently destroy every stored session, so warn and let credenza fail closed at startup
+# instead. An existing key file is never touched. This runs before restorecon so that a newly
+# generated key gets the SE-Linux label registered above.
+CREDENZA_ENV=/home/credenza/config/credenza.env
+CREDENZA_KEYFILE=/home/credenza/secrets/encryption_key.json
+
+# a '$' in the value means an unsubstituted "${CREDENZA_ENCRYPTION_KEY}" template, which
+# interpolates to the empty string at runtime and is not a usable key
+CREDENZA_KEY_CONFIGURED=false
+if [[ -n "$CREDENZA_ENCRYPTION_KEY" ]]
+then
+    CREDENZA_KEY_CONFIGURED=true
+elif grep -Eq '^CREDENZA_ENCRYPTION_KEY=.' "$CREDENZA_ENV" && ! grep -Eq '^CREDENZA_ENCRYPTION_KEY=.*[$]' "$CREDENZA_ENV"
+then
+    CREDENZA_KEY_CONFIGURED=true
+fi
+
+if grep -Eq '^CREDENZA_ENCRYPT_SESSION_DATA=true' "$CREDENZA_ENV" && [[ $CREDENZA_KEY_CONFIGURED = false ]]
+then
+    if [[ -r "$CREDENZA_KEYFILE" ]]
+    then
+        echo "Using existing session encryption key ${CREDENZA_KEYFILE}"
+    elif [[ $CREDENZA_DB_CREATED = true ]]
+    then
+        python3 -c 'import json, secrets; print(json.dumps({"encryption_key": secrets.token_urlsafe(24)}, indent=2))' > "${TMP_KEY}" \
+            || error Failed to generate a session encryption key
+        install -o credenza -g apache -m u=rw,go= -T "${TMP_KEY}" "${CREDENZA_KEYFILE}" \
+            || error Failed to deploy "${CREDENZA_KEYFILE}"
+        echo "Generated session encryption key ${CREDENZA_KEYFILE} -- back this up, losing it invalidates every stored session"
+    else
+        echo WARNING: session encryption is enabled but "${CREDENZA_KEYFILE}" must be populated by the admin
+    fi
+fi
+
 restorecon -rv /home/credenza/
 
 [[ -r /home/credenza/secrets/globus_client_secret.json ]] \
     || echo WARNING: /home/credenza/secrets/globus_client_secret.json must be populated by the admin
-

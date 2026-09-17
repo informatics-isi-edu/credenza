@@ -153,6 +153,21 @@ def load_config(app):
     else:
         app.config["TRUSTED_ISSUERS"] = []
 
+    # Resolve the session data encryption key. Deployments that keep their config files under
+    # version control cannot carry the key in credenza.env, so they leave CREDENZA_ENCRYPTION_KEY
+    # unset and provision a secrets file out of band, the same way client secret files are handled.
+    # The environment wins when both are present.
+    if app.config.get("ENCRYPT_SESSION_DATA", False) and not app.config.get("ENCRYPTION_KEY"):
+        encryption_key_path = app.config.get("ENCRYPTION_KEY_FILE", "secrets/encryption_key.json")
+        if not os.path.exists(encryption_key_path):
+            raise ValueError(f"ENCRYPT_SESSION_DATA is enabled but no encryption key is configured: "
+                             f"set CREDENZA_ENCRYPTION_KEY or provide {encryption_key_path}")
+        with open(encryption_key_path) as f:
+            app.config["ENCRYPTION_KEY"] = json.load(f).get("encryption_key")
+        if not app.config["ENCRYPTION_KEY"]:
+            raise ValueError(f"Missing or empty encryption_key in encryption key file: {encryption_key_path}")
+        logger.info(f"Loaded session data encryption key from: {encryption_key_path}")
+
     # Load the claim map
     app.config["IDP_CLAIM_MAPS"] = build_realm_claim_maps(app.config.get("OIDC_IDP_PROFILES"))
 
@@ -278,15 +293,11 @@ def create_app():
     init_audit_logger(use_syslog=app.config.get("AUDIT_USE_SYSLOG", True))
     app.config["OIDC_CLIENT_FACTORY"] = OIDCClientFactory(app.config["OIDC_IDP_PROFILES"])
 
-    # To encrypt or not to encrypt (session data)
+    # To encrypt or not to encrypt (session data). load_config() has already resolved the key from
+    # the environment or the encryption key file, and fails startup when neither supplies one, so
+    # enabling encryption here can never silently degrade to storing session data in the clear.
     encrypt_session_data = app.config.get("ENCRYPT_SESSION_DATA", False)
-    if encrypt_session_data and app.config.get("ENCRYPTION_KEY"):
-        app.config["CRYPTO_CODEC"] = AESGCMCodec(key=app.config["ENCRYPTION_KEY"])
-    else:
-        app.config["CRYPTO_CODEC"] = None
-        if encrypt_session_data:
-            encrypt_session_data = False
-            logging.warning("Encryption of session data is disabled due to missing encryption key")
+    app.config["CRYPTO_CODEC"] = AESGCMCodec(key=app.config["ENCRYPTION_KEY"]) if encrypt_session_data else None
 
     # Create the storage backend and instantiate the session store
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),
@@ -296,7 +307,7 @@ def create_app():
     app.config["SESSION_STORE"] = SessionStore(
         storage_backend,
         ttl=app.config.get("SESSION_TTL", 2100),
-        crypto_codec=app.config["CRYPTO_CODEC"] if encrypt_session_data == True else None
+        crypto_codec=app.config["CRYPTO_CODEC"]
     )
     logger.debug(f"Encrypt session store data: {encrypt_session_data}")
 
