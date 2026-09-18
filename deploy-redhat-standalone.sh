@@ -86,8 +86,10 @@ case "$(cat /etc/redhat-release)" in
         ;;
 esac
 
+# Advisory only: nothing below needs HTTPS to be serving, and a failure here could be DNS,
+# httpd or the certificate. Note $(hostname) is not necessarily CREDENZA_BASE_URL.
 curl -s "https://$(hostname)/" > /dev/null \
-    || error Failed to validate connectivity to "https://$(hostname)/"
+    || echo "WARNING: could not reach https://$(hostname)/ -- verify DNS, httpd and TLS before using this deployment"
 
 [[ -f /etc/httpd/conf.d/wsgi.conf || -f /etc/httpd/conf.modules.d/10-wsgi-python3.conf ]] \
     || error Failed to detect mod_wsgi config prerequisite \(checked /etc/httpd/conf.d/wsgi.conf and /etc/httpd/conf.modules.d/10-wsgi-python3.conf\)
