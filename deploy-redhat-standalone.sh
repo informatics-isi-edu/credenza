@@ -222,5 +222,10 @@ fi
 
 restorecon -rv /home/credenza/
 
-[[ -r /home/credenza/secrets/globus_client_secret.json ]] \
-    || echo WARNING: /home/credenza/secrets/globus_client_secret.json must be populated by the admin
+# Each realm in oidc_idp_profiles.json names a client_secret_file that is provisioned out
+# of band. The filenames vary by provider, so just check whether anything was provisioned
+# at all. encryption_key.json is excluded: this script may have generated it above.
+if [[ -z "$(find /home/credenza/secrets -maxdepth 1 -name '*.json' ! -name 'encryption_key.json' -print -quit 2>/dev/null)" ]]
+then
+    echo WARNING: no OIDC client secret files in /home/credenza/secrets -- the client_secret_file for each configured realm must be populated by the admin
+fi

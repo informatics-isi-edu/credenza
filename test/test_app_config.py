@@ -19,7 +19,7 @@ import os
 import pytest
 from flask import Flask
 
-from credenza.app import load_config
+from credenza.app import init_logging, load_config
 
 VALID_KEY = "0123456789abcdef0123456789abcdef"
 FILE_KEY = "fedcba9876543210fedcba9876543210"
@@ -119,3 +119,18 @@ def test_key_file_with_empty_key_fails_closed(config_root, monkeypatch):
     write_key_file(config_root, {"encryption_key": ""})
     with pytest.raises(ValueError, match="Missing or empty encryption_key"):
         load(monkeypatch, CREDENZA_ENCRYPT_SESSION_DATA="true")
+
+
+def test_init_logging_is_idempotent(config_root, monkeypatch):
+    # mod_wsgi retries a failed script import on every request, so create_app() can run
+    # repeatedly in one process. Handlers must not accumulate, or each retry multiplies
+    # every log line and buries the traceback that caused it.
+    import logging
+
+    credenza_logger = logging.getLogger("credenza")
+    app = load(monkeypatch)
+    init_logging(app)
+    first = len(credenza_logger.handlers)
+    for _ in range(5):
+        init_logging(app)
+    assert len(credenza_logger.handlers) == first

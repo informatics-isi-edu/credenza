@@ -191,7 +191,16 @@ def init_logging(app):
     accessible. Falls back to a stderr StreamHandler when syslog is disabled or
     unavailable (local dev, Docker without rsyslog). Never adds both: that would
     duplicate every log line when mod_wsgi also forwards stderr to syslog.
+
+    Idempotent: existing handlers are dropped first. create_app() can run more than
+    once in a process -- mod_wsgi retries a failed script import on every request --
+    and without this each attempt adds another handler, multiplying every subsequent
+    line and burying the traceback that caused the retry.
     """
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
     syslog_active = False
     if app.config.get("APP_USE_SYSLOG", True):
         syslog_socket = "/dev/log"
