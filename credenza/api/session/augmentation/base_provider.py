@@ -80,5 +80,15 @@ class DefaultSessionAugmentationProvider(SessionAugmentationProvider):
 
         return additional_tokens
 
-    def enrich_userinfo(self, userinfo, additional_tokens):
+    def enrich_userinfo(self, userinfo, additional_tokens) -> bool:
         return False
+
+    def build_identities(self, userinfo: dict) -> dict:
+        """Derive canonical linked identities from userinfo at render time.
+
+        This is a pure transform of claims already present in userinfo (no I/O),
+        so it is computed on demand rather than persisted. Returns a dict keyed
+        by canonical identity id "<iss>/<sub>" whose values hold per-identity
+        detail. The default provider has no identity claims to surface.
+        """
+        return {}

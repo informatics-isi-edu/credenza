@@ -119,8 +119,8 @@ class SessionData:
 
 
 class SessionStore:
-    def __init__(self, backend: StorageBackend = MemoryBackend(), ttl=2100, crypto_codec=None):
-        self.backend = backend
+    def __init__(self, backend: Optional[StorageBackend] = None, ttl=2100, crypto_codec=None):
+        self.backend = backend if backend is not None else MemoryBackend()
         self.ttl = ttl
         self.prefix = "credenza:"
         self.sid_prefix = "session:"

@@ -59,37 +59,93 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
         return {}
 
     def enrich_userinfo(self, userinfo, additional_tokens):
+        if self.GLOBUS_ISSUER != userinfo.get("iss"):
+            return False
+        # Group memberships require a dependent groups token and an external API
+        # call, so they are fetched once at session creation and persisted.
+        # (Canonical identities are a pure transform and are built at render
+        # time instead; see build_identities.)
+        return self._enrich_groups(userinfo, additional_tokens)
+
+    def _enrich_groups(self, userinfo, additional_tokens):
         user = userinfo.get("email")
         iss = userinfo.get("iss")
 
-        if self.GLOBUS_ISSUER == iss:
-            logger.debug(f"Getting additional Globus groups for {user}")
-            tokens = additional_tokens.get(self.GLOBUS_GROUPS_SCOPE)
-            if tokens:
-                access_token = tokens.get("access_token")
-            else:
-                logger.debug(f"Tokens for {self.GLOBUS_GROUPS_SCOPE} not found")
-                return False
+        logger.debug(f"Getting additional Globus groups for {user}")
+        tokens = additional_tokens.get(self.GLOBUS_GROUPS_SCOPE)
+        if tokens:
+            access_token = tokens.get("access_token")
+        else:
+            logger.debug(f"Tokens for {self.GLOBUS_GROUPS_SCOPE} not found")
+            return False
 
-            try:
-                headers = {"Authorization": f"Bearer {access_token}"}
-                resp = requests.get(self.GLOBUS_GROUPS_URL, headers=headers, timeout=15)
-                resp.raise_for_status()
-                # logger.debug(f"Globus groups response: %s" % resp.json())
-                groups = [
-                    {"id": iss + "/" + g["id"], "display_name": g["name"]} for g in resp.json()
-                ]
-                existing_groups = userinfo.get("groups", [])
-                if existing_groups:
-                    existing_groups.extend(groups)
-                else:
-                    userinfo["groups"] = groups
-                logger.debug(f"Augmented userinfo for {user} with {len(groups)} Globus groups.")
-                return True
-            except Exception as e:
-                logger.warning(f"Failed to fetch Globus groups: {e}")
+        try:
+            headers = {"Authorization": f"Bearer {access_token}"}
+            resp = requests.get(self.GLOBUS_GROUPS_URL, headers=headers, timeout=15)
+            resp.raise_for_status()
+            # logger.debug(f"Globus groups response: %s" % resp.json())
+            groups = [
+                {"id": iss + "/" + g["id"], "display_name": g["name"]} for g in resp.json()
+            ]
+            existing_groups = userinfo.get("groups", [])
+            if existing_groups:
+                existing_groups.extend(groups)
+            else:
+                userinfo["groups"] = groups
+            logger.debug(f"Augmented userinfo for {user} with {len(groups)} Globus groups.")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to fetch Globus groups: {e}")
 
         return False
+
+    def build_identities(self, userinfo):
+        """Return a canonical "identities" map derived from Globus claims.
+
+        Globus exposes the user's linked identities two ways: identity_set is a
+        summary array of "urn:globus:auth:identity:<uuid>" strings, while
+        identity_set_detail is an array of per-identity OIDC/profile dicts. Both
+        carry the same identities; the detail form is richer. The result is a
+        dict keyed by the canonical identity id "<iss>/<sub>", whose values hold
+        the per-identity detail. The two sources are merged by id (detail
+        preferred). Keying by id lets legacy consumers that only need the id
+        strings read the keys without descending into the detail.
+        """
+        iss = userinfo.get("iss")
+        by_id = {}
+
+        for d in userinfo.get("identity_set_detail") or []:
+            if not isinstance(d, dict):
+                continue
+            sub = d.get("sub")
+            if not sub:
+                continue
+            ident_id = f"{iss}/{sub}" if iss else sub
+            entry = {"sub": sub}
+            if iss:
+                entry["iss"] = iss
+            if d.get("username"):
+                entry["username"] = d["username"]
+            if d.get("name"):
+                entry["name"] = d["name"]
+            if d.get("email"):
+                entry["email"] = d["email"]
+            if d.get("identity_provider_display_name"):
+                entry["provider"] = d["identity_provider_display_name"]
+            by_id[ident_id] = entry
+
+        for urn in userinfo.get("identity_set") or []:
+            if not isinstance(urn, str):
+                continue
+            sub = urn.rsplit(":", 1)[-1]
+            ident_id = f"{iss}/{sub}" if iss else sub
+            if ident_id not in by_id:
+                entry = {"sub": sub}
+                if iss:
+                    entry["iss"] = iss
+                by_id[ident_id] = entry
+
+        return by_id
 
     def session_from_bearer_token(self, bearer_token) -> tuple[str, SessionData]:
         realm = current_app.config["DEFAULT_REALM"]

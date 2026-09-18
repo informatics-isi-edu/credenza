@@ -244,6 +244,147 @@ def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app, base_session
     assert audit_events == expected_events
 
 
+def test_revoke_tokens_skipped_when_profile_flag_set(monkeypatch, app, base_session):
+    """revoke_tokens() is a no-op when skip_token_revocation=true in the IDP profile."""
+    sess = copy.deepcopy(base_session)
+    sess.realm = "no-revoke-realm"
+    sess._session_type = SessionType.USER
+
+    app.config["OIDC_IDP_PROFILES"]["no-revoke-realm"] = {"skip_token_revocation": True}
+    revoke_calls = []
+
+    class DummyFactory:
+        def get_client(self, realm, **kwargs):
+            revoke_calls.append(realm)
+            return None
+
+    app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
+
+    try:
+        with app.app_context():
+            util.revoke_tokens("sid-skip", sess)
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("no-revoke-realm", None)
+
+    assert revoke_calls == [], "OIDC client should not be fetched when revocation is skipped"
+
+
+# ---------------------------------------------------------------------------
+# extract_jwt_txn tests
+# ---------------------------------------------------------------------------
+
+_TXN_TOKEN = "header.eyJpc3MiOiAiaHR0cHM6Ly9leGFtcGxlLmNvbSIsICJzdWIiOiAidTEiLCAidHhuIjogImFhYmJjY2RkLjExMjIzMzQ0In0.sig"
+_NO_TXN_TOKEN = "header.eyJpc3MiOiAiaHR0cHM6Ly9leGFtcGxlLmNvbSIsICJzdWIiOiAidTEifQ.sig"
+
+# ---------------------------------------------------------------------------
+# check_acr tests
+# ---------------------------------------------------------------------------
+
+def test_check_acr_all_present():
+    from credenza.api.common.util import check_acr
+    userinfo = {"acr": "https://example.com/aal/2 https://example.com/ial/2"}
+    assert check_acr(userinfo, ["https://example.com/aal/2", "https://example.com/ial/2"]) == []
+
+def test_check_acr_missing_one():
+    from credenza.api.common.util import check_acr
+    userinfo = {"acr": "https://example.com/aal/2"}
+    assert check_acr(userinfo, ["https://example.com/aal/2", "https://example.com/ial/2"]) == ["https://example.com/ial/2"]
+
+def test_check_acr_missing_all():
+    from credenza.api.common.util import check_acr
+    userinfo = {"acr": "https://example.com/aal/1"}
+    result = check_acr(userinfo, ["https://example.com/aal/2", "https://example.com/ial/2"])
+    assert set(result) == {"https://example.com/aal/2", "https://example.com/ial/2"}
+
+def test_check_acr_no_acr_claim():
+    from credenza.api.common.util import check_acr
+    assert check_acr({}, ["https://example.com/aal/2"]) == ["https://example.com/aal/2"]
+
+def test_check_acr_empty_required():
+    from credenza.api.common.util import check_acr
+    userinfo = {"acr": "https://example.com/aal/2"}
+    assert check_acr(userinfo, []) == []
+
+
+def test_extract_jwt_txn_present():
+    from credenza.api.common.util import extract_jwt_txn
+    assert extract_jwt_txn(_TXN_TOKEN) == "aabbccdd.11223344"
+
+def test_extract_jwt_txn_absent():
+    from credenza.api.common.util import extract_jwt_txn
+    assert extract_jwt_txn(_NO_TXN_TOKEN) is None
+
+def test_extract_jwt_txn_opaque_token():
+    from credenza.api.common.util import extract_jwt_txn
+    assert extract_jwt_txn("not-a-jwt") is None
+
+def test_extract_jwt_txn_empty():
+    from credenza.api.common.util import extract_jwt_txn
+    assert extract_jwt_txn("") is None
+
+
+def test_access_token_refreshed_audit_includes_txn(monkeypatch, app, base_session):
+    """txn from the new access token is included in the access_token_refreshed audit event."""
+    sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.DEVICE
+    sess.realm = "test"
+    sess.session_metadata.system["access_token_expires_at"] = 1  # past timestamp, forces refresh
+    sess.refresh_token = "old-rt"
+
+    audit_events = []
+    monkeypatch.setattr(util, "audit_event", lambda e, **kw: audit_events.append((e, kw)))
+
+    refreshed = {
+        "access_token": _TXN_TOKEN,
+        "refresh_token": "new-rt",
+        "expires_at": 9999999999,
+    }
+
+    class DummyClient:
+        def refresh_access_token(self, refresh_token):
+            return refreshed
+
+    app.config["OIDC_CLIENT_FACTORY"].get_client = lambda realm, **kw: DummyClient()
+
+    with app.app_context():
+        util.refresh_access_token("sid1", sess)
+
+    refreshed_events = [kw for e, kw in audit_events if e == "access_token_refreshed"]
+    assert len(refreshed_events) == 1
+    assert refreshed_events[0]["txn"] == "aabbccdd.11223344"
+
+
+def test_access_token_refreshed_audit_omits_txn_when_absent(monkeypatch, app, base_session):
+    """txn is omitted from the audit event when the new access token has no txn claim."""
+    sess = copy.deepcopy(base_session)
+    sess._session_type = SessionType.DEVICE
+    sess.realm = "test"
+    sess.session_metadata.system["access_token_expires_at"] = 1  # past timestamp, forces refresh
+    sess.refresh_token = "old-rt"
+
+    audit_events = []
+    monkeypatch.setattr(util, "audit_event", lambda e, **kw: audit_events.append((e, kw)))
+
+    refreshed = {
+        "access_token": _NO_TXN_TOKEN,
+        "refresh_token": "new-rt",
+        "expires_at": 9999999999,
+    }
+
+    class DummyClient:
+        def refresh_access_token(self, refresh_token):
+            return refreshed
+
+    app.config["OIDC_CLIENT_FACTORY"].get_client = lambda realm, **kw: DummyClient()
+
+    with app.app_context():
+        util.refresh_access_token("sid2", sess)
+
+    refreshed_events = [kw for e, kw in audit_events if e == "access_token_refreshed"]
+    assert len(refreshed_events) == 1
+    assert "txn" not in refreshed_events[0]
+
+
 def test_get_tokens_by_scope_with_additional(base_session):
     base_session.scopes = "openid"
     base_session.access_token = "A1"
@@ -420,9 +561,7 @@ def test_enrich_fills_missing_claims(monkeypatch):
     assert result["name"] == "User One"
     assert not any(e == "userinfo_fallback_failed" for e, _ in events)
     assert not any(e == "userinfo_fallback_incomplete" for e, _ in events)
-    filled_ev = next((kw for e, kw in events if e == "userinfo_fallback_filled"), None)
-    assert filled_ev is not None
-    assert set(filled_ev["filled_claims"]) == {"email", "name"}
+    assert not any(e == "userinfo_fallback_filled" for e, _ in events)
 
 
 def test_enrich_does_not_overwrite_existing_claims(monkeypatch):

@@ -276,6 +276,42 @@ Deliverable:
 - Update operational runbooks.
 - Add migration notes for `service_auth.json`.
 
+## 8.1 Session Encryption Key Provisioning [COMPLETE]
+
+**Goal:** Let deployments that keep their config files under version control
+enable session encryption without carrying the key in `credenza.env`.
+
+Motivated by the `facebase-ras-dev` KVM recipe, which commits
+`home/credenza/config/credenza.env` to the `division` repo and has no template
+substitution step, unlike the deriva-docker entrypoint.
+
+- Key resolution moved into `load_config()`:
+    - `CREDENZA_ENCRYPTION_KEY` is used when set and non-empty.
+    - Otherwise the key is read from `CREDENZA_ENCRYPTION_KEY_FILE`
+      (default `secrets/encryption_key.json`), a JSON object with a single
+      `encryption_key` field, provisioned out of band alongside the
+      `client_secret_file` secrets.
+- `ENCRYPT_SESSION_DATA=true` with no key from either source now raises at
+  startup. Previously it logged a warning, disabled encryption, and ran with
+  session data in the clear.
+- Removed the `encrypt_session_data == True` identity comparison in
+  `create_app()`, which would have passed `crypto_codec=None` while reporting
+  encryption as enabled had the flag ever remained a string.
+- `deploy-redhat-standalone.sh` generates a key when, and only when, the same
+  run also created the credenza database. An existing key file is never
+  overwritten, and a missing key file on an existing database warns and lets
+  startup fail closed, because a new key against a populated session store
+  would silently destroy every stored session (`get_session_data()` deletes
+  rows that fail to decrypt, at DEBUG).
+- An unsubstituted `${CREDENZA_ENCRYPTION_KEY}` template in `credenza.env` is
+  treated as unconfigured rather than as a set key. python-dotenv interpolates
+  it to the empty string, so it reads as configured while supplying nothing.
+
+Deliverable:
+
+- Session encryption is usable from a version-controlled config tree, and
+  cannot silently degrade to plaintext storage.
+
 ---
 
 # Phase 9 — OIDC UserInfo Endpoint

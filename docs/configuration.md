@@ -47,8 +47,8 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 | `CREDENZA_SESSION_TTL`              | `2100`    | Default session TTL in seconds (35 minutes). Applied when no client-specific TTL is set.                                                           |
 | `CREDENZA_SESSION_EXPIRY_THRESHOLD` | `300`     | Seconds before session expiry at which `PUT /session` triggers a token refresh.                                                                    |
 | `CREDENZA_TOKEN_EXPIRY_THRESHOLD`   | `300`     | Seconds before access token expiry at which upstream refresh is attempted.                                                                         |
-| `CREDENZA_ENCRYPT_SESSION_DATA`     | `false`   | Encrypt session data at rest using AES-GCM. Requires `CREDENZA_ENCRYPTION_KEY`.                                                                    |
-| `CREDENZA_ENCRYPTION_KEY`           | *(unset)* | Encryption key for AES-GCM session encryption. Required if `ENCRYPT_SESSION_DATA=true`.                                                            |
+| `CREDENZA_ENCRYPT_SESSION_DATA`     | `false`   | Encrypt session data at rest using AES-GCM. Requires a key from `CREDENZA_ENCRYPTION_KEY` or `CREDENZA_ENCRYPTION_KEY_FILE`; startup fails without one. |
+| `CREDENZA_ENCRYPTION_KEY`           | *(unset)* | Encryption key for AES-GCM session encryption. A UTF-8 string of exactly 16, 24, or 32 bytes. Falls back to `CREDENZA_ENCRYPTION_KEY_FILE` when unset. |
 
 ### 1.3 Authentication and flows
 
@@ -68,9 +68,10 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 
 ### 1.5 Client registry
 
-| Variable                              | Default | Description                                                                                                                                                         |
-|---------------------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CREDENZA_ALLOW_UNREGISTERED_CLIENTS` | `false` | Allow clients not present in the registry. When enabled, unregistered clients bypass grant type, scope, and resource policy checks. Not recommended for production. |
+| Variable                              | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|---------------------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `CREDENZA_ALLOW_UNREGISTERED_CLIENTS` | `false` | Allow clients not present in the registry. When enabled, unregistered clients bypass grant type, scope, and resource policy checks. Not recommended for production.                                                                                                                                                                                                                                                                                                                                                                   |
+| `CREDENZA_LOOPBACK_REDIRECT_ANY_PORT` | `true`  | Apply the RFC 8252 sec. 7.3 loopback exception when matching `redirect_uri` at `/authorize`. When enabled, an `http` loopback redirect (`localhost`, `127.0.0.1`, `[::1]`) matches a registered loopback URI with the same scheme, host, and path regardless of port, so native apps using an ephemeral callback port do not need every port pre-registered. Only the port is relaxed; scheme, host token, and path must still match a registered loopback entry. Set `false` for strict exact-match (RFC 6749) on all redirect URIs. |
 
 ### 1.6 Rate limiting
 
@@ -109,6 +110,7 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 | `CREDENZA_OIDC_IDP_PROFILES_FILE` | `config/oidc_idp_profiles.json`        | Path to the IDP profiles config file.    |
 | `CREDENZA_CLIENT_REGISTRY_FILE`   | `config/client_registry.json`          | Path to the client registry config file. |
 | `CREDENZA_TRUSTED_ISSUERS_FILE`   | `config/oidc_idp_trusted_issuers.json` | Path to the trusted OIDC issuers list.   |
+| `CREDENZA_ENCRYPTION_KEY_FILE`    | `secrets/encryption_key.json`          | Path to the session encryption key file. |
 
 ### 1.11 Legacy compatibility
 
@@ -198,7 +200,38 @@ The file referenced by `client_secret_file` must be a JSON object:
 | `client_secret`    | OIDC client secret. Set to `null` or omit for public clients.                                                                                |
 | `native_client_id` | Optional. If present, used as the client ID for device flow (native/public client) authorization requests to the IDP instead of `client_id`. |
 
-### 2.5 Example
+### 2.5 `encryption_key.json` format
+
+When `CREDENZA_ENCRYPT_SESSION_DATA=true`, the key for AES-GCM session encryption is taken from
+`CREDENZA_ENCRYPTION_KEY` if it is set and non-empty. Otherwise it is read from the file named by
+`CREDENZA_ENCRYPTION_KEY_FILE` (default `secrets/encryption_key.json`), which must be a JSON object:
+
+```json
+{
+  "encryption_key": "0123456789abcdef0123456789abcdef"
+}
+```
+
+| Field            | Description                                                                             |
+|------------------|-----------------------------------------------------------------------------------------|
+| `encryption_key` | AES-GCM key as a UTF-8 string of exactly 16, 24, or 32 bytes (AES-128, AES-192, AES-256). |
+
+This is for deployments whose config files are kept under version control and therefore cannot
+carry the key in `credenza.env`. The key file is provisioned out of band alongside the
+`client_secret_file` secrets, with the same ownership and permissions.
+
+Startup fails with a `ValueError` when `CREDENZA_ENCRYPT_SESSION_DATA=true` and neither source
+supplies a key, rather than silently falling back to storing session data in the clear.
+
+The key string is used as bytes directly, it is not base64-decoded, so the *character* count is
+what must be 16, 24, or 32, selecting AES-128, AES-192, or AES-256 respectively. A key of any
+other length is rejected at startup. To generate the file:
+
+```bash
+python3 -c 'import json, secrets; print(json.dumps({"encryption_key": secrets.token_urlsafe(24)}, indent=2))' > secrets/encryption_key.json
+```
+
+### 2.6 Example
 
 ```json
 {
@@ -407,5 +440,5 @@ See the `AdapterInterface` base class in `credenza/api/auth/client/adapters/adap
 - [ ] `client_registry.json` present (may be empty `{"version":"1","clients":{}}` for browser-only deployments)
 - [ ] `CREDENZA_STORAGE_BACKEND` set to `redis` or `postgresql` for production multi-worker deployments
 - [ ] `CREDENZA_ENABLE_PROXYFIX=true` if running behind a reverse proxy
-- [ ] `CREDENZA_ENCRYPT_SESSION_DATA=true` and `CREDENZA_ENCRYPTION_KEY` set if session encryption is required
+- [ ] `CREDENZA_ENCRYPT_SESSION_DATA=true` and a key supplied via `CREDENZA_ENCRYPTION_KEY` or `secrets/encryption_key.json` if session encryption is required
 - [ ] Audit log path writable or syslog configured

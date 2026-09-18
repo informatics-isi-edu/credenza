@@ -1,4 +1,4 @@
-# ADR-0007: Refreshable Derived Sessions for IDPs Without offline_access
+# ADR-0007: Refreshable Derived Sessions for Delegated Intermediaries
 
 ## 1. Status
 
@@ -7,9 +7,11 @@ Decision Date: 2026-05-19
 
 ### Review History
 
-| Date       | Status   | Notes                                                    |
-|------------|----------|----------------------------------------------------------|
-| 2026-05-19 | Proposed | Initial draft                                            |
+| Date       | Status   | Notes                                                                                         |
+|------------|----------|-----------------------------------------------------------------------------------------------|
+| 2026-05-19 | Proposed | Initial draft                                                                                 |
+| 2026-05-29 | Amended  | Corrected Section 2.1: RAS does issue refresh tokens (per its discovery doc); reframed gap    |
+| 2026-06-05 | Amended  | Section 2.1 updated with empirical results from RAS staging integration; prod testing pending |
 
 ---
 
@@ -26,17 +28,87 @@ device-typed Credenza session alive across long runs without re-prompting the
 user.
 
 NIH's Research Authorization Service (RAS) -- to be integrated per ADR-0005
--- and the federated IDPs to which it delegates (login.gov, ID.me) **do not
-support `offline_access` and do not issue refresh tokens**. NIH's published
-guidance for long-running API access against RAS-protected resources is to
-use scope- and resource-limited Token Exchange (RFC 8693) instead of upstream
-offline access.
+-- does not advertise `offline_access` as a supported scope, and does not
+use it as the gate on refresh-token issuance the way Keycloak, Okta, and
+Cognito do. Its discovery document
+(`https://sts.nih.gov/.well-known/openid-configuration`) advertises
+`refresh_token` in `grant_types_supported`, and production RAS integrators
+(notably Fence, `uc-cdis/fence/resources/openid/ras_oauth2.py`) do obtain
+and rotate upstream refresh tokens against RAS without ever requesting
+`offline_access`. RAS controls refresh-token issuance through
+client-registration policy rather than through scope request.
 
-With Credenza's current design that path tops out at a globally configured
-`DERIVED_SESSION_MAX_TTL` of 1800 seconds and forces the client to re-prompt
-the user for a fresh interactive login (or device-flow approval) before the
-upstream session expires. For a multi-hour batch operation this is
-operationally unworkable.
+Per RAS partner documentation, the relevant lifetime stack for a long-running job backed by RAS is:
+
+| Object        | Lifetime | Role                                                       |
+|---------------|----------|------------------------------------------------------------|
+| Access Token  | 30 min   | Per-call credential, rotated by refresh worker             |
+| Visa poll     | 1 hour   | Mandatory re-validation cadence per GA4GH AAI              |
+| Passport      | 12 hours | Authorization data freshness, refreshed via refresh worker |
+| Refresh Token | 15 days  | Effective job ceiling                                      |
+
+RAS explicitly supports long-running jobs decoupled from interactive user
+sessions. Its partner guide states that user logout has no impact on long-
+running jobs that hold an active refresh token, Passport, or Visa. The
+12-hour Passport and 1-hour Visa polling cadences are operational refresh
+requirements satisfied by the existing background refresh worker, not job
+ceilings. The 15-day refresh-token lifetime is the actual upper bound.
+
+**Empirically verified against RAS staging (stsstg.nih.gov) on 2026-06-05:**
+
+- Device flow login completed end-to-end. The RAS staging ID token is sparse
+  (missing email, name, and federated identity claims); these are filled by
+  the userinfo endpoint fallback before session creation.
+- RAS staging issued a refresh token without the `offline_access` scope being
+  requested, confirming the `access_type=offline` authorization URL parameter
+  as the trigger. The refresh token is an opaque UUID; `offline_access` does
+  not appear in the granted scope string.
+- Confirmed lifetimes from staging: access token 30 minutes (from JWT `exp`),
+  session/refresh token 14 days (from `refresh_token_expires_at` in session
+  metadata). The ID token carries a 15-day `exp`, consistent with the partner
+  documentation lifetime stack above.
+- The background refresh worker successfully rotated the access token at the
+  25-minute mark (within the 5-minute `TOKEN_EXPIRY_THRESHOLD`). The audit log
+  emitted `access_token_refreshed` with the new `txn` claim from the rotated
+  token.
+- ACR assertion (aal/2 + ial/2 required) passed for a login.gov-backed test
+  identity at IAL2. The `txn` claim is present in all access tokens in the
+  format `{hex}.{hex}` and is propagated to audit events as required by the
+  RAS partner audit guide.
+- RAS staging does not publish a `revocation_endpoint` in its discovery
+  document (it publishes `token_revocation_list_uri`, which is a read-side CRL,
+  not an RFC 7009 revocation endpoint). The `skip_token_revocation: true` IDP
+  profile flag suppresses the revocation attempt on session end.
+
+**Production RAS (sts.nih.gov) has not yet been tested.** The RAS team has not
+yet issued a production client ID. The staging integration is the basis for the
+demonstration to the RAS team. Production testing will be completed once the
+client ID is received; no code changes are anticipated since the production
+discovery document has the same structure as staging.
+
+The gap that motivates this ADR is narrower than the original framing
+suggested. Credenza's existing upstream refresh machinery works fine for
+USER and DEVICE sessions backed by RAS, within RAS's 15-day refresh-token
+window. What does not work is keeping a DERIVED session alive at a
+delegated intermediary -- the MCP server doing exchanges on behalf of the
+user, or future intermediaries with similar structure. With Credenza's
+current design that path tops out at `DERIVED_SESSION_MAX_TTL` of 1800
+seconds and forces the intermediary to re-exchange against the upstream
+USER or DEVICE session before each window expires. A delegated
+intermediary structurally cannot reach back to the upstream session-holder
+on every 30-minute boundary -- the USER session may live in a browser tab,
+the DEVICE session may live in a different process. For a multi-hour batch
+operation initiated through a delegated intermediary this is operationally
+unworkable.
+
+NIH's published guidance for long-running API access against RAS-protected
+resources is to use scope- and resource-limited Token Exchange (RFC 8693)
+rather than holding long-lived access tokens directly. RAS prod advertises
+`urn:ietf:params:oauth:grant-type:token-exchange` in `grant_types_supported`
+and exposes a Visa-to-access-token exchange flow at its token endpoint
+(Passport holder presents Visa, receives DRS-scoped access token with
+optional narrowly-scoped refresh token). Refreshable DERIVED sessions in
+Credenza are the intermediary-side complement to this upstream pattern.
 
 ### 2.2 Current Design and Its Assumption
 
@@ -55,8 +127,11 @@ sessions are explicitly non-extendable and the RFC 8693 response carries no
 
 The implicit assumption was that any client needing durability beyond a
 single derived-session window would obtain it through the device flow with
-upstream `offline_access`. That assumption is no longer universally true
-once RAS and its federated IDPs come into scope.
+an upstream refresh token and re-exchange against that device session as
+needed. That assumption breaks down for delegated intermediaries that hold
+only a DERIVED session and cannot reach back to the originating USER or
+DEVICE session on every 30-minute refresh boundary, regardless of whether
+the upstream IDP issues refresh tokens.
 
 ### 2.3 Why Not Per-Target TTL
 
@@ -361,9 +436,10 @@ row's lifetime is governed entirely by Credenza. Extending that decoupling
 through refresh tokens does not cross a new trust boundary, but it does
 make the duration of the decoupling visible at the policy layer. The
 `derived_session_absolute_lifetime_seconds` realm-level cap is the policy
-control: for the RAS realm, where upstream sessions are typically short
-and offline access is forbidden, operators should configure a value
-consistent with NIH's "no decoupled access past N hours" expectations.
+control: for the RAS realm, although RAS itself permits refresh-token
+lifetimes up to 15 days, operators may wish to configure a tighter cap
+(e.g. aligned with the 12-hour Passport window, or shorter) to limit blast
+radius on delegated access.
 
 ### 5.3 Absolute Wall-Clock Cap as the Critical Invariant
 

@@ -14,6 +14,15 @@ authorization platform. It enforces audience isolation and token
 lifecycle control while delegating identity authentication and user
 policy to upstream OpenID Providers.
 
+**Session brokering.** Upstream IDP tokens (access, refresh, id) are held
+server-side in the session record (encrypted at rest) and are never
+returned to clients. The credential a client receives and presents to
+resource servers is always an **opaque, Credenza-issued session key**,
+never an upstream token. Resource servers authenticate by introspecting
+Credenza, not the upstream IDP. This indirection lets Credenza rotate or
+revoke sessions independently of upstream token lifetimes and prevents an
+upstream token from being replayed against the IDP's own APIs.
+
 This document describes the security boundaries, assumptions, and
 operational controls for Credenza.
 

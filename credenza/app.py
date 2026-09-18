@@ -34,7 +34,7 @@ from .api.common.util import check_client_scope_coverage
 from .api.common.rate_limit import FixedWindowJitterLimiter
 from .api.common.crypto import AESGCMCodec
 from .api.common.crypto import register_default_hashers
-from .rest.helpers import is_browser_client, get_request_id
+from .rest.helpers import is_browser_client, get_request_id, set_auth_cache_headers
 from .rest.session import session_blueprint
 from .rest.login import login_blueprint
 from .rest.device import device_blueprint
@@ -61,6 +61,7 @@ def load_config(app):
     env_config = {
         "CREDENZA_DEFAULT_REALM": "default",
         "CREDENZA_ENABLE_PKCE": "true",
+        "CREDENZA_LOOPBACK_REDIRECT_ANY_PORT": "true",
         "CREDENZA_ENABLE_LEGACY_API": "false",
         "CREDENZA_ENABLE_REFRESH_WORKER": "true",
         "CREDENZA_ENCRYPT_SESSION_DATA": "false",
@@ -69,6 +70,8 @@ def load_config(app):
         "CREDENZA_APP_USE_SYSLOG": "true",
         "CREDENZA_LEGACY_DEFAULT_RESOURCE": "urn:deriva:rest:service:all",
         "CREDENZA_DERIVED_SESSION_MAX_TTL": "1800",
+        "CREDENZA_MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS": "86400",
+        "CREDENZA_LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS": "1209600",
     }
 
     # Load .env from one of these locations, if it exists
@@ -150,6 +153,21 @@ def load_config(app):
     else:
         app.config["TRUSTED_ISSUERS"] = []
 
+    # Resolve the session data encryption key. Deployments that keep their config files under
+    # version control cannot carry the key in credenza.env, so they leave CREDENZA_ENCRYPTION_KEY
+    # unset and provision a secrets file out of band, the same way client secret files are handled.
+    # The environment wins when both are present.
+    if app.config.get("ENCRYPT_SESSION_DATA", False) and not app.config.get("ENCRYPTION_KEY"):
+        encryption_key_path = app.config.get("ENCRYPTION_KEY_FILE", "secrets/encryption_key.json")
+        if not os.path.exists(encryption_key_path):
+            raise ValueError(f"ENCRYPT_SESSION_DATA is enabled but no encryption key is configured: "
+                             f"set CREDENZA_ENCRYPTION_KEY or provide {encryption_key_path}")
+        with open(encryption_key_path) as f:
+            app.config["ENCRYPTION_KEY"] = json.load(f).get("encryption_key")
+        if not app.config["ENCRYPTION_KEY"]:
+            raise ValueError(f"Missing or empty encryption_key in encryption key file: {encryption_key_path}")
+        logger.info(f"Loaded session data encryption key from: {encryption_key_path}")
+
     # Load the claim map
     app.config["IDP_CLAIM_MAPS"] = build_realm_claim_maps(app.config.get("OIDC_IDP_PROFILES"))
 
@@ -173,7 +191,16 @@ def init_logging(app):
     accessible. Falls back to a stderr StreamHandler when syslog is disabled or
     unavailable (local dev, Docker without rsyslog). Never adds both: that would
     duplicate every log line when mod_wsgi also forwards stderr to syslog.
+
+    Idempotent: existing handlers are dropped first. create_app() can run more than
+    once in a process -- mod_wsgi retries a failed script import on every request --
+    and without this each attempt adds another handler, multiplying every subsequent
+    line and burying the traceback that caused the retry.
     """
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
     syslog_active = False
     if app.config.get("APP_USE_SYSLOG", True):
         syslog_socket = "/dev/log"
@@ -245,10 +272,9 @@ def create_app():
 
     @app.after_request
     def apply_secure_headers(response):
-        if app.config["COOKIE_NAME"] in request.cookies:
-            response.headers["Cache-Control"] = "private, no-store, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
-        return response
+        has_cookie = app.config["COOKIE_NAME"] in request.cookies
+        has_auth = "Authorization" in request.headers
+        return set_auth_cache_headers(response, has_cookie, has_auth)
 
     @app.after_request
     def add_rid(resp):
@@ -276,15 +302,11 @@ def create_app():
     init_audit_logger(use_syslog=app.config.get("AUDIT_USE_SYSLOG", True))
     app.config["OIDC_CLIENT_FACTORY"] = OIDCClientFactory(app.config["OIDC_IDP_PROFILES"])
 
-    # To encrypt or not to encrypt (session data)
+    # To encrypt or not to encrypt (session data). load_config() has already resolved the key from
+    # the environment or the encryption key file, and fails startup when neither supplies one, so
+    # enabling encryption here can never silently degrade to storing session data in the clear.
     encrypt_session_data = app.config.get("ENCRYPT_SESSION_DATA", False)
-    if encrypt_session_data and app.config.get("ENCRYPTION_KEY"):
-        app.config["CRYPTO_CODEC"] = AESGCMCodec(key=app.config["ENCRYPTION_KEY"])
-    else:
-        app.config["CRYPTO_CODEC"] = None
-        if encrypt_session_data:
-            encrypt_session_data = False
-            logging.warning("Encryption of session data is disabled due to missing encryption key")
+    app.config["CRYPTO_CODEC"] = AESGCMCodec(key=app.config["ENCRYPTION_KEY"]) if encrypt_session_data else None
 
     # Create the storage backend and instantiate the session store
     storage_backend = create_storage_backend(app.config.get("STORAGE_BACKEND", "memory"),
@@ -294,7 +316,7 @@ def create_app():
     app.config["SESSION_STORE"] = SessionStore(
         storage_backend,
         ttl=app.config.get("SESSION_TTL", 2100),
-        crypto_codec=app.config["CRYPTO_CODEC"] if encrypt_session_data == True else None
+        crypto_codec=app.config["CRYPTO_CODEC"]
     )
     logger.debug(f"Encrypt session store data: {encrypt_session_data}")
 
