@@ -92,6 +92,9 @@ token lifecycle across the deployment.
 * #### [ADR-0006: Dependent Token Vending](docs/ADR-0006-dependent-token-vending.md) — secure client retrieval of upstream auxiliary tokens (e.g., Globus dependent tokens) via token exchange
 * #### [ADR-0007: Refreshable Derived Sessions](docs/ADR-0007-refreshable-derived-sessions.md) — opt-in refresh tokens for derived sessions with three-tier wall-clock cap; enables long-running API workloads at delegated intermediaries (e.g., MCP servers acting on behalf of authenticated users)
 * #### [ADR-0008: Cross-Credenza Federation](docs/ADR-0008-cross-credenza-token-exchange.md) — peer introspection fallback for split deployments where tokens issued by one Credenza instance must be validated by another
+* #### [ADR-0009: DERIVA Session Modernization](docs/ADR-0009-deriva-session-modernization.md) — retiring `ENABLE_LEGACY_API` axis by axis, migrating DERIVA consumers off the webauthn2-compatible session contract without a coordinated flag day
+* #### [ADR-0010: M2M Client Credential Provisioning CLI](docs/ADR-0010-credenza-manage-cli.md) — `credenza-manage` CLI that manages client registry entries (secret hashing included) and mints `client_credentials` tokens into deriva-py credential files, covering the standalone and CI test workflows `webauthn2-manage` supports today
+* #### [ADR-0011: Step-Up Role Assumption](docs/ADR-0011-step-up-role-assumption.md) — time-boxed assumption of privileged catalog roles after a fresh IdP re-authentication, instead of standing grants
 
 ### Project Status
 

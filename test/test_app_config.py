@@ -134,3 +134,14 @@ def test_init_logging_is_idempotent(config_root, monkeypatch):
     for _ in range(5):
         init_logging(app)
     assert len(credenza_logger.handlers) == first
+
+
+def test_augmentation_providers_are_bound_to_their_realm(config_root, monkeypatch):
+    (config_root / "config" / "oidc_idp_profiles.json").write_text(json.dumps({
+        "plain": {},
+        "ras": {"session_augmentation_provider":
+                "credenza.api.session.augmentation.ras_provider:RasSessionAugmentationProvider"},
+    }))
+    app = load(monkeypatch)
+    providers = app.config["SESSION_AUGMENTATION_PROVIDERS"]
+    assert {realm: p.realm for realm, p in providers.items()} == {"plain": "plain", "ras": "ras"}

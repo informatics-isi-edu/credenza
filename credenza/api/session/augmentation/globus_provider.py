@@ -38,9 +38,8 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
         if iss == self.GLOBUS_ISSUER:
             logger.debug(f"Getting additional Globus dependent tokens for {user}")
 
-            realm = current_app.config["DEFAULT_REALM"]
             factory = current_app.config["OIDC_CLIENT_FACTORY"]
-            client = factory.get_client(realm)
+            client = factory.get_client(self.realm)
             try:
                 # attempt to get dependent tokens
                 tokens = client.fetch_dependent_tokens(access_token=access_token,
@@ -148,7 +147,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
         return by_id
 
     def session_from_bearer_token(self, bearer_token) -> tuple[str, SessionData]:
-        realm = current_app.config["DEFAULT_REALM"]
+        realm = self.realm
         factory = current_app.config["OIDC_CLIENT_FACTORY"]
         store = current_app.config["SESSION_STORE"]
         client = factory.get_client(realm)

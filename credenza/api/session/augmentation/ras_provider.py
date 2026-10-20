@@ -42,6 +42,18 @@ class RasSessionAugmentationProvider(DefaultSessionAugmentationProvider):
     carried as detail. They are paired by source key and canonicalized into a
     dict keyed by identity_username whose value is the per-identity detail.
 
+    The entry whose id matches the block's authenticated_identity is marked
+    with "authenticated": True. Only that identity was authenticated during
+    this login; the others are linked accounts, bound to the user by a separate
+    earlier linking ceremony and carrying their own (possibly lower) "ial".
+    Consumers that make authorization decisions need to tell the two apart.
+
+    default_identity is deliberately not surfaced. RAS documents it in two
+    incompatible shapes -- a bare handle, and a pipe-delimited bracketed list
+    ("<a@era.nih.gov>|<b@login.gov>") when several identities are linked -- and
+    it carries no authorization meaning that "authenticated" plus the per-entry
+    "ial" do not already express.
+
     NOTE: Full GA4GH Passport / Visa parsing (ADR-0005) is not implemented here
     yet. This provider currently covers only the federated identity mapping.
     """
@@ -56,7 +68,8 @@ class RasSessionAugmentationProvider(DefaultSessionAugmentationProvider):
         id lets legacy consumers read the id strings (the keys) without
         descending into the detail. IAL2-verified identities take precedence; an
         identity already seen under federated_identities_ial2 is not overwritten
-        by a federated_identities entry with the same id.
+        by a federated_identities entry with the same id. The identity used to
+        authenticate this session is marked with "authenticated": True.
         """
         by_id = {}
 
@@ -67,22 +80,34 @@ class RasSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
             sources = block.get("sources") or {}
             identities = block.get("identities") or {}
+            authenticated = self._handle(block.get("authenticated_identity"))
+            matched_authenticated = False
 
             for source in set(sources) | set(identities):
                 src_meta = sources.get(source) or {}
                 detail = identities.get(source) or {}
 
-                ident_id = src_meta.get("identity_username")
+                ident_id = self._handle(src_meta.get("identity_username"))
                 if not ident_id:
                     # Without the identity_username we cannot form an id; skip.
                     logger.debug("RAS federated identity for source '%s' has no "
                                  "identity_username; skipping", source)
                     continue
 
+                # Tracked before the dedup check below: an id already seen
+                # under federated_identities_ial2 still accounts for this
+                # block's authenticated_identity, and must not be reported as
+                # unmatched.
+                is_authenticated = bool(authenticated) and ident_id == authenticated
+                if is_authenticated:
+                    matched_authenticated = True
+
                 if ident_id in by_id:
                     continue
 
                 entry = {"iss": source, "provider": source}
+                if is_authenticated:
+                    entry["authenticated"] = True
                 if src_meta.get("identity_sub"):
                     entry["sub"] = src_meta["identity_sub"]
                 if src_meta.get("ial") is not None:
@@ -99,4 +124,21 @@ class RasSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
                 by_id[ident_id] = entry
 
+            if authenticated and not matched_authenticated:
+                logger.warning("RAS claim '%s' names authenticated_identity '%s' "
+                               "with no matching source; no identity marked as "
+                               "authenticated for this block", claim, authenticated)
+
         return by_id
+
+    @staticmethod
+    def _handle(value):
+        """Return a RAS identity handle stripped of surrounding whitespace.
+
+        RAS has been observed to emit identity handles with trailing whitespace
+        (the partner developer guide's own samples show
+        "samplename_pi@era.nih.gov "), which would otherwise defeat the
+        comparison against authenticated_identity and produce identity ids that
+        no ACL could match.
+        """
+        return value.strip() if isinstance(value, str) else None

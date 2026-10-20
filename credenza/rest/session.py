@@ -303,7 +303,10 @@ def make_session_response(sid, session: SessionData):
             client["identities"] = list(canonical_identities.keys())
         response["client"] = client
 
-        # format "attributes" array
+        # format "attributes" array -- entries here are ACL principals: legacy
+        # consumers match ACLs against attributes[].id. Only the client is one,
+        # and its id is the authenticated subject. Linked identities stay inside
+        # the client object as information, never as members of this array.
         attributes = [client]
         _format_attributes(["groups", "roles", "resources", "scopes", "claims"], attributes, session)
         response["attributes"] = attributes

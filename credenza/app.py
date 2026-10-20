@@ -178,7 +178,7 @@ def load_config(app):
         cls_path = prof.get("session_augmentation_provider")
         if not cls_path:
             cls_path = default_provider
-        provider_map[realm] = import_string(cls_path)()
+        provider_map[realm] = import_string(cls_path)(realm)
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = provider_map
 
     # Load secrets hashers

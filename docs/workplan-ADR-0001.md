@@ -281,9 +281,8 @@ Deliverable:
 **Goal:** Let deployments that keep their config files under version control
 enable session encryption without carrying the key in `credenza.env`.
 
-Motivated by the `facebase-ras-dev` KVM recipe, which commits
-`home/credenza/config/credenza.env` to the `division` repo and has no template
-substitution step, unlike the deriva-docker entrypoint.
+Motivated by deployment recipes that commit `credenza.env` to version control
+and have no template substitution step, unlike the deriva-docker entrypoint.
 
 - Key resolution moved into `load_config()`:
     - `CREDENZA_ENCRYPTION_KEY` is used when set and non-empty.
