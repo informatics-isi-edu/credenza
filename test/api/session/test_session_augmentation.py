@@ -401,8 +401,14 @@ def test_session_from_bearer_token(monkeypatch, app, store):
         assert sess.userinfo["extra_group"] == "g3"
         assert audits == [("session_from_bearer_token",
                            {"session_id":sid,
-                            "user":"user1@example.com",
+                            "iss": None,
                             "sub":"user1",
+                            "identity": "user1",
+                            "preferred_username": None,
+                            "full_name": None,
+                            "email":"user1@example.com",
+                            "email_verified": None,
+                            "identities": [],
                             "scopes": ["openid", "email", "profile", "dep"],
                             "realm":realm})]
 

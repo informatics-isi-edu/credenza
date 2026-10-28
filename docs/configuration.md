@@ -99,7 +99,8 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 |--------------------------------|----------------------|---------------------------------------------------------------------------|
 | `CREDENZA_ENABLE_HEALTH_CHECK` | `true`               | Enable the `GET /health` endpoint.                                        |
 | `CREDENZA_AUDIT_LOGFILE_PATH`  | `credenza-audit.log` | Path to the structured JSON audit log file.                               |
-| `CREDENZA_AUDIT_USE_SYSLOG`    | `false`              | Send audit events to syslog instead of (or in addition to) the log file.  |
+| `CREDENZA_AUDIT_USE_SYSLOG`    | `true`               | Send audit events to syslog instead of (or in addition to) the log file.  |
+| `CREDENZA_AUDIT_INCLUDE_PII`   | `true`               | Record an identity snapshot (`preferred_username`, `full_name`, `email`, `email_verified`, linked `identities`) on session-creating and identity-rejecting events. When `false`, every event carries only `iss`, `sub` and `identity`. See [audit-events.md](audit-events.md). |
 | `CREDENZA_DEBUG`               | `false`              | Enable DEBUG-level logging. Takes precedence over the Flask `DEBUG` flag. |
 | `CREDENZA_DEBUG_PERF`          | `false`              | Log per-request performance timing at DEBUG level.                        |
 

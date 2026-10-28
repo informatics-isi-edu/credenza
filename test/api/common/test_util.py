@@ -175,6 +175,7 @@ def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app, base_session
     sid = "session123"
     realm = "example-realm"
     userinfo = {
+        "iss": "https://idp.example.org",
         "sub": "abc123",
         "email": "user@example.org"
     }
@@ -232,14 +233,12 @@ def test_revoke_tokens_revokes_access_and_refresh(monkeypatch, app, base_session
     assert ("scope2", "access2", "access_token") in revoked_tokens
     assert len(revoked_tokens) == 3
 
-    # Validate audit events
+    # Validate audit events: identifiers only, no email
+    identity = {"iss": "https://idp.example.org", "sub": "abc123", "identity": "https://idp.example.org/abc123"}
     expected_events = [
-        ("access_token_revoked",
-         {"sid": sid, "user": "user@example.org", "sub": "abc123", "realm": realm, "scope": "scope1"}),
-        ("refresh_token_revoked",
-         {"sid": sid, "user": "user@example.org", "sub": "abc123", "realm": realm, "scope": "scope1"}),
-        ("access_token_revoked",
-         {"sid": sid, "user": "user@example.org", "sub": "abc123", "realm": realm, "scope": "scope2"}),
+        ("access_token_revoked", {"session_id": sid, **identity, "realm": realm, "scope": "scope1"}),
+        ("refresh_token_revoked", {"session_id": sid, **identity, "realm": realm, "scope": "scope1"}),
+        ("access_token_revoked", {"session_id": sid, **identity, "realm": realm, "scope": "scope2"}),
     ]
     assert audit_events == expected_events
 

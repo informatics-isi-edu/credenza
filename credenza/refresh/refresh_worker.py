@@ -16,7 +16,7 @@
 import time
 import logging
 from ..api.common.util import refresh_access_token, refresh_additional_tokens
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
 
 logger = logging.getLogger(__name__)
 
@@ -62,19 +62,17 @@ def run_refresh_worker(app):
                     terminal = sys_meta.get("last_refresh_error_terminal", False)
                     max_failures = app.config.get("MAX_REFRESH_FAILURES", 5)
                     if terminal or failure_count >= max_failures:
-                        user = session.userinfo.get("email")
-                        sub = session.userinfo.get("sub")
+                        identity = audit_identity(session.userinfo, session.realm)
                         store.delete_session(sid)
                         audit_event("session_evicted_refresh_failures",
                                     session_id=sid,
-                                    user=user,
-                                    sub=sub,
+                                    **identity,
                                     realm=session.realm,
                                     failure_count=failure_count,
                                     terminal=terminal,
                                     last_error=sys_meta.get("last_refresh_error"))
                         logger.warning(
-                            f"Evicted session {sid} for user {user} ({sub}) on realm {session.realm} after "
+                            f"Evicted session {sid} for {identity['identity']} on realm {session.realm} after "
                             f"{failure_count} refresh failure(s) (terminal={terminal}): "
                             f"{sys_meta.get('last_refresh_error')}")
                         continue
@@ -87,14 +85,12 @@ def run_refresh_worker(app):
                 # Persist on a successful token change, or when only the failure counter
                 # advanced (so consecutive transient failures accumulate across passes).
                 if modified or failure_count != prev_failures:
-                    user = session.userinfo.get("email")
-                    sub = session.userinfo.get("sub")
                     store.update_session(sid, session)
                     if modified:
                         audit_event("device_session_updated",
                                     session_id=sid,
-                                    user=user,
-                                    sub=sub, realm=session.realm)
+                                    **audit_identity(session.userinfo, session.realm),
+                                    realm=session.realm)
 
         except Exception:
             # pass-level guard: never let the thread die due to an unhandled exception

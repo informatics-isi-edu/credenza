@@ -17,7 +17,7 @@ import time
 import logging
 from typing import Dict, Optional, List, Any
 from flask import Blueprint, request, jsonify, abort, current_app
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
 from ..api.session.storage.session_store import SessionStore, SessionType
 from ..api.auth.client.client_registry import ClientRegistry, ClientRecord, DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL
 from ..api.auth.client.adapters.adapter import ProofContext, AdapterResult
@@ -170,7 +170,7 @@ def revoke_token():
         session_id=sid,
         client_id=client_id,
         realm=session.realm,
-        sub=session.userinfo.get("sub"),
+        **audit_identity(session.userinfo, session.realm),
         session_type=str(session.session_type),
     )
 
@@ -244,7 +244,7 @@ def _handle_client_credentials_grant(proof_ctx: ProofContext,
             request_id=get_request_id(),
             realm=client_rec.realm,
             client_id=client_id,
-            sub=sub,
+            **audit_identity({"sub": sub}, client_rec.realm),
             absolute_ttl=absolute_ttl,
             threshold=long_lifetime_threshold,
         )
@@ -273,7 +273,7 @@ def _handle_client_credentials_grant(proof_ctx: ProofContext,
         session=sid,
         realm=client_rec.realm,
         client_id=client_id,
-        sub=sub,
+        **audit_identity(userinfo, client_rec.realm),
         resources=resources,
         scopes=scopes,
         ttl=ttl,
@@ -395,7 +395,7 @@ def _handle_authorization_code_grant(proof_ctx: ProofContext,
         session_id=session_id,
         client_id=client_id,
         realm=payload.get("realm"),
-        sub=session.userinfo.get("sub"),
+        **audit_identity(session.userinfo, session.realm),
         resources=payload.get("resources", []),
         scope=payload.get("scope", ""),
         expires_in=expires_in,
@@ -495,7 +495,7 @@ def _handle_device_code_grant(proof_ctx: ProofContext,
         request_id=get_request_id(),
         client_id=client_id,
         realm=session.realm,
-        sub=session.userinfo.get("sub"),
+        **audit_identity(session.userinfo, session.realm),
         expires_in=expires_in,
     )
 
@@ -626,7 +626,6 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
     ttl = min(max_ttl, client_max)
 
     userinfo = dict(session.userinfo)
-    sub = userinfo.get("sub")
     scope_str = " ".join(sorted(final_scopes))
 
     new_sid = store.generate_session_id()
@@ -650,7 +649,7 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
         client_id=client_id,
         base_session_id=sid,
         realm=session.realm,
-        sub=sub,
+        **audit_identity(userinfo, session.realm),
         resources=final_resources,
         scopes=final_scopes,
         ttl=ttl,

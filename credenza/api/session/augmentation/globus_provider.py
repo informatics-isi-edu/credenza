@@ -19,7 +19,7 @@ from flask import current_app, abort
 from .base_provider import DefaultSessionAugmentationProvider
 from ....api.common.util import get_effective_scopes
 from ...session.storage.session_store import SessionData, SessionType
-from ....telemetry import audit_event
+from ....telemetry import audit_event, audit_identity_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -201,15 +201,13 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
             use_access_token_as_session_key=True
         )
 
-        sub = userinfo.get("sub")
-        user = userinfo.get("email")
+        identity = audit_identity_snapshot(userinfo, realm)
         logger.info(
-            f"Session creation from bearer token successful for user {user} ({sub}) with session id {session_id} "
-            f"on realm {realm}.")
+            f"Session creation from bearer token successful for {identity['identity']} with session id "
+            f"{session_id} on realm {realm}.")
         audit_event("session_from_bearer_token",
                     session_id=session_id,
-                    user=user,
-                    sub=sub,
+                    **identity,
                     scopes=get_effective_scopes(session_data),
                     realm=realm)
 

@@ -14,3 +14,4 @@
 #
 
 from .audit.logger import audit_event
+from .audit.identity import audit_identity, audit_identity_snapshot

@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from .helpers import make_json_response, perf_logged
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
 from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
 from ..api.session.storage.session_store import SessionData, SessionType
 from ..api.common.util import (
@@ -65,9 +65,7 @@ def get_session():
     now = int(time.time())
 
     realm = session.realm
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email") \
-        if not session.is_service() else session.userinfo.get("name","service")
+    identity = audit_identity(session.userinfo, realm)
 
     # Accept multiple resource hints via repeated query params: ?resource=A&resource=B
     req_resources = get_request_resource_args(request.args.getlist("resource"))
@@ -166,8 +164,7 @@ def get_session():
             if not session.can_extend():
                 audit_event("session_not_extendable",
                             session_id=sid,
-                            user=user,
-                            sub=sub,
+                            **identity,
                             realm=realm,
                             expires_at=datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat())
                 abort(403, "session cannot be extended")
@@ -178,7 +175,7 @@ def get_session():
             if absolute_expires_at and now > (absolute_expires_at - session_expiry_threshold):
                 revoke_tokens(sid, session)
                 store.delete_session(sid)
-                audit_event("session_absolute_lifetime_expired", session_id=sid)
+                audit_event("session_absolute_lifetime_expired", session_id=sid, **identity, realm=realm)
                 abort(401, "session_absolute_lifetime_expired")
 
             if upstream and session.can_refresh_upstream():
@@ -193,8 +190,7 @@ def get_session():
         skey, session_data = store.update_session(sid, session)
         audit_event("session_updated",
                     session_id=sid,
-                    user=user,
-                    sub=sub,
+                    **identity,
                     realm=realm,
                     expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat())
 
@@ -228,14 +224,13 @@ def delete_session():
     sid, session = get_current_session()
     store = current_app.config["SESSION_STORE"]
 
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    identity = audit_identity(session.userinfo, realm)
 
     revoke_tokens(sid, session)
 
     store.delete_session(sid)
-    audit_event("logout", session_id=sid, user=user, sub=sub, realm=realm)
+    audit_event("logout", session_id=sid, **identity, realm=realm)
 
     resp = jsonify({"status": "logged out"})
     resp.set_cookie(current_app.config["COOKIE_NAME"], "", expires=0)

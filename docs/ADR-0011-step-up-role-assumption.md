@@ -123,10 +123,33 @@ Token exchange does not copy `assumed_roles`: a DERIVED session never carries an
 
 ### 3.5 Audit
 
-New audit events, each carrying session id, sub, realm, role id and the IdP `txn` where present:
-`role_assumption_requested`, `role_assumed` (with `auth_time` and `expires_at`),
-`role_assumption_denied` (with the failed check), `role_assumption_expired` (logged when an
-expired assumption is first observed), and `role_dropped` (explicit, revalidation, or logout).
+New audit events, each carrying session id, the session subject's identifiers from
+`audit_identity()` (`iss`, `sub`, `identity`), realm and role id: `role_assumption_requested`,
+`role_assumed` (with `expires_at`), `role_assumption_denied` (with `failed_check`),
+`role_assumption_expired` (logged when an expired assumption is first observed), and
+`role_dropped` (explicit, revalidation, or logout).
+
+The step-up re-authentication is an authentication outcome even though it creates no session, so
+it follows the audit log's snapshot rule (`docs/audit-events.md`): an event that records the
+outcome of an authentication at the IdP carries an identity snapshot.
+
+- **Snapshot.** `role_assumed`, and `role_assumption_denied` for any check made after the
+  callback (stale `auth_time`, insufficient `acr`, role no longer eligible), use
+  `audit_identity_snapshot()` on the re-authenticated ID token. A denial before the IdP round trip
+  (role not eligible at step 2), `role_assumption_requested`, `role_assumption_expired` and
+  `role_dropped` carry identifiers only and join back through `session_id`. Elevation is
+  privileged, so its record identifies the person without depending on the login record
+  (AC-6(9)); at one snapshot per elevation, capped by `role_assumption_ttl`, the volume matches
+  login.
+- **Subject mismatch.** When the re-authenticated `iss`/`sub` differ from the session's
+  (`failed_check: subject_mismatch`), a different person completed the step-up. The record keeps
+  the session's identifiers in the standard fields and adds a nested `presented` object holding
+  `audit_identity_snapshot()` of the identity that actually authenticated. The comparison uses
+  the same claim-mapped `iss`/`sub` as `audit_identity()`.
+- **Re-authentication evidence.** `role_assumed` and every post-callback denial record
+  `auth_time`, `acr`, `amr` (when supplied) and `txn` (when present). These are not personal
+  information and are recorded regardless of `CREDENZA_AUDIT_INCLUDE_PII`, which governs only the
+  snapshot (and reduces `presented` to its identifiers).
 
 ---
 

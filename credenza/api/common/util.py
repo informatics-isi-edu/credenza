@@ -27,7 +27,7 @@ from urllib3.util import Retry
 from urllib.parse import urlparse
 from requests import HTTPError, Timeout, ConnectionError
 from ..session.storage.session_store import SessionData
-from ...telemetry import audit_event
+from ...telemetry import audit_event, audit_identity
 
 logger = logging.getLogger(__name__)
 
@@ -180,9 +180,8 @@ def _clear_refresh_failures(session) -> None:
 
 
 def refresh_access_token(sid, session):
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    identity = audit_identity(session.userinfo, realm)
     client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=session.is_device())
     updated = False
 
@@ -198,9 +197,9 @@ def refresh_access_token(sid, session):
         except Exception as e:
             _record_refresh_failure(session, e)
             logger.warning(
-                f"Access token refresh failed for session {sid} for user {user} {sub} on realm {realm}: {e}")
+                f"Access token refresh failed for session {sid} for {identity['identity']} on realm {realm}: {e}")
             audit_event("access_token_refresh_failed",
-                        session_id=sid, user=user, sub=sub, realm=realm, error=str(e),
+                        session_id=sid, **identity, realm=realm, error=str(e),
                         failure_count=session.session_metadata.system.get("refresh_failure_count"),
                         terminal=session.session_metadata.system.get("last_refresh_error_terminal", False))
             return updated
@@ -216,9 +215,9 @@ def refresh_access_token(sid, session):
             session.session_metadata.system["refresh_token_expires_at"] = session.absolute_expires_at
 
         _clear_refresh_failures(session)
-        logger.debug(f"Access token refresh for session {sid} for user {user} ({sub}) on realm {realm} complete")
+        logger.debug(f"Access token refresh for session {sid} for {identity['identity']} on realm {realm} complete")
         txn = extract_jwt_txn(refreshed["access_token"])
-        audit_event("access_token_refreshed", session_id=sid, user=user, sub=sub, realm=realm,
+        audit_event("access_token_refreshed", session_id=sid, **identity, realm=realm,
                     **({"txn": txn} if txn else {}))
         updated = True
 
@@ -226,9 +225,8 @@ def refresh_access_token(sid, session):
 
 
 def refresh_additional_tokens(sid, session):
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    identity = audit_identity(session.userinfo, realm)
     tokens = session.additional_tokens or {}
     client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=session.is_device())
 
@@ -245,18 +243,18 @@ def refresh_additional_tokens(sid, session):
         if now < expires_at - expiry_threshold:
             # current_time_dt = datetime.fromtimestamp(now).isoformat()
             # expires_at_threshold_dt = datetime.fromtimestamp(expires_at - expiry_threshold).isoformat()
-            # logger.debug(f"Additional token refresh skipped for [sid={sid}, user={user}, sub={sub}, scope={scope}] "
+            # logger.debug(f"Additional token refresh skipped for [sid={sid}, identity={identity['identity']}, scope={scope}] "
             #              f"with current time {current_time_dt} not exceeding expiry threshold {expires_at_threshold_dt}")
             continue
 
         try:
             refreshed = client.refresh_access_token(refresh_token)
-            logger.debug(f"Additional token refresh successful for sid={sid}, user={user}, sub={sub}, scope={scope}")
+            logger.debug(f"Additional token refresh successful for sid={sid}, identity={identity['identity']}, scope={scope}")
         except Exception as e:
             tokens.pop(scope, None)
             logger.warning(f"Token refresh failed for scope={scope}: {e}")
             audit_event("additional_token_refresh_failed",
-                        sid=sid, user=user, sub=sub, scope=scope, realm=realm, error=str(e))
+                        session_id=sid, **identity, scope=scope, realm=realm, error=str(e))
             continue
 
         tokens[scope].update({
@@ -270,9 +268,9 @@ def refresh_additional_tokens(sid, session):
 
         txn = extract_jwt_txn(refreshed["access_token"])
         audit_event("additional_token_refresh_success",
-                    sid=sid,
-                    user=user,
-                    sub=sub,
+                    session_id=sid,
+                    **identity,
+                    realm=realm,
                     scope=scope,
                     expires_at=datetime.fromtimestamp(refreshed["expires_at"], timezone.utc).isoformat(),
                     **({"txn": txn} if txn else {}))
@@ -291,8 +289,7 @@ def revoke_tokens(sid, session):
         logger.debug(f"Skipping token revocation for realm={realm} (skip_token_revocation=true)")
         return
 
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
+    identity = audit_identity(session.userinfo, realm)
     client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(realm, native_client=session.is_device())
     try:
         # try to revoke all tokens associated with the session
@@ -301,11 +298,11 @@ def revoke_tokens(sid, session):
         logger.debug(f"Revoking access tokens and refresh tokens (if present) for scopes: [{scopes}]")
         for k, v in tokens.items():
             client.revoke_token(k, v["access_token"], token_type_hint="access_token")
-            audit_event("access_token_revoked", sid=sid, user=user, sub=sub, realm=realm, scope=k)
+            audit_event("access_token_revoked", session_id=sid, **identity, realm=realm, scope=k)
             refresh_token = v.get("refresh_token")
             if refresh_token:
                 client.revoke_token(k, refresh_token, token_type_hint="refresh_token")
-                audit_event("refresh_token_revoked", sid=sid, user=user, sub=sub, realm=realm, scope=k)
+                audit_event("refresh_token_revoked", session_id=sid, **identity, realm=realm, scope=k)
     except Exception as e:
         logger.warning(f"Exception during token revocation: {e}")
 
@@ -471,7 +468,7 @@ def enrich_userinfo_from_endpoint(
 
     try:
         endpoint_data = client.fetch_userinfo(access_token)
-        audit_event("userinfo_fetched", realm=realm, sub=sub,
+        audit_event("userinfo_fetched", realm=realm, **audit_identity(userinfo, realm),
                     **({"txn": txn} if txn else {}))
     except Exception as exc:
         logger.warning(
@@ -481,7 +478,7 @@ def enrich_userinfo_from_endpoint(
         audit_event(
             "userinfo_fallback_failed",
             realm=realm,
-            sub=sub,
+            **audit_identity(userinfo, realm),
             missing_claims=missing_before,
             error=str(exc),
         )
@@ -507,7 +504,7 @@ def enrich_userinfo_from_endpoint(
         audit_event(
             "userinfo_fallback_incomplete",
             realm=realm,
-            sub=sub,
+            **audit_identity(userinfo, realm),
             missing_claims=missing_after,
         )
     else:

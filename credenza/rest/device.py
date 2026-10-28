@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, redirect, abort, current_app, g, render_template_string
 from secrets import token_hex
 from .helpers import perf_logged, adapter_authenticate, GrantType, ip_rate_limited
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity_snapshot
 from ..api.common.crypto import generate_nonce
 from ..api.common.errors import OAuthError
 from ..api.session.storage.session_store import SessionType
@@ -283,7 +283,7 @@ def device_callback():
         if failed_acr:
             audit_event("device_login_acr_rejected",
                         realm=realm,
-                        sub=userinfo.get("sub"),
+                        **audit_identity_snapshot(userinfo, realm),
                         acr=userinfo.get("acr"),
                         failed_requirements=failed_acr)
             abort(403, description="Insufficient authentication assurance level")
@@ -337,14 +337,12 @@ def device_callback():
         session_data.additional_tokens = additional_tokens
         store.update_session(session_id, session_data)
 
-    sub = userinfo.get("sub")
-    user = userinfo.get("email")
+    identity = audit_identity_snapshot(userinfo, realm)
     txn = extract_jwt_txn(tokens.get("access_token", ""))
-    logger.info(f"Device login successful for user {user} ({sub}) with session id {session_id} on realm {realm}")
+    logger.info(f"Device login successful for {identity['identity']} with session id {session_id} on realm {realm}")
     audit_event("device_login",
                 session_id=session_id,
-                user=user,
-                sub=sub,
+                **identity,
                 scopes=get_effective_scopes(session_data),
                 allowed_resources=session_data.allowed_resources,
                 realm=realm,

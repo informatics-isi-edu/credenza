@@ -121,7 +121,9 @@ def test_absolute_expiry_removes_session(app,
     assert ("session_deleted_absolute_lifetime_expired",
             {"session_id": sid,
              "realm": sess.realm,
+             "iss": sess.userinfo.get("iss"),
              "sub": sess.userinfo.get("sub"),
+             "identity": f"{sess.userinfo.get('iss')}/{sess.userinfo.get('sub')}",
              "absolute_expires_at": sess.absolute_expires_at}) in audit_calls
     assert sid in deleted
 
@@ -253,13 +255,13 @@ def test_additional_token_refresh_success_and_failure(app,
 
     #   - one success for "good"
     assert any(
-        ev == "additional_token_refresh_success" and kw.get("scope") == "good" and kw.get("sid") == sid
+        ev == "additional_token_refresh_success" and kw.get("scope") == "good" and kw.get("session_id") == sid
         for ev, kw in audit_calls
     ), f"Missing success event in {audit_calls}"
 
     #   - one failure for "fail"
     assert any(
-        ev == "additional_token_refresh_failed" and kw.get("scope") == "fail" and kw.get("sid") == sid
+        ev == "additional_token_refresh_failed" and kw.get("scope") == "fail" and kw.get("session_id") == sid
         for ev, kw in audit_calls
     ), f"Missing failure event in {audit_calls}"
 
