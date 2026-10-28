@@ -39,16 +39,16 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 
 ### 1.2 Session and storage
 
-| Variable                            | Default   | Description                                                                                                                                        |
-|-------------------------------------|-----------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CREDENZA_STORAGE_BACKEND`          | `memory`  | Storage backend: `memory`, `redis`, `valkey`, `postgresql`, `sqlite`. `memory` is single-process only and not suitable for production.             |
-| `CREDENZA_STORAGE_BACKEND_URL`      | *(unset)* | Connection URL for the storage backend (e.g., `redis://localhost:6379/0`, `postgresql://user:pass@host/db`). Required for all non-memory backends. |
-| `CREDENZA_STORAGE_BACKEND_KWARGS`   | *(unset)* | JSON object of additional keyword arguments passed to the storage backend constructor.                                                             |
-| `CREDENZA_SESSION_TTL`              | `2100`    | Default session TTL in seconds (35 minutes). Applied when no client-specific TTL is set.                                                           |
-| `CREDENZA_SESSION_EXPIRY_THRESHOLD` | `300`     | Seconds before session expiry at which `PUT /session` triggers a token refresh.                                                                    |
-| `CREDENZA_TOKEN_EXPIRY_THRESHOLD`   | `300`     | Seconds before access token expiry at which upstream refresh is attempted.                                                                         |
-| `CREDENZA_ENCRYPT_SESSION_DATA`     | `false`   | Encrypt session data at rest using AES-GCM. Requires `CREDENZA_ENCRYPTION_KEY`.                                                                    |
-| `CREDENZA_ENCRYPTION_KEY`           | *(unset)* | Encryption key for AES-GCM session encryption. Required if `ENCRYPT_SESSION_DATA=true`.                                                            |
+| Variable                            | Default   | Description                                                                                                                                             |
+|-------------------------------------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `CREDENZA_STORAGE_BACKEND`          | `memory`  | Storage backend: `memory`, `redis`, `valkey`, `postgresql`, `sqlite`. `memory` is single-process only and not suitable for production.                  |
+| `CREDENZA_STORAGE_BACKEND_URL`      | *(unset)* | Connection URL for the storage backend (e.g., `redis://localhost:6379/0`, `postgresql://user:pass@host/db`). Required for all non-memory backends.      |
+| `CREDENZA_STORAGE_BACKEND_KWARGS`   | *(unset)* | JSON object of additional keyword arguments passed to the storage backend constructor.                                                                  |
+| `CREDENZA_SESSION_TTL`              | `2100`    | Default session TTL in seconds (35 minutes). Applied when no client-specific TTL is set.                                                                |
+| `CREDENZA_SESSION_EXPIRY_THRESHOLD` | `300`     | Seconds before session expiry at which `PUT /session` triggers a token refresh.                                                                         |
+| `CREDENZA_TOKEN_EXPIRY_THRESHOLD`   | `300`     | Seconds before access token expiry at which upstream refresh is attempted.                                                                              |
+| `CREDENZA_ENCRYPT_SESSION_DATA`     | `false`   | Encrypt session data at rest using AES-GCM. Requires a key from `CREDENZA_ENCRYPTION_KEY` or `CREDENZA_ENCRYPTION_KEY_FILE`; startup fails without one. |
+| `CREDENZA_ENCRYPTION_KEY`           | *(unset)* | Encryption key for AES-GCM session encryption. A UTF-8 string of exactly 16, 24, or 32 bytes. Falls back to `CREDENZA_ENCRYPTION_KEY_FILE` when unset.  |
 
 ### 1.3 Authentication and flows
 
@@ -68,9 +68,10 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 
 ### 1.5 Client registry
 
-| Variable                              | Default | Description                                                                                                                                                         |
-|---------------------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CREDENZA_ALLOW_UNREGISTERED_CLIENTS` | `false` | Allow clients not present in the registry. When enabled, unregistered clients bypass grant type, scope, and resource policy checks. Not recommended for production. |
+| Variable                              | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|---------------------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `CREDENZA_ALLOW_UNREGISTERED_CLIENTS` | `false` | Allow clients not present in the registry. When enabled, unregistered clients bypass grant type, scope, and resource policy checks. Not recommended for production.                                                                                                                                                                                                                                                                                                                                                                   |
+| `CREDENZA_LOOPBACK_REDIRECT_ANY_PORT` | `true`  | Apply the RFC 8252 sec. 7.3 loopback exception when matching `redirect_uri` at `/authorize`. When enabled, an `http` loopback redirect (`localhost`, `127.0.0.1`, `[::1]`) matches a registered loopback URI with the same scheme, host, and path regardless of port, so native apps using an ephemeral callback port do not need every port pre-registered. Only the port is relaxed; scheme, host token, and path must still match a registered loopback entry. Set `false` for strict exact-match (RFC 6749) on all redirect URIs. |
 
 ### 1.6 Rate limiting
 
@@ -98,7 +99,8 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 |--------------------------------|----------------------|---------------------------------------------------------------------------|
 | `CREDENZA_ENABLE_HEALTH_CHECK` | `true`               | Enable the `GET /health` endpoint.                                        |
 | `CREDENZA_AUDIT_LOGFILE_PATH`  | `credenza-audit.log` | Path to the structured JSON audit log file.                               |
-| `CREDENZA_AUDIT_USE_SYSLOG`    | `false`              | Send audit events to syslog instead of (or in addition to) the log file.  |
+| `CREDENZA_AUDIT_USE_SYSLOG`    | `true`               | Send audit events to syslog instead of (or in addition to) the log file.  |
+| `CREDENZA_AUDIT_INCLUDE_PII`   | `true`               | Record an identity snapshot (`preferred_username`, `full_name`, `email`, `email_verified`, linked `identities`) on session-creating and identity-rejecting events. When `false`, every event carries only `iss`, `sub` and `identity`. See [audit-events.md](audit-events.md). |
 | `CREDENZA_DEBUG`               | `false`              | Enable DEBUG-level logging. Takes precedence over the Flask `DEBUG` flag. |
 | `CREDENZA_DEBUG_PERF`          | `false`              | Log per-request performance timing at DEBUG level.                        |
 
@@ -109,6 +111,7 @@ JSON-structured values (lists, dicts) are accepted as JSON strings.
 | `CREDENZA_OIDC_IDP_PROFILES_FILE` | `config/oidc_idp_profiles.json`        | Path to the IDP profiles config file.    |
 | `CREDENZA_CLIENT_REGISTRY_FILE`   | `config/client_registry.json`          | Path to the client registry config file. |
 | `CREDENZA_TRUSTED_ISSUERS_FILE`   | `config/oidc_idp_trusted_issuers.json` | Path to the trusted OIDC issuers list.   |
+| `CREDENZA_ENCRYPTION_KEY_FILE`    | `secrets/encryption_key.json`          | Path to the session encryption key file. |
 
 ### 1.11 Legacy compatibility
 
@@ -177,6 +180,7 @@ document is incorrect or when an endpoint is at a non-standard URL.
 | `accepted_scopes`                             | *(unset)*                            | List of `{"scope": "...", "issuer": "..."}` objects representing additional scopes the IDP may issue that Credenza should accept. Used by some augmentation providers (e.g., Globus).                                                                                                                                                                                                                                                                                                                                |
 | `discovery_scopes`                            | *(unset)*                            | Dict of `name -> scope-url` for IDP-specific named scopes. Used by augmentation providers.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `session_augmentation_provider`               | `DefaultSessionAugmentationProvider` | Dotted Python import path to a custom `SessionAugmentationProvider` class for this realm (e.g., `credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider`).                                                                                                                                                                                                                                                                                                                              |
+| `session_augmentation_params`                 | *(unset)*                            | Dict of parameters for this realm's augmentation provider. `defer_augmentation` (all providers) runs augmentation a second time after the session has been created, so the provider can call other services with the user's own session key. The remaining keys are provider-specific; see [2.7](#27-session-augmentation-providers).                                                                                                                                                                                |
 
 > **IDP scope vs. OAuth client scope:** `scopes` is what Credenza requests from the upstream IDP when it acts as a Relying Party. It speaks the IDP's vocabulary (standard OIDC scopes for Keycloak/Okta/Cognito; URN scopes for Globus). Downstream clients interact with Credenza's OAuth AS surface via `/authorize` and declare their own scope requests there — those are validated against `client_registry.json`, not forwarded to the IDP. `issuable_scopes` bridges the two planes by declaring what Credenza can actually deliver to clients.
 
@@ -198,7 +202,38 @@ The file referenced by `client_secret_file` must be a JSON object:
 | `client_secret`    | OIDC client secret. Set to `null` or omit for public clients.                                                                                |
 | `native_client_id` | Optional. If present, used as the client ID for device flow (native/public client) authorization requests to the IDP instead of `client_id`. |
 
-### 2.5 Example
+### 2.5 `encryption_key.json` format
+
+When `CREDENZA_ENCRYPT_SESSION_DATA=true`, the key for AES-GCM session encryption is taken from
+`CREDENZA_ENCRYPTION_KEY` if it is set and non-empty. Otherwise it is read from the file named by
+`CREDENZA_ENCRYPTION_KEY_FILE` (default `secrets/encryption_key.json`), which must be a JSON object:
+
+```json
+{
+  "encryption_key": "0123456789abcdef0123456789abcdef"
+}
+```
+
+| Field            | Description                                                                               |
+|------------------|-------------------------------------------------------------------------------------------|
+| `encryption_key` | AES-GCM key as a UTF-8 string of exactly 16, 24, or 32 bytes (AES-128, AES-192, AES-256). |
+
+This is for deployments whose config files are kept under version control and therefore cannot
+carry the key in `credenza.env`. The key file is provisioned out of band alongside the
+`client_secret_file` secrets, with the same ownership and permissions.
+
+Startup fails with a `ValueError` when `CREDENZA_ENCRYPT_SESSION_DATA=true` and neither source
+supplies a key, rather than silently falling back to storing session data in the clear.
+
+The key string is used as bytes directly, it is not base64-decoded, so the *character* count is
+what must be 16, 24, or 32, selecting AES-128, AES-192, or AES-256 respectively. A key of any
+other length is rejected at startup. To generate the file:
+
+```bash
+python3 -c 'import json, secrets; print(json.dumps({"encryption_key": secrets.token_urlsafe(24)}, indent=2))' > secrets/encryption_key.json
+```
+
+### 2.6 Example
 
 ```json
 {
@@ -231,6 +266,125 @@ The file referenced by `client_secret_file` must be a JSON object:
 ```
 
 In the Globus example: `scopes` includes a Globus URN scope that is IDP-internal and should not be advertised to clients. `issuable_scopes` restricts the RFC 8414 discovery document to the three standard OIDC scopes that clients can actually request. `scope_expected_claims` extends the `profile` scope check to include `identity_set`, a Globus-specific claim, so the userinfo fallback fires when it is absent.
+
+### 2.7 Session augmentation providers
+
+A realm's `session_augmentation_provider` enriches the session after login: it can add groups and
+roles from other sources, collect additional tokens, and build the canonical `identities` view.
+Entries it adds to `groups` and `roles` become ACL attributes in the session response. All
+built-in providers live under `credenza.api.session.augmentation`.
+
+| Provider                                                      | Purpose                                                                                                                                                   |
+|---------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `base_provider:DefaultSessionAugmentationProvider`            | No augmentation. Used when `session_augmentation_provider` is unset.                                                                                      |
+| `globus_provider:GlobusSessionAugmentationProvider`           | Globus dependent tokens, Globus Groups membership, and Globus linked identities.                                                                          |
+| `ras_provider:RasSessionAugmentationProvider`                 | NIH RAS: builds the `identities` view from `federated_identities_ial2` / `federated_identities`, marking the identity used to sign in as `authenticated`. |
+| `deriva_provider:DerivaErmrestSessionAugmentationProvider`    | Maps the user to roles or groups by querying ERMrest tables (see below).                                                                                  |
+| `deriva_provider:RasDerivaErmrestSessionAugmentationProvider` | Both of the above: RAS identity handling plus ERMrest role mapping.                                                                                       |
+| `deriva_provider:DerivaGroupsSessionAugmentationProvider`     | Legacy: reads group membership from a DERIVA groups service (`groups_api_url`). Not under active development.                                             |
+
+#### ERMrest role mapping
+
+`DerivaErmrestSessionAugmentationProvider` (and the RAS variant) runs a list of ERMrest queries
+for the signed-in user and turns each result row into a `{"id", "display_name"}` entry in the
+session's `roles` or `groups`.
+
+The queries are sent with the user's own session key, so ERMrest applies the catalog's ACLs to
+them in addition to the identity filter in the URL. That key only exists once the session has
+been created, so **`defer_augmentation` must be `true`**. Without it the provider logs a warning
+and adds nothing. The catalog's ACLs must let each user read their own rows in the tables the
+queries touch.
+
+Parameters, under `session_augmentation_params`:
+
+| Field                        | Default    | Description                                                                                      |
+|------------------------------|------------|--------------------------------------------------------------------------------------------------|
+| `defer_augmentation`         | `false`    | Must be `true` for this provider.                                                                |
+| `ermrest_role_queries`       | *(unset)*  | List of query objects (below). Required.                                                         |
+| `ermrest_timeout`            | `5`        | Per-query HTTP timeout, in seconds.                                                              |
+| `ermrest_bypass_cert_verify` | `false`    | Skip TLS certificate verification for the queries. For development hosts only.                   |
+
+Each query object:
+
+| Field          | Required | Description                                                                                                                                                                                                            |
+|----------------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`         | yes      | Label used in log messages.                                                                                                                                                                                            |
+| `url`          | yes      | Full ERMrest URL, normally an `/attribute/` query. May contain the placeholders `{client_id}`, `{iss}` and `{sub}`, which are percent-encoded before substitution. A query that uses any other placeholder is skipped. |
+| `id`           | yes      | Template for the entry id. Placeholders name columns of the result row and are substituted as-is. A row whose column is missing or null is skipped.                                                                    |
+| `display_name` | no       | Template for the entry's display name, using result columns. Defaults to the rendered `id`.                                                                                                                            |
+| `claim`        | no       | `roles` (default) or `groups`: which session claim receives the entries.                                                                                                                                               |
+
+`{client_id}` is `<iss>/<sub>`, the same id credenza reports as `client.id` and that ERMrest
+records in `ERMrest_Client.ID` and in the `RCB` / `RMB` columns, so it is the value to filter user
+columns on. The user's linked identities (for example the other accounts in a RAS
+`federated_identities_ial2` claim) are never available to queries: only the identity the user
+signed in with is an ACL principal, so it is the only one that can bring roles into a session.
+
+Use a namespaced `id` such as a `tag:` URI (`tag:example.org,2026:role/{Name}`), so the entries
+cannot collide with group or role ids from other sources and ACLs can name them unambiguously.
+The rendered id is the principal string that ACLs name, so build it from a column whose values
+never change once ACLs refer to them: renaming a role would silently detach every ACL that names
+it. Keep those values to identifier-like strings, since they are substituted without encoding.
+
+Augmentation runs at login and again whenever `PUT /session` refreshes the upstream tokens. Each run
+replaces the entries the provider added on the previous run, so a role removed in the catalog
+leaves the session at the next refresh. Entries from the IDP are left alone. Failures are closed:
+a query that fails (HTTP error, timeout, or a response that is not a list of rows) contributes no
+entries, and the entries it added before are dropped rather than kept. The ids the provider has
+added are recorded in userinfo under `deriva_ermrest_augmented`.
+
+```json
+{
+  "session_augmentation_provider": "credenza.api.session.augmentation.deriva_provider:RasDerivaErmrestSessionAugmentationProvider",
+  "session_augmentation_params": {
+    "defer_augmentation": true,
+    "ermrest_role_queries": [
+      {
+        "name": "assigned_roles",
+        "url": "https://www.example.org/ermrest/catalog/1/attribute/public:ERMrest_Client_role/ERMrest_Client={client_id}/public:role/Manual_Assume=false/Name,Description",
+        "claim": "roles",
+        "id": "tag:example.org,2026:role/{Name}",
+        "display_name": "{Description}"
+      },
+      {
+        "name": "dar_datasets",
+        "url": "https://www.example.org/ermrest/catalog/1/attribute/access:data_access_request/RCB={client_id}/status=approved/access:dar_dataset/isa:dataset/RID,title",
+        "claim": "roles",
+        "id": "tag:example.org,2026:dataset/{RID}",
+        "display_name": "{title}"
+      }
+    ]
+  }
+}
+```
+
+The first query reads assigned roles. It expects two tables in the catalog's `public` schema:
+
+- `role`, a vocabulary table (as built by deriva-py `Table.define_vocabulary`) with a unique
+  `Name` column, a `Description`, and a boolean `Manual_Assume`.
+- `ERMrest_Client_role`, an association table (`Table.define_association`) whose
+  `ERMrest_Client` column references `ERMrest_Client.ID` and whose `role` column references
+  `role.Name`.
+
+The query starts from the association table and filters on the user's own client id, so it never
+reads `ERMrest_Client` itself. It builds ids from `Name` rather than the vocabulary's CURIE-style
+`ID` column. The `Manual_Assume=false` filter is essential: a role marked `Manual_Assume` is meant
+to be taken on deliberately for a single session, never granted at login, and this provider
+grants every row its queries return. Credenza has no mechanism yet for assuming such a role, so
+until one exists those roles reach no session through this provider.
+
+Because the query runs with the user's credential, `role` must be readable by every user, and
+each user must be able to read their own rows of `ERMrest_Client_role`. A dynamic ACL binding on
+the association table grants the latter:
+
+```json
+"acl_bindings": {
+  "self_read": {"types": ["select"], "projection": ["ERMrest_Client"], "projection_type": "acl"}
+}
+```
+
+The second query grants a role per dataset for which the user has an approved data access request.
+Its schema and table names are placeholders: the data access request tables are not yet defined.
 
 ---
 
@@ -407,5 +561,5 @@ See the `AdapterInterface` base class in `credenza/api/auth/client/adapters/adap
 - [ ] `client_registry.json` present (may be empty `{"version":"1","clients":{}}` for browser-only deployments)
 - [ ] `CREDENZA_STORAGE_BACKEND` set to `redis` or `postgresql` for production multi-worker deployments
 - [ ] `CREDENZA_ENABLE_PROXYFIX=true` if running behind a reverse proxy
-- [ ] `CREDENZA_ENCRYPT_SESSION_DATA=true` and `CREDENZA_ENCRYPTION_KEY` set if session encryption is required
+- [ ] `CREDENZA_ENCRYPT_SESSION_DATA=true` and a key supplied via `CREDENZA_ENCRYPTION_KEY` or `secrets/encryption_key.json` if session encryption is required
 - [ ] Audit log path writable or syslog configured

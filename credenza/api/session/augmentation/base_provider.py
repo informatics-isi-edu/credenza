@@ -17,6 +17,7 @@ import time
 import logging
 from typing import Optional
 from abc import ABC, abstractmethod
+from flask import current_app
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,33 @@ class SessionAugmentationProvider(ABC):
       - fetch_dependent_tokens (some providers, e.g. Globus, allow clients to retrieve dependent tokens via token endpoints)
       - enrich_userinfo (add groups, roles, claims, etc. to userinfo from other sources)
       (additional as needed in future)
+
+    Each instance serves exactly one realm, fixed at construction. Subclasses
+    that define __init__ must accept the realm and pass it to super().__init__().
+    Providers must use self.realm (or the profile/params properties) for anything
+    realm-specific, never DEFAULT_REALM or get_realm(), which name the default
+    realm rather than this provider's.
     """
+
+    def __init__(self, realm: str):
+        if not realm or not isinstance(realm, str):
+            raise ValueError("Session augmentation provider requires a realm name")
+        self._realm = realm
+
+    @property
+    def realm(self) -> str:
+        """The realm whose profile configures this provider."""
+        return self._realm
+
+    @property
+    def profile(self) -> dict:
+        """This provider's realm profile from OIDC_IDP_PROFILES."""
+        return current_app.config["OIDC_IDP_PROFILES"].get(self._realm, {})
+
+    @property
+    def params(self) -> dict:
+        """This provider's session_augmentation_params."""
+        return self.profile.get("session_augmentation_params", {})
 
     @abstractmethod
     def fetch_dependent_tokens(
@@ -80,5 +107,15 @@ class DefaultSessionAugmentationProvider(SessionAugmentationProvider):
 
         return additional_tokens
 
-    def enrich_userinfo(self, userinfo, additional_tokens):
+    def enrich_userinfo(self, userinfo, additional_tokens) -> bool:
         return False
+
+    def build_identities(self, userinfo: dict) -> dict:
+        """Derive canonical linked identities from userinfo at render time.
+
+        This is a pure transform of claims already present in userinfo (no I/O),
+        so it is computed on demand rather than persisted. Returns a dict keyed
+        by canonical identity id "<iss>/<sub>" whose values hold per-identity
+        detail. The default provider has no identity claims to surface.
+        """
+        return {}

@@ -18,11 +18,12 @@ import requests
 from types import SimpleNamespace
 from flask import g
 from werkzeug.exceptions import NotFound
+from werkzeug.utils import import_string
 from credenza.api.common import util
 from credenza.api.session.storage.session_store import SessionData
 from credenza.api.session.augmentation import globus_provider
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
-from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+from credenza.api.session.augmentation.deriva_provider import DerivaGroupsSessionAugmentationProvider
 
 # Fixed current time for deterministic ttl calculations
 CUR_TIME = 1000
@@ -199,6 +200,116 @@ def test_enrich_userinfo_globus_with_tokens(monkeypatch, app):
         assert any(item.get("display_name") == g["name"] for item in userinfo["groups"])
 
 
+def test_enrich_userinfo_globus_extends_existing_groups(monkeypatch, app):
+    existing = {"id": "https://auth.globus.org/existing", "display_name": "Existing Group"}
+    userinfo = {"iss": GlobusSessionAugmentationProvider.GLOBUS_ISSUER, "groups": [existing]}
+    additional_tokens = {GlobusSessionAugmentationProvider.GLOBUS_GROUPS_SCOPE: {"access_token": "grp_token"}}
+    sample_groups = [{"id": "g1", "name": "Group One"}, {"id": "g2", "name": "Group Two"}]
+    mock_resp = SimpleNamespace(status_code=200, json=lambda: sample_groups, raise_for_status=lambda: None)
+    monkeypatch.setattr(requests, "get", lambda url, headers, timeout=None: mock_resp)
+
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        result = provider.enrich_userinfo(userinfo, additional_tokens)
+
+    assert result is True
+    # Pre-existing groups are preserved; fetched groups are appended (extend branch).
+    assert existing in userinfo["groups"]
+    assert len(userinfo["groups"]) == 1 + len(sample_groups)
+    for g in sample_groups:
+        assert any(item.get("display_name") == g["name"] for item in userinfo["groups"])
+
+
+def test_enrich_userinfo_globus_identity_set_detail(app):
+    iss = GlobusSessionAugmentationProvider.GLOBUS_ISSUER
+    userinfo = {
+        "iss": iss,
+        "identity_set_detail": [
+            {"sub": "b25a8b75", "username": "jdoe@university.edu", "name": "Jane Doe",
+             "email": "jdoe@university.edu",
+             "identity_provider_display_name": "University of Research"},
+            {"sub": "c8e3100a", "username": "jane.doe@gmail.com", "name": "Jane Doe",
+             "email": "jane.doe@gmail.com",
+             "identity_provider_display_name": "Google"},
+        ],
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        idents = provider.build_identities(userinfo)
+
+    assert set(idents) == {f"{iss}/b25a8b75", f"{iss}/c8e3100a"}
+    first = idents[f"{iss}/b25a8b75"]
+    assert first["sub"] == "b25a8b75"
+    assert first["iss"] == iss
+    assert first["username"] == "jdoe@university.edu"
+    assert first["email"] == "jdoe@university.edu"
+    assert first["provider"] == "University of Research"
+    # build_identities is a pure transform: it does not mutate userinfo.
+    assert "identities" not in userinfo
+
+
+def test_enrich_userinfo_globus_identity_set_summary(app):
+    iss = GlobusSessionAugmentationProvider.GLOBUS_ISSUER
+    userinfo = {
+        "iss": iss,
+        "identity_set": [
+            "urn:globus:auth:identity:b25a8b75",
+            "urn:globus:auth:identity:c8e3100a",
+        ],
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        idents = provider.build_identities(userinfo)
+
+    assert set(idents) == {f"{iss}/b25a8b75", f"{iss}/c8e3100a"}
+    # Summary entries (URN strings) carry no profile detail.
+    for detail in idents.values():
+        assert set(detail.keys()) == {"sub", "iss"}
+
+
+def test_enrich_userinfo_globus_identity_merge_prefers_detail(app):
+    iss = GlobusSessionAugmentationProvider.GLOBUS_ISSUER
+    userinfo = {
+        "iss": iss,
+        "identity_set": [
+            "urn:globus:auth:identity:b25a8b75",
+            "urn:globus:auth:identity:summaryonly",
+        ],
+        "identity_set_detail": [
+            {"sub": "b25a8b75", "username": "jdoe@university.edu"},
+        ],
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        idents = provider.build_identities(userinfo)
+
+    # Detailed entry wins for the overlapping id.
+    assert idents[f"{iss}/b25a8b75"]["username"] == "jdoe@university.edu"
+    # Summary-only id is still present, minimally.
+    assert set(idents[f"{iss}/summaryonly"].keys()) == {"sub", "iss"}
+
+
+def test_enrich_userinfo_globus_identity_skips_malformed(app):
+    iss = GlobusSessionAugmentationProvider.GLOBUS_ISSUER
+    userinfo = {
+        "iss": iss,
+        "identity_set_detail": [
+            "not-a-dict",                       # non-dict entry -> skipped
+            {"username": "no-sub@example.edu"},  # missing sub -> skipped
+            {"sub": "good1", "username": "u@example.edu"},  # valid
+        ],
+        "identity_set": [
+            12345,                               # non-str entry -> skipped
+            "urn:globus:auth:identity:good2",    # valid
+        ],
+    }
+    with app.app_context():
+        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        idents = provider.build_identities(userinfo)
+
+    assert set(idents) == {f"{iss}/good1", f"{iss}/good2"}
+
+
 def test_fetch_dependent_tokens_not_globus(app):
     userinfo = {"iss": "https://other-issuer", "email": "u@example.com"}
     with app.app_context():
@@ -266,7 +377,9 @@ def test_session_from_bearer_token(monkeypatch, app, store):
                             lambda token, required_audience, **kw: fake_claims)
         client.profile["accepted_scopes"] = [{"scope":"openid","issuer":client.issuer}]
 
-        provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
+        # Legacy bearer resolution only ever runs on the default realm's provider.
+        provider = GlobusSessionAugmentationProvider(realm)
+        monkeypatch.setitem(app.config["SESSION_AUGMENTATION_PROVIDERS"], realm, provider)
         monkeypatch.setattr(provider, "fetch_dependent_tokens",
                             lambda at, ui, scopes=None, access_type="online":
                             {"dep": {"refresh_token":"r","expires_at":123}})
@@ -279,7 +392,7 @@ def test_session_from_bearer_token(monkeypatch, app, store):
         monkeypatch.setattr(store, "generate_session_id", lambda: "NEW_SESSION_ID")
         monkeypatch.setattr(store, "get_session_by_session_key", lambda sk: ("NEW_SESSION_ID", None))
 
-        provider = util.get_augmentation_provider("globus")
+        provider = util.get_augmentation_provider(realm)
         skey, sess = provider.session_from_bearer_token("token345")
         sid,_ = store.get_session_by_session_key(skey)
         assert skey == "token345"
@@ -288,8 +401,14 @@ def test_session_from_bearer_token(monkeypatch, app, store):
         assert sess.userinfo["extra_group"] == "g3"
         assert audits == [("session_from_bearer_token",
                            {"session_id":sid,
-                            "user":"user1@example.com",
+                            "iss": None,
                             "sub":"user1",
+                            "identity": "user1",
+                            "preferred_username": None,
+                            "full_name": None,
+                            "email":"user1@example.com",
+                            "email_verified": None,
+                            "identities": [],
                             "scopes": ["openid", "email", "profile", "dep"],
                             "realm":realm})]
 
@@ -302,8 +421,8 @@ def test_session_from_bearer_token_invalid(monkeypatch, app, store):
         monkeypatch.setattr(client, "validate_access_token",
                             lambda token, **kw: (_ for _ in ()).throw(RuntimeError("token invalid")))
         client.profile["accepted_scopes"] = [{"scope":"openid","issuer":client.issuer}]
+        provider = GlobusSessionAugmentationProvider(realm)
         with pytest.raises(NotFound):
-            provider = util.get_augmentation_provider("globus")
             provider.session_from_bearer_token("bad-token")
 
 def test_enrich_userinfo_deriva_success_bearer_token(monkeypatch, app):
@@ -331,7 +450,7 @@ def test_enrich_userinfo_deriva_success_bearer_token(monkeypatch, app):
 
     with app.test_request_context():
         g.session_key = "my-token"
-        provider = DerivaSessionAugmentationProvider()
+        provider = DerivaGroupsSessionAugmentationProvider(app.config["DEFAULT_REALM"])
         result = provider.enrich_userinfo(userinfo, {})
 
     assert result is True
@@ -340,7 +459,7 @@ def test_enrich_userinfo_deriva_success_bearer_token(monkeypatch, app):
 
 
 def test_enrich_userinfo_deriva_missing_url(monkeypatch, app):
-    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+    from credenza.api.session.augmentation.deriva_provider import DerivaGroupsSessionAugmentationProvider
     userinfo = {"email": "u@example.com"}
     monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", {
         app.config["DEFAULT_REALM"]: {
@@ -350,14 +469,14 @@ def test_enrich_userinfo_deriva_missing_url(monkeypatch, app):
         }
     })
     with app.app_context():
-        provider = DerivaSessionAugmentationProvider()
+        provider = DerivaGroupsSessionAugmentationProvider(app.config["DEFAULT_REALM"])
         result = provider.enrich_userinfo(userinfo, {})
     assert result is False
     assert "groups" not in userinfo
 
 
 def test_enrich_userinfo_deriva_http_401(monkeypatch, app):
-    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+    from credenza.api.session.augmentation.deriva_provider import DerivaGroupsSessionAugmentationProvider
     from requests.models import Response
     from requests import HTTPError
 
@@ -379,13 +498,13 @@ def test_enrich_userinfo_deriva_http_401(monkeypatch, app):
 
     with app.test_request_context():
         g.session_key = "my-token"
-        provider = DerivaSessionAugmentationProvider()
+        provider = DerivaGroupsSessionAugmentationProvider(app.config["DEFAULT_REALM"])
         result = provider.enrich_userinfo(userinfo, {})
     assert result is False
 
 
 def test_enrich_userinfo_deriva_request_exception(monkeypatch, app):
-    from credenza.api.session.augmentation.deriva_provider import DerivaSessionAugmentationProvider
+    from credenza.api.session.augmentation.deriva_provider import DerivaGroupsSessionAugmentationProvider
     userinfo = {"email": "u@example.com"}
     monkeypatch.setitem(app.config, "OIDC_IDP_PROFILES", {
         app.config["DEFAULT_REALM"]: {
@@ -398,6 +517,27 @@ def test_enrich_userinfo_deriva_request_exception(monkeypatch, app):
 
     with app.test_request_context():
         g.session_key = "any-token"
-        provider = DerivaSessionAugmentationProvider()
+        provider = DerivaGroupsSessionAugmentationProvider(app.config["DEFAULT_REALM"])
         result = provider.enrich_userinfo(userinfo, {})
     assert result is False
+
+
+@pytest.mark.parametrize("cls", [
+    "credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider",
+    "credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider",
+    "credenza.api.session.augmentation.ras_provider:RasSessionAugmentationProvider",
+    "credenza.api.session.augmentation.deriva_provider:DerivaGroupsSessionAugmentationProvider",
+    "credenza.api.session.augmentation.deriva_provider:DerivaErmrestSessionAugmentationProvider",
+    "credenza.api.session.augmentation.deriva_provider:RasDerivaErmrestSessionAugmentationProvider",
+])
+def test_provider_realm_is_a_required_immutable_constructor_arg(cls):
+    provider_cls = import_string(cls)
+    with pytest.raises(TypeError):
+        provider_cls()
+    for bad in ("", None):
+        with pytest.raises(ValueError):
+            provider_cls(bad)
+    provider = provider_cls("r1")
+    assert provider.realm == "r1"
+    with pytest.raises(AttributeError):
+        provider.realm = "r2"

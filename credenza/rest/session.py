@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from .helpers import make_json_response, perf_logged
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
 from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
 from ..api.session.storage.session_store import SessionData, SessionType
 from ..api.common.util import (
@@ -65,9 +65,7 @@ def get_session():
     now = int(time.time())
 
     realm = session.realm
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email") \
-        if not session.is_service() else session.userinfo.get("name","service")
+    identity = audit_identity(session.userinfo, realm)
 
     # Accept multiple resource hints via repeated query params: ?resource=A&resource=B
     req_resources = get_request_resource_args(request.args.getlist("resource"))
@@ -166,8 +164,7 @@ def get_session():
             if not session.can_extend():
                 audit_event("session_not_extendable",
                             session_id=sid,
-                            user=user,
-                            sub=sub,
+                            **identity,
                             realm=realm,
                             expires_at=datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat())
                 abort(403, "session cannot be extended")
@@ -178,7 +175,7 @@ def get_session():
             if absolute_expires_at and now > (absolute_expires_at - session_expiry_threshold):
                 revoke_tokens(sid, session)
                 store.delete_session(sid)
-                audit_event("session_absolute_lifetime_expired", session_id=sid)
+                audit_event("session_absolute_lifetime_expired", session_id=sid, **identity, realm=realm)
                 abort(401, "session_absolute_lifetime_expired")
 
             if upstream and session.can_refresh_upstream():
@@ -193,8 +190,7 @@ def get_session():
         skey, session_data = store.update_session(sid, session)
         audit_event("session_updated",
                     session_id=sid,
-                    user=user,
-                    sub=sub,
+                    **identity,
                     realm=realm,
                     expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat())
 
@@ -228,14 +224,13 @@ def delete_session():
     sid, session = get_current_session()
     store = current_app.config["SESSION_STORE"]
 
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    identity = audit_identity(session.userinfo, realm)
 
     revoke_tokens(sid, session)
 
     store.delete_session(sid)
-    audit_event("logout", session_id=sid, user=user, sub=sub, realm=realm)
+    audit_event("logout", session_id=sid, **identity, realm=realm)
 
     resp = jsonify({"status": "logged out"})
     resp.set_cookie(current_app.config["COOKIE_NAME"], "", expires=0)
@@ -262,9 +257,22 @@ def _format_attributes(claim_names: list, attributes: list, session: SessionData
     return attributes
 
 
+def _canonical_identities(session: SessionData) -> dict:
+    """Build the canonical identities map for a session at render time.
+
+    Linked-identity canonicalization is a pure transform of claims already in
+    userinfo (no I/O), so it is computed on demand via the realm's augmentation
+    provider rather than persisted into the session. Returns a dict keyed by
+    canonical identity id whose values hold per-identity detail.
+    """
+    provider = get_augmentation_provider(session.realm)
+    return provider.build_identities(session.userinfo) if provider else {}
+
+
 def make_session_response(sid, session: SessionData):
     response = {}
     store = current_app.config["SESSION_STORE"]
+    canonical_identities = _canonical_identities(session)
 
     if current_app.config.get("ENABLE_LEGACY_API", False):
         issuer =             _claim(session, "iss", session.userinfo.get("iss"))
@@ -275,23 +283,25 @@ def make_session_response(sid, session: SessionData):
 
         # format "client" object
         client_id = f"{issuer}/{sub}" if issuer else sub
-        client = {
-            "id": client_id,
-            "display_name": preferred_username,
-            "full_name": full_name,
-            "email": email,
-        }
+        client = {"id": client_id,
+                  "display_name": preferred_username,
+                  "full_name": full_name,
+                  "email": email}
 
-        identity_set = session.userinfo.get("identity_set", session.userinfo.get("identity_set_detail"))
-        identities = []
-        if identity_set:
-            for ident in identity_set:
-                ident_sub = ident.get("sub", ident.get("id", ident.get("userid")))
-                identities.append(f"{issuer}/{ident_sub}" if issuer else ident_sub)
-        client["identities"] = identities
+        # The legacy webauthn contract is a flat list of identity-id strings, so
+        # default to the ids (the keys of the canonical identities map) to avoid
+        # breaking existing consumers. Deployments that want the full detail
+        # objects can opt in via LEGACY_IDENTITY_DETAIL.
+        if current_app.config.get("LEGACY_IDENTITY_DETAIL", False):
+            client["identities"] = canonical_identities
+        else:
+            client["identities"] = list(canonical_identities.keys())
         response["client"] = client
 
-        # format "attributes" array
+        # format "attributes" array -- entries here are ACL principals: legacy
+        # consumers match ACLs against attributes[].id. Only the client is one,
+        # and its id is the authenticated subject. Linked identities stay inside
+        # the client object as information, never as members of this array.
         attributes = [client]
         _format_attributes(["groups", "roles", "resources", "scopes", "claims"], attributes, session)
         response["attributes"] = attributes
@@ -334,6 +344,7 @@ def make_session_response(sid, session: SessionData):
                 "userid":             userid,
                 "groups":             groups,
                 "roles":              roles,
+                "identities":         canonical_identities,
                 "scopes":             get_effective_scopes(session),
                 "resources":          session.allowed_resources,
                 "metadata":           session.session_metadata.to_dict(),

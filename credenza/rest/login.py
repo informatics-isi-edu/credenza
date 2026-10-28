@@ -21,7 +21,7 @@ from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify, g
 from .helpers import get_cookie_domain, perf_logged
 from .consent import is_consent_needed
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity, audit_identity_snapshot
 from ..api.session.storage.session_store import TRANSIENT_DATA_TTL, SessionType
 from ..api.common.crypto import generate_nonce
 from ..api.common.util import (
@@ -30,6 +30,8 @@ from ..api.common.util import (
     augment_session,
     enrich_userinfo_from_endpoint,
     get_missing_scope_claims,
+    extract_jwt_txn,
+    check_acr,
     revoke_tokens,
     safe_referrer,
     is_transient_request_error
@@ -164,26 +166,38 @@ def callback():
         # for the scopes that were requested. Fires automatically; opt out per
         # realm with skip_userinfo_fallback: true in the IDP profile. Never aborts
         # -- the session is created in degraded form if the endpoint also fails.
-        _profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
-        if not _profile.get("skip_userinfo_fallback"):
-            _missing = get_missing_scope_claims(
-                _profile.get("scopes", ""),
+        profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
+        if not profile.get("skip_userinfo_fallback"):
+            missing = get_missing_scope_claims(
+                profile.get("scopes", ""),
                 userinfo,
-                _profile.get("scope_expected_claims"),
+                profile.get("scope_expected_claims"),
             )
-            if _missing:
+            if missing:
                 logger.debug(
                     "userinfo fallback triggered for realm=%s sub=%s missing=%s",
-                    realm, userinfo.get("sub"), _missing,
+                    realm, userinfo.get("sub"), missing,
                 )
                 userinfo = enrich_userinfo_from_endpoint(
                     client,
                     tokens.get("access_token"),
                     userinfo,
-                    _missing,
+                    missing,
                     realm=realm,
                     sub=userinfo.get("sub"),
                 )
+
+        # ACR assertion: reject login if the ID token does not meet configured assurance requirements.
+        required_acr = profile.get("required_acr")
+        if required_acr:
+            failed_acr = check_acr(userinfo, required_acr)
+            if failed_acr:
+                audit_event("login_acr_rejected",
+                            realm=realm,
+                            **audit_identity_snapshot(userinfo, realm),
+                            acr=userinfo.get("acr"),
+                            failed_requirements=failed_acr)
+                abort(403, description="Insufficient authentication assurance level")
 
         # Augment the session, if applicable
         userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
@@ -205,14 +219,15 @@ def callback():
         )
 
         sub = userinfo.get("sub")
-        user = userinfo.get("email")
-        logger.info(f"Login successful for user {user} ({sub}) with session id {sid} on realm {realm}")
+        identity = audit_identity_snapshot(userinfo, realm)
+        txn = extract_jwt_txn(tokens.get("access_token", ""))
+        logger.info(f"Login successful for {identity['identity']} with session id {sid} on realm {realm}")
         audit_event("login",
                     session_id=sid,
-                    user=user,
-                    sub=sub,
+                    **identity,
                     scopes=get_effective_scopes(session_data),
-                    realm=realm)
+                    realm=realm,
+                    **({"txn": txn} if txn else {}))
 
         if metadata.get("augmentation_deferred", False):
             g.session_key = session_key
@@ -236,6 +251,7 @@ def callback():
                     pending_key = token_hex(16)
                     store.set_pending_consent(pending_key, {
                         "session_id":            sid,
+                        "iss":                   iss,
                         "sub":                   sub,
                         "principal":             principal,
                         "client_id":             client_id,
@@ -266,13 +282,12 @@ def callback():
             }
             store.set_authorization_code(auth_code, code_payload, ttl=300)
             logger.info(
-                f"OAuth authorization code issued for user {user} ({sub}), "
+                f"OAuth authorization code issued for {identity['identity']}, "
                 f"client={authn_request_ctx['oauth_client_id']}, session={sid}")
             audit_event("authorization_code_issued",
                         session_id=sid,
                         client_id=authn_request_ctx["oauth_client_id"],
-                        user=user,
-                        sub=sub,
+                        **audit_identity(userinfo, realm),
                         realm=realm)
             client_state = authn_request_ctx.get("oauth_state", "")
             params = {"code": auth_code}
@@ -308,9 +323,8 @@ def logout():
         return redirect(post_logout_redirect_uri)
 
     store = current_app.config["SESSION_STORE"]
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    identity = audit_identity(session.userinfo, realm)
     profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
     factory = current_app.config["OIDC_CLIENT_FACTORY"]
 
@@ -327,8 +341,8 @@ def logout():
     revoke_tokens(sid, session)
     store.delete_session(sid)
 
-    logger.info(f"Logout for user {user} ({sub}) with session id {sid} on realm {realm}.")
-    audit_event("logout", session_id=sid, user=user, sub=sub, realm=realm)
+    logger.info(f"Logout for {identity['identity']} with session id {sid} on realm {realm}.")
+    audit_event("logout", session_id=sid, **identity, realm=realm)
 
     if logout_url:
         if logout_url_params:

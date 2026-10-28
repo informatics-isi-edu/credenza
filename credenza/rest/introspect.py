@@ -15,7 +15,7 @@
 #
 import logging
 from flask import Blueprint, request, jsonify, current_app
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
 from ..api.auth.client.client_registry import ClientRegistry
 from ..api.auth.client.adapters.adapter import ProofContext
 from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
@@ -143,7 +143,7 @@ def introspect_token():
         client_id=client_rec.client_id,
         session_id=sid,
         realm=session.realm,
-        sub=sub,
+        **audit_identity(session.userinfo, session.realm),
         resources=session.allowed_resources,
     )
 

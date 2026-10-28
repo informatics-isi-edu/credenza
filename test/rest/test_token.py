@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import logging
 import time
 import pytest
 from flask import request
@@ -28,6 +29,9 @@ from credenza.api.auth.client.client_registry import ClientRegistry, ClientRecor
 from credenza.api.common.errors import OAuthError
 from credenza.api.common.rate_limit import FixedWindowJitterLimiter
 from credenza.api.session.storage.session_store import SessionType
+
+
+_UNSET = object()  # distinguishes "not passed" from an explicit None override
 
 
 class DummyAdapter(AdapterInterface):
@@ -87,7 +91,8 @@ def make_client_record(client_id: str, *,
                        allowed_claims=None,
                        allowed_auth_methods=None,
                        allowed_redirect_uris=None,
-                       allowed_token_exchange_targets=None):
+                       allowed_token_exchange_targets=None,
+                       absolute_session_lifetime_seconds=_UNSET):
     """Construct a ClientRecord suitable for tests (mirrors registry-loaded shape)."""
 
     # Default to allowing client_credentials unless test overrides it.
@@ -120,7 +125,11 @@ def make_client_record(client_id: str, *,
         allowed_redirect_uris=list(allowed_redirect_uris or []),
         allowed_token_exchange_targets=list(allowed_token_exchange_targets or []),
         max_session_ttl_seconds=token_mod.DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL,
-        absolute_session_lifetime_seconds=token_mod.DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL,
+        absolute_session_lifetime_seconds=(
+            token_mod.DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL
+            if absolute_session_lifetime_seconds is _UNSET
+            else absolute_session_lifetime_seconds
+        ),
         default_resources=list(default_resources),
         default_scopes=list(default_scopes),
         additional_claims=additional_claims,
@@ -412,6 +421,171 @@ def test_client_credentials_happy_path_end_to_end(app):
 
         assert body["token_type"] == "bearer"
         assert isinstance(body["expires_in"], int)
+
+
+def test_client_credentials_absolute_lifetime_clamped_to_ceiling(app):
+    """
+    A client configuring an absolute_session_lifetime_seconds larger than the
+    server-wide MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS ceiling gets clamped down to
+    the ceiling, not the larger client-configured value.
+    """
+    subj = Subject(provider="client_secret", subject_id="svc-ceiling")
+    ar = AdapterResult(subject=subj, additional_claims={}, auth_context={})
+    adapter = StubAdapter(result=ar, raise_exc=None)
+
+    client = make_client_record(
+        "svc-ceiling-client",
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+        adapter_instance=adapter,
+        absolute_session_lifetime_seconds=31536000,  # 1 year, exceeds the default ceiling
+    )
+    registry = ClientRegistry(version="1", clients={"svc-ceiling-client": client})
+
+    app.config["CLIENT_REGISTRY"] = registry
+    app.config["IDP_CLAIM_MAPS"] = {}
+    # exercise the default ceiling explicitly rather than relying on app.py's env default
+    app.config["MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS"] = token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS
+
+    before = int(time.time())
+    with app.test_client() as c:
+        resp = c.post(
+            "/token",
+            data={
+                "client_id": "svc-ceiling-client",
+                "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+            },
+        )
+        assert resp.status_code == 200
+
+        # SessionStore()'s default backend arg is shared across tests (a mutable
+        # default argument), so filter by sub rather than assuming index 0.
+        store = app.config["SESSION_STORE"]
+        session = next(
+            s for sid in store.list_session_ids()
+            if (s := store.get_session_data(sid)) and s.userinfo.get("sub") == subj.to_sub()
+        )
+        # absolute_expires_at must reflect the ceiling (86400s), not the client's
+        # requested 31536000s.
+        assert session.absolute_expires_at <= before + token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS + 5
+        assert session.absolute_expires_at < before + 31536000
+
+
+def test_client_credentials_absolute_lifetime_unset_uses_ceiling_default(app):
+    """
+    A client with no absolute_session_lifetime_seconds configured (None, as happens
+    when the field is omitted from client_registry.json) falls back to the ceiling
+    itself, preserving today's default behavior.
+    """
+    subj = Subject(provider="client_secret", subject_id="svc-unset")
+    ar = AdapterResult(subject=subj, additional_claims={}, auth_context={})
+    adapter = StubAdapter(result=ar, raise_exc=None)
+
+    client = make_client_record(
+        "svc-unset-client",
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+        adapter_instance=adapter,
+        absolute_session_lifetime_seconds=None,
+    )
+    registry = ClientRegistry(version="1", clients={"svc-unset-client": client})
+
+    app.config["CLIENT_REGISTRY"] = registry
+    app.config["IDP_CLAIM_MAPS"] = {}
+    app.config["MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS"] = token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS
+
+    before = int(time.time())
+    with app.test_client() as c:
+        resp = c.post(
+            "/token",
+            data={
+                "client_id": "svc-unset-client",
+                "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+            },
+        )
+        assert resp.status_code == 200
+
+        store = app.config["SESSION_STORE"]
+        session = next(
+            s for sid in store.list_session_ids()
+            if (s := store.get_session_data(sid)) and s.userinfo.get("sub") == subj.to_sub()
+        )
+        assert before + token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS <= session.absolute_expires_at <= \
+               before + token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS + 5
+
+
+def test_client_credentials_long_absolute_lifetime_triggers_audit_event(caplog, app):
+    """
+    A client whose (post-ceiling-clamp) absolute lifetime exceeds
+    LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS gets a non-blocking
+    token_issued_long_absolute_lifetime audit event -- issuance still succeeds.
+    """
+    subj = Subject(provider="client_secret", subject_id="svc-long-lived")
+    ar = AdapterResult(subject=subj, additional_claims={}, auth_context={})
+    adapter = StubAdapter(result=ar, raise_exc=None)
+
+    client = make_client_record(
+        "svc-long-lived-client",
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+        adapter_instance=adapter,
+        absolute_session_lifetime_seconds=31536000,  # 1 year, well past the 14-day threshold
+    )
+    registry = ClientRegistry(version="1", clients={"svc-long-lived-client": client})
+
+    app.config["CLIENT_REGISTRY"] = registry
+    app.config["IDP_CLAIM_MAPS"] = {}
+    # raise the ceiling too, so the configured value isn't clamped below the threshold
+    app.config["MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS"] = 31536000
+
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post(
+                "/token",
+                data={
+                    "client_id": "svc-long-lived-client",
+                    "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+                },
+            )
+            assert resp.status_code == 200
+
+    events = [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict) and "event" in r.msg]
+    assert "token_issued_long_absolute_lifetime" in events
+    assert "token_issued" in events  # issuance itself is unaffected
+
+
+def test_client_credentials_normal_lifetime_no_long_lifetime_audit_event(caplog, app):
+    """A client with a normal (default, ~30-minute) absolute lifetime does not
+    trigger the long-lifetime audit event."""
+    subj = Subject(provider="client_secret", subject_id="svc-normal")
+    ar = AdapterResult(subject=subj, additional_claims={}, auth_context={})
+    adapter = StubAdapter(result=ar, raise_exc=None)
+
+    client = make_client_record(
+        "svc-normal-client",
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+        adapter_instance=adapter,
+    )
+    registry = ClientRegistry(version="1", clients={"svc-normal-client": client})
+
+    app.config["CLIENT_REGISTRY"] = registry
+    app.config["IDP_CLAIM_MAPS"] = {}
+
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post(
+                "/token",
+                data={
+                    "client_id": "svc-normal-client",
+                    "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+                },
+            )
+            assert resp.status_code == 200
+
+    events = [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict) and "event" in r.msg]
+    assert "token_issued_long_absolute_lifetime" not in events
+    assert "token_issued" in events
 
 
 def test_adapter_autherror_propagates(monkeypatch, app):

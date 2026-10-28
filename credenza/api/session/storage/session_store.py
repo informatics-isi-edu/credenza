@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Optional, Tuple
 from .backends.base import StorageBackend
 from .backends.memory import MemoryBackend
-from ....telemetry import audit_event
+from ....telemetry import audit_event, audit_identity
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +119,8 @@ class SessionData:
 
 
 class SessionStore:
-    def __init__(self, backend: StorageBackend = MemoryBackend(), ttl=2100, crypto_codec=None):
-        self.backend = backend
+    def __init__(self, backend: Optional[StorageBackend] = None, ttl=2100, crypto_codec=None):
+        self.backend = backend if backend is not None else MemoryBackend()
         self.ttl = ttl
         self.prefix = "credenza:"
         self.sid_prefix = "session:"
@@ -292,7 +292,7 @@ class SessionStore:
                 audit_event("session_deleted_absolute_lifetime_expired",
                             session_id=sid,
                             realm=session.realm,
-                            sub=session.userinfo.get("sub"),
+                            **audit_identity(session.userinfo, session.realm),
                             absolute_expires_at=cap)
             except Exception:
                 logger.exception(f"failed deleting session after absolute expiry for sid={sid}")

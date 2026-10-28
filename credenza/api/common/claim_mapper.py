@@ -84,6 +84,13 @@ IDP_PRESETS: Dict[str, Dict[str, List[Union[str, List[str]]]]] = {
     "keycloak": {
         "roles": [["realm_access", "roles"], "roles"],
     },
+    # Note: linked/federated identities are NOT mapped here. They require a
+    # provider-aware transform (merging Globus identity_set + identity_set_detail,
+    # or pairing the RAS federated_identities sources + identities sub-blocks)
+    # that the flat/first-match claim map cannot express. That canonicalization
+    # lives in the per-realm session augmentation providers, which write a
+    # canonical "identities" claim into userinfo at session creation
+    # (see globus_provider.py and ras_provider.py).
     # "auth0": {
     #     # Put your tenant's namespaced keys here if desired, e.g.:
     #     # "groups": ["https://example.com/groups", "groups"],
