@@ -23,6 +23,7 @@ from flask import Blueprint, request, redirect, current_app, make_response, abor
 from .helpers import get_cookie_domain, perf_logged
 from .consent import is_consent_needed
 from ..telemetry import audit_event, audit_identity, audit_identity_snapshot
+from ..telemetry.audit.attributes import audit_session_attributes
 from ..api.session.storage.session_store import TRANSIENT_DATA_TTL, SessionType
 from ..api.common.crypto import generate_nonce
 from ..api.common.util import (
@@ -201,7 +202,7 @@ def callback():
                 abort(403, description="Insufficient authentication assurance level")
 
         # Augment the session, if applicable
-        userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
+        userinfo, additional_tokens, enrichment = augment_session(tokens, realm, userinfo, metadata)
 
         sid = store.generate_session_id()
         session_key, session_data = store.create_session(
@@ -239,11 +240,14 @@ def callback():
 
         if metadata.get("augmentation_deferred", False):
             g.session_key = session_key
-            userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
+            userinfo, additional_tokens, enrichment = augment_session(tokens, realm, userinfo, metadata)
             metadata.pop("augmentation_deferred", None)
             session_data.userinfo = userinfo
             session_data.additional_tokens = additional_tokens
             store.update_session(sid, session_data)
+
+        # Record the session's selected attributes now that augmentation (deferred or not) has run
+        audit_session_attributes(sid, userinfo, realm, trigger="login", enrichment=enrichment)
 
         if is_oauth_flow:
             # Consent check (ADR-0002): show consent page if client requires it and no

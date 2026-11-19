@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from .helpers import make_json_response, perf_logged
 from ..telemetry import audit_event, audit_identity
+from ..telemetry.audit.attributes import audit_session_attributes, select_session_attributes
 from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
 from ..api.session.storage.session_store import SessionData, SessionType
 from ..api.common.util import (
@@ -184,9 +185,12 @@ def get_session():
                 refresh_access_token(sid, session)
                 # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
                 refresh_additional_tokens(sid, session)
-                # Enrich userinfo, if applicable
+                # Enrich userinfo, if applicable, and record any change in the selected attributes
                 provider = get_augmentation_provider(realm)
-                provider.enrich_userinfo(session.userinfo, session.additional_tokens)
+                before, _ = select_session_attributes(session.userinfo, realm)
+                enrichment = provider.enrich_userinfo(session.userinfo, session.additional_tokens)
+                audit_session_attributes(sid, session.userinfo, realm, trigger="refresh",
+                                         enrichment=enrichment, before=before)
 
         skey, session_data = store.update_session(sid, session)
         audit_event("session_updated",

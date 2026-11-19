@@ -21,6 +21,7 @@ from urllib.parse import urlparse, parse_qs
 from credenza.rest import device as df
 from credenza.api.session.storage.session_store import SessionData, SessionType
 from credenza.rest.device import device_callback
+from credenza.api.session.augmentation.base_provider import EnrichmentResult
 from credenza.api.auth.client.client_registry import ClientRegistry, ClientRecord
 from credenza.api.common.rate_limit import FixedWindowJitterLimiter
 from credenza.rest.helpers import GrantType
@@ -208,7 +209,7 @@ def test_device_callback_success(client, app, store, monkeypatch, frozen_time):
 
     provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
     monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
-    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
+    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: EnrichmentResult())
 
     resp = client.get("/device/callback", query_string={"code":"c","state":state})
     assert resp.status_code == 200
@@ -261,9 +262,9 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
         call_count["count"] += 1
         if call_count["count"] == 1:
             metadata["augmentation_deferred"] = True
-            return userinfo, {}
+            return userinfo, {}, None
         else:
-            return dummy_augmented_userinfo, dummy_additional_tokens
+            return dummy_augmented_userinfo, dummy_additional_tokens, EnrichmentResult(enriched=True)
     monkeypatch.setattr("credenza.rest.device.augment_session", mock_augment)
 
     update_mock = Mock()
@@ -421,7 +422,7 @@ def _setup_fallback_device_flow(app, store, stub, monkeypatch, device_code="DCFA
                         lambda realm, native_client=True: stub)
     provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
     monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
-    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
+    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: EnrichmentResult())
     return device_code
 
 

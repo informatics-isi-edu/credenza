@@ -45,6 +45,7 @@ from .rest.metadata import metadata_blueprint
 from .rest.authorize import authorize_blueprint
 from .rest.consent import consent_blueprint
 from .telemetry.audit.logger import init_audit_logger
+from .telemetry.audit.attributes import build_realm_attribute_selectors
 from .telemetry.metrics.prometheus import metrics_blueprint
 from .refresh.refresh_worker import run_refresh_worker
 
@@ -181,6 +182,9 @@ def load_config(app):
             cls_path = default_provider
         provider_map[realm] = import_string(cls_path)(realm)
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = provider_map
+
+    # Per-realm audit attribute selectors (ADR-0012); a malformed block fails startup
+    app.config["AUDIT_ATTRIBUTE_SELECTORS"] = build_realm_attribute_selectors(app.config["OIDC_IDP_PROFILES"])
 
     # Load secrets hashers
     register_default_hashers()

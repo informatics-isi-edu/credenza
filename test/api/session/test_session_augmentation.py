@@ -24,6 +24,7 @@ from credenza.api.session.storage.session_store import SessionData
 from credenza.api.session.augmentation import globus_provider
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
 from credenza.api.session.augmentation.deriva_provider import DerivaGroupsSessionAugmentationProvider
+from credenza.api.session.augmentation.base_provider import EnrichmentResult
 
 # Fixed current time for deterministic ttl calculations
 CUR_TIME = 1000
@@ -112,7 +113,7 @@ def test_enrich_userinfo_non_globus(app):
     with app.app_context():
         provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
         result = provider.enrich_userinfo(userinfo, additional_tokens)
-    assert result is False
+    assert result.enriched is False
     assert userinfo["groups"] == ["existing"]
 
 
@@ -122,7 +123,7 @@ def test_enrich_userinfo_globus_no_tokens(app):
     with app.app_context():
         provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
         result = provider.enrich_userinfo(userinfo, additional_tokens)
-    assert result is False
+    assert result.enriched is False
     assert "groups" not in userinfo
 
 
@@ -142,7 +143,8 @@ def test_enrich_userinfo_globus_request_exception(monkeypatch, app):
         provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
         result = provider.enrich_userinfo(userinfo, additional_tokens)
 
-    assert result is False
+    assert result.enriched is False
+    assert result.failed_sources == ("globus_groups",)
     assert "groups" not in userinfo
 
 
@@ -167,7 +169,7 @@ def test_enrich_userinfo_globus_invalid_response(monkeypatch, app):
         result = provider.enrich_userinfo(userinfo, additional_tokens)
 
     # Should raise but we catch all exceptions, so it just fails quietly
-    assert result is False
+    assert result.enriched is False
     assert "groups" not in userinfo
 
 
@@ -180,7 +182,7 @@ def test_enrich_userinfo_globus_wrong_issuer(app):
         provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
         result = provider.enrich_userinfo(userinfo, additional_tokens)
 
-    assert result is False
+    assert result.enriched is False
     assert "groups" not in userinfo
 
 
@@ -212,7 +214,7 @@ def test_enrich_userinfo_globus_extends_existing_groups(monkeypatch, app):
         provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("globus")
         result = provider.enrich_userinfo(userinfo, additional_tokens)
 
-    assert result is True
+    assert result.enriched is True
     # Pre-existing groups are preserved; fetched groups are appended (extend branch).
     assert existing in userinfo["groups"]
     assert len(userinfo["groups"]) == 1 + len(sample_groups)
@@ -453,7 +455,7 @@ def test_enrich_userinfo_deriva_success_bearer_token(monkeypatch, app):
         provider = DerivaGroupsSessionAugmentationProvider(app.config["DEFAULT_REALM"])
         result = provider.enrich_userinfo(userinfo, {})
 
-    assert result is True
+    assert result.enriched is True
     assert len(userinfo["groups"]) == 2
     assert userinfo["groups"][0]["display_name"] == "Group One"
 
@@ -471,7 +473,7 @@ def test_enrich_userinfo_deriva_missing_url(monkeypatch, app):
     with app.app_context():
         provider = DerivaGroupsSessionAugmentationProvider(app.config["DEFAULT_REALM"])
         result = provider.enrich_userinfo(userinfo, {})
-    assert result is False
+    assert result.enriched is False
     assert "groups" not in userinfo
 
 
@@ -500,7 +502,7 @@ def test_enrich_userinfo_deriva_http_401(monkeypatch, app):
         g.session_key = "my-token"
         provider = DerivaGroupsSessionAugmentationProvider(app.config["DEFAULT_REALM"])
         result = provider.enrich_userinfo(userinfo, {})
-    assert result is False
+    assert result.enriched is False
 
 
 def test_enrich_userinfo_deriva_request_exception(monkeypatch, app):
@@ -519,7 +521,8 @@ def test_enrich_userinfo_deriva_request_exception(monkeypatch, app):
         g.session_key = "any-token"
         provider = DerivaGroupsSessionAugmentationProvider(app.config["DEFAULT_REALM"])
         result = provider.enrich_userinfo(userinfo, {})
-    assert result is False
+    assert result.enriched is False
+    assert result.failed_sources == ("groups_api",)
 
 
 @pytest.mark.parametrize("cls", [
@@ -541,3 +544,12 @@ def test_provider_realm_is_a_required_immutable_constructor_arg(cls):
     assert provider.realm == "r1"
     with pytest.raises(AttributeError):
         provider.realm = "r2"
+
+
+def test_enrichment_result_merge_combines_composed_results():
+    inherited = EnrichmentResult(enriched=False, failed_sources=("base",))
+    own = EnrichmentResult(enriched=True, failed_sources=("q1",))
+    merged = own.merge(inherited)
+    assert merged == EnrichmentResult(enriched=True, failed_sources=("base", "q1"))
+    assert not merged.complete
+    assert EnrichmentResult().complete

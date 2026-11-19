@@ -27,6 +27,7 @@ from urllib3.util import Retry
 from urllib.parse import urlparse
 from requests import HTTPError, Timeout, ConnectionError
 from ..session.storage.session_store import SessionData
+from ..session.augmentation.base_provider import EnrichmentResult
 from ...telemetry import audit_event, audit_identity
 
 logger = logging.getLogger(__name__)
@@ -113,19 +114,25 @@ def get_augmentation_provider_params(realm=None):
     return profile.get("session_augmentation_params", {})
 
 
-def augment_session(tokens, realm, userinfo, metadata):
+def augment_session(tokens, realm, userinfo, metadata) -> Tuple[dict, dict, Optional[EnrichmentResult]]:
+    """Run the realm's augmentation provider over userinfo.
+
+    Returns (userinfo, additional_tokens, result). result is the provider's EnrichmentResult, or
+    None when the realm defers augmentation and this call only marked it deferred; the caller
+    calls again once the session exists and uses that call's result.
+    """
     provider = get_augmentation_provider(realm)
     provider_params = get_augmentation_provider_params(realm)
     defer_augmentation = provider_params.get("defer_augmentation", False)
     if defer_augmentation and not metadata.get("augmentation_deferred", False):
         metadata.update({"augmentation_deferred": defer_augmentation})
-        return userinfo, {}
+        return userinfo, {}, None
 
     # look for additional tokens in the response
     additional_tokens = provider.process_additional_tokens(tokens, int(time.time()))
     # possibly get additional groups using external tokens or other means
-    provider.enrich_userinfo(userinfo, additional_tokens)
-    return userinfo, additional_tokens
+    result = provider.enrich_userinfo(userinfo, additional_tokens)
+    return userinfo, additional_tokens, result
 
 
 def get_effective_scopes(session: SessionData) -> list:

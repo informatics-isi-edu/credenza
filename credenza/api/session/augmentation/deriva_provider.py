@@ -19,7 +19,7 @@ import logging
 from urllib.parse import quote
 from requests import HTTPError
 from flask import current_app, g
-from .base_provider import DefaultSessionAugmentationProvider
+from .base_provider import DefaultSessionAugmentationProvider, EnrichmentResult
 from .ras_provider import RasSessionAugmentationProvider
 from ....api.common.util import extract_session_key
 from ....api.common.claim_mapper import get_claim_map_for_realm, resolve_claim
@@ -35,7 +35,7 @@ class DerivaGroupsSessionAugmentationProvider(DefaultSessionAugmentationProvider
         groups_api_url = params.get("groups_api_url")
         if not groups_api_url:
             logger.warning(f"Parameter 'groups_api_url' was not found in 'session_augmentation_params' configuration block of profile.")
-            return False
+            return EnrichmentResult(failed_sources=("groups_api",))
         else:
             groups_api_url = groups_api_url.rstrip("/")
 
@@ -63,14 +63,14 @@ class DerivaGroupsSessionAugmentationProvider(DefaultSessionAugmentationProvider
             else:
                 userinfo["groups"] = groups
             logger.debug(f"Augmented userinfo for {user} with {len(groups)} DERIVA groups.")
-            return True
+            return EnrichmentResult(enriched=True)
         except HTTPError as e:
             if e.response.status_code == 401:
                 logger.debug("Authentication failed when trying to retrieve DERIVA groups.")
         except Exception as e:
             logger.warning(f"Failed to fetch DERIVA groups: {e}")
 
-        return False
+        return EnrichmentResult(failed_sources=("groups_api",))
 
 
 class DerivaErmrestSessionAugmentationProvider(DefaultSessionAugmentationProvider):
@@ -119,8 +119,10 @@ class DerivaErmrestSessionAugmentationProvider(DefaultSessionAugmentationProvide
     PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
     def enrich_userinfo(self, userinfo, additional_tokens):
-        enriched = super().enrich_userinfo(userinfo, additional_tokens)
+        inherited = super().enrich_userinfo(userinfo, additional_tokens)
         self._remove_previous_entries(userinfo)
+        enriched = False
+        failed = []
 
         realm = self.realm
         params = self.params
@@ -128,7 +130,7 @@ class DerivaErmrestSessionAugmentationProvider(DefaultSessionAugmentationProvide
         if not queries:
             logger.warning("Parameter 'ermrest_role_queries' was not found in "
                            "'session_augmentation_params' of profile '%s'.", realm)
-            return enriched
+            return inherited.merge(EnrichmentResult(failed_sources=("ermrest_role_queries",)))
 
         if hasattr(g, "session_key"):
             auth = g.session_key
@@ -137,17 +139,18 @@ class DerivaErmrestSessionAugmentationProvider(DefaultSessionAugmentationProvide
         if not auth:
             logger.warning("No session key available for ERMrest role mapping on realm '%s'; "
                            "this provider requires 'defer_augmentation': true.", realm)
-            return enriched
+            return inherited.merge(EnrichmentResult(failed_sources=("ermrest_role_queries",)))
 
         identity = self._identity_values(userinfo, realm)
         if not identity.get("client_id"):
             logger.warning("Cannot determine client id for ERMrest role mapping on realm '%s'.", realm)
-            return enriched
+            return inherited.merge(EnrichmentResult(failed_sources=("ermrest_role_queries",)))
 
         added = {}
         for query in queries:
             entries = self._run_query(query, identity, auth, params)
             if entries is None:
+                failed.append(query.get("name", "<unnamed>"))
                 continue
             enriched = True
             claim = query.get("claim", "roles")
@@ -167,7 +170,7 @@ class DerivaErmrestSessionAugmentationProvider(DefaultSessionAugmentationProvide
             userinfo[self.AUGMENTED_KEY] = added
         logger.debug("Augmented userinfo for %s with %d ERMrest role entries.",
                      identity["client_id"], sum(len(v) for v in added.values()))
-        return enriched
+        return inherited.merge(EnrichmentResult(enriched=enriched, failed_sources=tuple(failed)))
 
     @staticmethod
     def _identity_values(userinfo, realm):

@@ -134,6 +134,32 @@ With the snapshot enabled, the audit log contains personally identifiable inform
 the log, its retention period and its handling once forwarded to an aggregator need to be set
 accordingly.
 
+## Session attributes
+
+A realm whose IdP profile declares `audit_attributes` (see `configuration.md` and ADR-0012) writes a
+`session_attributes_updated` event recording the values its selectors pick from the session's claims,
+typically role or permission principals added by the augmentation provider. It is written:
+
+- once at `login` / `device_login`, after augmentation (including deferred augmentation) has run,
+  even when nothing was selected;
+- on a `PUT /session` upstream refresh, only when the selection changed or an augmentation source
+  failed.
+
+| Field            | Meaning                                                                                         |
+|------------------|-------------------------------------------------------------------------------------------------|
+| `trigger`        | `login`, `device_login` or `refresh`.                                                           |
+| `attributes`     | The full selection after this event, as `{field: [values]}`. Field names come from the profile. |
+| `added`          | Values gained since the previous selection (everything, at login).                              |
+| `removed`        | Values lost since the previous selection.                                                       |
+| `complete`       | `false` when an augmentation source failed, so a short selection means "not known".             |
+| `failed_sources` | Names of the failed sources, when any failed.                                                   |
+| `truncated`      | Fields that hit their `max_values` cap.                                                         |
+
+The event carries `iss`, `sub` and `identity`, not the identity snapshot, and joins to the login
+event through `session_id`. The session's permissions at time T are those in its latest
+`session_attributes_updated` record at or before T. Selectors marked `pii` are omitted when
+`CREDENZA_AUDIT_INCLUDE_PII` is false.
+
 ## What Credenza can and cannot see
 
 Credenza is a relying party: users authenticate at the IdP. A failed password, MFA failure or

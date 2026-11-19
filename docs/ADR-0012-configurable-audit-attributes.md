@@ -7,9 +7,10 @@ Decision Date: 2026-11-16
 
 ### Review History
 
-| Date       | Status   | Notes         |
-|------------|----------|---------------|
-| 2026-11-16 | Proposed | Initial draft |
+| Date       | Status   | Notes                                                                                               |
+|------------|----------|-----------------------------------------------------------------------------------------------------|
+| 2026-11-16 | Proposed | Initial draft                                                                                       |
+| 2026-11-19 | Proposed | Implemented on `ras_compat`; `complete` / `failed_sources` and the refresh trigger revised to match |
 
 ---
 
@@ -25,49 +26,45 @@ joins back to it through `session_id`. The log does not answer the second questi
 
 In DERIVA deployments, permissions reach the resource servers as session attributes. The realm's
 augmentation provider adds groups and roles to the session's userinfo, and ERMrest and hatrac
-match ACLs against those principal strings. On FaceBase, the `RasDerivaErmrestSessionAugmentationProvider`
-runs three configured ERMrest queries at login and on each upstream refresh. Together they produce
-principals such as:
-
-- `tag:facebase.org,2026:role/Registered`
-- `tag:facebase.org,2026:role/Curator`
-- `tag:facebase.org,2026:dar/1-ABC2`, one per approved Data Access Request
+match ACLs against those principal strings. For example, `DerivaErmrestSessionAugmentationProvider`
+runs configured ERMrest queries at login and on each upstream refresh, and adds principals such as
+`tag:example.org,2026:role/Curator` or `tag:example.org,2026:grant/1-ABC2`.
 
 None of these values is written to the audit log. The ERMrest and hatrac request logs record only
 the client id (`<iss>/<sub>`), not the session's attributes. Once a session ends, nothing shows
-which DARs or roles it held. The same is true across a refresh: a DAR approved or revoked
+which roles or grants it held. The same is true across a refresh: an access grant added or revoked
 mid-session changes the attributes, and that change is not recorded either.
 
-The NIH CADR logging standard asks for a `user_permission_group` on each logged event. The RAS
-TTX for FaceBase needs a trace from authentication to data access that includes the authorizing
-permission. Other deployments will have their own versions of this requirement.
+Deployments that must report a user's permission group per logged event, or that must reconstruct
+an authorization trail during an incident, need these values in the audit log.
 
 ### 2.2 Constraints
 
-- **Credenza is deployment-neutral.** "DAR", `user_permission_group` and the
-  `tag:facebase.org,2026:` namespace are FaceBase concepts and CADR vocabulary. Credenza only
-  carries opaque principal strings that come from configuration. The audit log must not grow
-  fields that encode one deployment's model.
+- **Credenza is deployment-neutral.** A role or grant principal is an opaque string that comes from
+  a deployment's configuration. Credenza does not know what it means, what the deployment calls it
+  in its own reporting, or which namespace it belongs to. The audit log must not gain fields named
+  after one deployment's model.
 - **The attributes are already config-driven.** Role principals come from
   `session_augmentation_params` in the realm's IdP profile. Claims are read through the realm's
   claim map (`resolve_claim`). A selector over those same claims needs no new concepts.
-- **Augmentation can be deferred.** With `defer_augmentation: true`, which FaceBase needs because
-  its role queries use the new session key, `augment_session` runs after the `login` event has
-  been written (`rest/login.py:227` and `:232-235`; `rest/device.py:310` and `:332-335`). The
-  attributes therefore do not exist yet when the identity snapshot is taken.
+- **Augmentation can be deferred.** Some providers look up the user's roles by querying a resource
+  server with the user's own Credenza session key. That key only exists once the session has been
+  created, so these providers set `defer_augmentation: true`, and their lookup runs after the
+  session is created and the `login` event has been written. The `login` event, and the identity
+  snapshot it carries, therefore cannot include the roles.
 - **Attributes change during a session.** `PUT /session` with an upstream refresh calls the
-  provider's `enrich_userinfo` again (`rest/session.py:186-188`). The role set can differ before
-  and after that call.
-- **Volume and PII.** The snapshot rule writes personal information once per authentication, and
-  `CREDENZA_AUDIT_INCLUDE_PII` can turn it off. Attribute logging should follow the same
-  discipline: write values when they are established or change, not on every event.
+  provider's `enrich_userinfo` again. The role set can differ before and after that call.
+- **Volume and PII.** The audit log writes a user's personal information (name, email) only once
+  per authentication, on the login event, and `CREDENZA_AUDIT_INCLUDE_PII` can turn even that off.
+  Attribute logging should be equally sparing: write the values when they are first established
+  and when they change, not on every event.
 
 ---
 
 ## 3. Decision
 
 Add a per-realm `audit_attributes` selector to the IdP profile. Add a new audit event,
-`session_attributes`, that records the selected values when augmentation establishes them and
+`session_attributes_updated`, that records the selected values when augmentation establishes them and
 again whenever they change.
 
 ### 3.1 Configuration
@@ -75,22 +72,22 @@ again whenever they change.
 `audit_attributes` is an optional list in a realm's entry in `oidc_idp_profiles.json`. It sits
 beside `session_augmentation_params`, so the queries that produce the attributes and the selector
 that logs them are configured in one place. A realm without the key emits no
-`session_attributes` events, which is today's behaviour.
+`session_attributes_updated` events.
 
 ```json
 "audit_attributes": [
   {
-    "field": "user_permission_group",
+    "field": "permissions",
     "claim": "roles",
     "select": "id",
-    "match": "^tag:facebase\\.org,2026:(dar/.+)$",
+    "match": "^tag:example\\.org,2026:(grant/.+)$",
     "emit": "\\1"
   },
   {
     "field": "user_roles",
     "claim": "roles",
     "select": "id",
-    "match": "^tag:facebase\\.org,2026:(role/.+)$",
+    "match": "^tag:example\\.org,2026:(role/.+)$",
     "emit": "\\1"
   }
 ]
@@ -98,92 +95,99 @@ that logs them are configured in one place. A realm without the key emits no
 
 Each entry selects one output field.
 
-| Key          | Required | Meaning                                                                                                                                                                                                                                       |
-|--------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `field`      | yes      | Output key. Must match `^[A-Za-z_][A-Za-z0-9_]{0,63}$` and be unique within the realm. The deployment chooses the name, so FaceBase can use the CADR name `user_permission_group` without Credenza knowing it.                                  |
-| `claim`      | yes      | Canonical claim name, resolved with `resolve_claim(..., listify=True)` against the realm's claim map. This is the same resolution `make_session_response` uses to build the session's attributes.                                                |
-| `select`     | no       | For dict-valued entries, which key to log: `id` (the default) or `display_name`. String entries are used as they are. Any other type is skipped.                                                                                               |
-| `match`      | no       | Regular expression. Only values it matches (`re.fullmatch`) are kept. If absent, every value is kept.                                                                                                                                         |
-| `emit`       | no       | Replacement template applied to the match (`Match.expand`), e.g. `\1` to log `dar/1-ABC2` in place of the full tag URI. Requires `match`. If absent, the whole value is logged.                                                               |
-| `pii`        | no       | `true` if the values identify a person. Such fields are omitted when `CREDENZA_AUDIT_INCLUDE_PII` is false. Defaults to `false`; role and permission principals are not personal information.                                                  |
-| `max_values` | no       | Cap on the number of values logged for the field. Defaults to 100. When the cap is hit, the record includes `truncated: [<field>, ...]`.                                                                                                       |
+| Key          | Required | Meaning                                                                                                                                                                                         |
+|--------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `field`      | yes      | Output key. Must match `^[A-Za-z_][A-Za-z0-9_]{0,63}$` and be unique within the realm. The deployment chooses the name, so it can use its own reporting vocabulary without Credenza knowing it. |
+| `claim`      | yes      | Canonical claim name, resolved with `resolve_claim(..., listify=True)` against the realm's claim map. This is the same resolution the session response uses to build the session's attributes.  |
+| `select`     | no       | For dict-valued entries, which key to log: `id` (the default) or `display_name`. String entries are used as they are. Any other type is skipped.                                                |
+| `match`      | no       | Regular expression. Only values it matches (`re.fullmatch`) are kept. If absent, every value is kept.                                                                                           |
+| `emit`       | no       | Replacement template applied to the match (`Match.expand`), e.g. `\1` to log `grant/1-ABC2` in place of the full tag URI. Requires `match`. If absent, the whole value is logged.               |
+| `pii`        | no       | `true` if the values identify a person. Such fields are omitted when `CREDENZA_AUDIT_INCLUDE_PII` is false. Defaults to `false`; role and permission principals are not personal information.   |
+| `max_values` | no       | Cap on the number of values logged for the field. Defaults to 100. When the cap is hit, the record includes `truncated: [<field>, ...]`.                                                        |
 
 The output is a sorted, de-duplicated list of strings, each cut to 256 characters. A selector
 never logs a nested object.
 
 The profile is validated at startup, and a malformed `audit_attributes` block stops startup. The
-checks: required keys are present, `field` names are valid and unique, each `match` compiles, and
-each `emit` only references groups its `match` defines. A selector that is silently ignored would
-leave an audit gap nobody notices until an investigation.
+checks: no unknown keys, required keys are present, `field` names are valid and unique, each
+`match` compiles, each `emit` only references groups its `match` defines, `pii` is a boolean and
+`max_values` a positive integer. A selector that is silently ignored would leave an audit gap
+nobody notices until an investigation.
 
-### 3.2 The `session_attributes` Event
+### 3.2 The `session_attributes_updated` Event
 
 ```json
 {
-  "event": "session_attributes",
+  "event": "session_attributes_updated",
   "timestamp": "2026-11-16T10:42:07.118-08:00",
   "client_ip": "203.0.113.7",
+  "user_agent": "Mozilla/5.0 ...",
   "session_id": "0b6c...",
-  "iss": "https://sts.nih.gov",
+  "iss": "https://idp.example.org",
   "sub": "...",
-  "identity": "https://sts.nih.gov/...",
-  "realm": "nih-ras",
+  "identity": "https://idp.example.org/...",
+  "realm": "example",
   "trigger": "login",
   "complete": true,
   "attributes": {
-    "user_permission_group": ["dar/1-ABC2", "dar/1-DEF4"],
-    "user_roles": ["role/Registered"]
+    "permissions": ["grant/1-ABC2", "grant/1-DEF4"],
+    "user_roles": ["role/Member"]
   },
-  "added":   {"user_permission_group": ["dar/1-ABC2", "dar/1-DEF4"], "user_roles": ["role/Registered"]},
+  "added":   {"permissions": ["grant/1-ABC2", "grant/1-DEF4"], "user_roles": ["role/Member"]},
   "removed": {}
 }
 ```
 
-- **Identifiers.** The record carries `audit_identity()` (`iss`, `sub`, `identity`), not the
-  snapshot, and joins to the snapshot through `session_id`. That follows the existing rule that
-  personal information is written once per authentication.
-- **`attributes`** holds the full selected set after the change. A reader can tell what the
-  session held from the latest record alone, without replaying a series of diffs.
+- **Identifiers.** The record identifies the user only by `iss`, `sub` and `identity`. The name and
+  email stay on the login event, which the record joins to through `session_id`. Personal
+  information is still written only once per authentication.
+- **`attributes`** holds the complete selection as of this record. A reader can tell what the
+  session held from the latest record alone, without replaying earlier ones.
 - **`added` and `removed`** hold the per-field difference from the previous selected set. At
   login, everything is `added`.
 - **Nesting.** The deployment-named fields are nested under `attributes`. They cannot collide
   with Credenza's own top-level fields, so Credenza's schema stays fixed. A log shipper that wants
-  them at the top level (for Splunk CIM names) can flatten `attributes.*` at ingest.
-- **`trigger`** is one of `login`, `device_login` or `refresh`, and records which path ran the
-  augmentation.
-- **`complete`** is the provider's `enrich_userinfo` return value. `false` means at least one
-  source failed, for example an ERMrest role query timed out. An empty or short `attributes`
-  list then means "not known", not "held nothing", and an investigator has to be able to tell
-  the difference.
+  them at the top level can flatten `attributes.*` at ingest.
+- **`trigger`** is `login`, `device_login` or `refresh`: the operation that produced the
+  selection.
+- **`complete` and `failed_sources`.** An augmentation provider may draw on several sources, for
+  example several role queries. When one of them fails (a query times out, say), the event sets
+  `complete` to `false` and lists the failed sources in `failed_sources`. Without this, an
+  investigator could not tell an empty selection that means "this user held nothing" from one
+  that means "the lookup failed".
+- **Provider contract.** `enrich_userinfo` returns an `EnrichmentResult`: `enriched` (some source
+  added data) and `failed_sources` (the sources it attempted that failed). A provider that composes
+  another through `super()` merges the inherited result into its own. `augment_session` returns
+  the result to its caller, which passes it to the audit call. Providers never keep per-call
+  outcomes on the instance, because one provider instance serves every request thread.
 
 ### 3.3 When It Is Emitted
 
-- **Login and device login.** The event is written once augmentation has run and the session id
-  exists. On the deferred path this is directly after the deferred `augment_session` call
-  (`rest/login.py:234`, `rest/device.py:334`). On the non-deferred path it is directly after
-  the `login` / `device_login` event. If the selected set is empty, the event is still written at
-  login: "held nothing" is a fact worth recording.
-- **Refresh.** In `PUT /session`, the selected set is computed before and after
-  `enrich_userinfo` (`rest/session.py:186-188`). Both sets come from the in-memory userinfo
-  within the same request, so nothing new is stored. The event is written only if the two sets
-  differ, or if `complete` changed. A refresh that changes nothing writes nothing; the existing
-  `session_updated` event already records that the refresh happened.
-- **Logout and expiry.** No event is written. The session's last `session_attributes` record
-  stands until the existing `logout` or expiry event closes the session.
+- **Login and device login.** The event is written once per login, after the `login` /
+  `device_login` event. By then the session exists and augmentation has finished, including any
+  deferred lookup. The event is written even when nothing is selected, because "held nothing" is
+  worth recording.
+- **Refresh.** When `PUT /session` refreshes the session from the IdP, augmentation runs again.
+  Credenza computes the selection just before and just after it, within the same request, so
+  nothing extra is stored. The event is written only if the selection changed or a source failed.
+  A refresh that changes nothing writes nothing, since `session_updated` already records that the
+  refresh happened.
+- **Logout and expiry.** No event is written. The session's last `session_attributes_updated` record
+  stands until the session ends.
 
 ### 3.4 Investigation Join
 
-A request log line carries `session_id` once Credenza's session response sets webauthn2's
-`tracking` field to the session id. That change is tracked separately in the RAS TTX gap analysis.
-With it in place:
+A resource-server request log line carries `session_id` when the server records Credenza's
+session `tracking` value (ERMrest and hatrac log it as `track`). With that:
 
-1. ERMrest/hatrac record (time T, `track` = `session_id`)
-2. → `login` (`txn`, identity snapshot)
-3. → the latest `session_attributes` for that `session_id` with timestamp ≤ T: the permissions
+1. Request record (time T, `track` = `session_id`)
+2. → `login` (IdP transaction id where supplied, identity snapshot)
+3. → the latest `session_attributes_updated` for that `session_id` with timestamp ≤ T: the permissions
    the session held when the request was made.
 
-This shows which DARs and roles the session held. It does not show which of them ERMrest matched
-for a given request. That would need ERMrest to log the ACL decision, and it is out of scope.
+This shows which roles and grants the session held. It does not show which of them the resource
+server matched for a given request. That would need the resource server to log its ACL decision,
+and it is out of scope.
 
 ---
 
@@ -194,10 +198,10 @@ for a given request. That would need ERMrest to log the ACL decision, and it is 
   added.
 - **A separate event, not a field on `login`.** With deferred augmentation, `login` is written
   before the attributes exist. Mid-session changes need an event of their own in any case.
-- **No static or constant fields.** Values like `nih_ico` or `cadr_name` do not vary by session.
-  They belong in the log shipper or the SIEM ingest configuration, not in Credenza.
+- **No static or constant fields.** Values that do not vary by session belong in the log shipper or
+  the SIEM ingest configuration, not in Credenza.
 - **`acr` and `user_agent` are not selector material.** They are generic OIDC and HTTP facts and
-  belong in Credenza's fixed schema. Adding them to the `login` event is a separate small change.
+  are fixed fields of Credenza's schema.
 - **The selector reads userinfo claims only.** It never reads tokens, `additional_tokens` or
   session metadata.
 
@@ -208,30 +212,29 @@ for a given request. That would need ERMrest to log the ACL decision, and it is 
 1. **Step-up roles (ADR-0011).** Assumed roles have their own audit events (`role_assumed`,
    `role_dropped`, ...). If ADR-0011 stores assumed roles outside the augmented `roles` claim,
    the selector will not see them. An investigator then reads permissions from two event types.
-   Decide whether `session_attributes` should also be written on assumption and drop, with
-   `trigger: role_assumed` / `role_dropped`, so that one event type carries the whole picture.
+   Decide whether `session_attributes_updated` should also be written when a role is assumed or dropped,
+   with `trigger: role_assumed` / `role_dropped`, so that one event type carries the whole picture.
 2. **Derived sessions (token exchange).** A DERIVED session inherits its parent's userinfo. Should
-   its creation write a `session_attributes` record of its own, or is the parent's record enough,
+   its creation write a `session_attributes_updated` record of its own, or is the parent's record enough,
    given the exchange event links the two sessions?
 3. **Refresh worker.** The background refresh worker refreshes tokens but does not re-run
-   augmentation, so it writes no `session_attributes` events. That is consistent with this design,
+   augmentation, so it writes no `session_attributes_updated` events. That is consistent with this design,
    but a deployment relying on long device sessions should know that attribute changes appear only
    on `PUT /session` refresh or at the next login.
-4. **Value cap default.** 100 values per field is a guess. A user with many approved DARs could
-   exceed it, and the right default depends on observed role counts.
+4. **Value cap default.** 100 values per field is a guess; the right default depends on observed
+   role counts.
 
 ---
 
 ## 6. Consequences
 
 - A deployment can record the permission set of every session, and every change to it, without
-  Credenza knowing what the permissions mean. FaceBase gets `user_permission_group` for the CADR
-  logging table, and other deployments can select their own claims.
+  Credenza knowing what the permissions mean.
 - The audit schema gains one event type with a fixed shape. Deployment-specific names stay inside
   `attributes`.
-- Audit volume grows by one record per login, plus one per refresh that changes the selection.
-  On FaceBase, a change means a DAR approval, a revocation or a role edit, so this is small.
-- `docs/audit-events.md` and `docs/configuration.md` need sections for the event and the profile
-  key, and the profile loader gains validation.
+- Audit volume grows by one record per login, plus one per refresh that changes the selection or
+  hits a failed source.
+- `docs/audit-events.md` and `docs/configuration.md` document the event and the profile key, and
+  the profile loader validates it.
 - Misconfiguration stops startup instead of degrading silently, so a broken selector is found at
   deploy time, not during an incident.

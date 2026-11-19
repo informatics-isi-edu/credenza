@@ -24,6 +24,7 @@ from credenza.api.session.augmentation.deriva_provider import (
     RasDerivaErmrestSessionAugmentationProvider,
 )
 from credenza.api.session.augmentation.ras_provider import RasSessionAugmentationProvider
+from credenza.api.session.augmentation.base_provider import EnrichmentResult
 
 ISS = "https://sts.nih.gov"
 SUB = "abc123"
@@ -105,7 +106,7 @@ def test_maps_rows_into_roles(app, provider, responses):
     responses.routes["s:DAR"] = ok([{"RID": "1-ABCD", "title": "Mouse study"}])
     ui = userinfo()
 
-    assert enrich(app, provider, ui) is True
+    assert enrich(app, provider, ui).enriched is True
     assert ui["roles"] == [
         {"id": "tag:example.org,2026:role/curator", "display_name": "Curator"},
         {"id": "tag:example.org,2026:dataset/1-ABCD", "display_name": "Mouse study"},
@@ -197,8 +198,16 @@ def test_failed_query_fails_closed_but_others_still_apply(app, provider, respons
     enrich(app, provider, ui)
 
     responses.routes["s:user_role"] = http_error(500)
-    assert enrich(app, provider, ui) is True
+    assert enrich(app, provider, ui).enriched is True
     assert [e["id"] for e in ui["roles"]] == ["tag:example.org,2026:dataset/1-ABCD"]
+
+
+def test_failed_query_is_named_in_the_result(app, provider, responses):
+    responses.routes["s:user_role"] = http_error(500)
+    responses.routes["s:DAR"] = ok([{"RID": "1-ABCD", "title": "Example"}])
+    result = enrich(app, provider, userinfo())
+    assert result == EnrichmentResult(enriched=True, failed_sources=("assigned_roles",))
+    assert not result.complete
 
 
 @pytest.mark.parametrize("failure", [
@@ -213,7 +222,7 @@ def test_all_queries_failing_returns_false_and_drops_entries(app, provider, resp
 
     responses.routes["s:user_role"] = failure
     responses.routes["s:DAR"] = failure
-    assert enrich(app, provider, ui) is False
+    assert enrich(app, provider, ui).enriched is False
     assert ui["roles"] == []
     assert DerivaErmrestSessionAugmentationProvider.AUGMENTED_KEY not in ui
 
@@ -226,7 +235,7 @@ def test_no_session_key_drops_entries_and_skips_queries(app, provider, responses
 
     monkeypatch.setattr("credenza.api.session.augmentation.deriva_provider.extract_session_key",
                         lambda: (None, False))
-    assert enrich(app, provider, ui, session_key=None) is False
+    assert enrich(app, provider, ui, session_key=None).enriched is False
     assert responses.calls == []
     assert ui["roles"] == []
 
@@ -241,13 +250,13 @@ def test_falls_back_to_request_session_key(app, provider, responses, monkeypatch
 def test_missing_query_config(app, provider, responses, monkeypatch):
     configure(app, monkeypatch, None)
     ui = userinfo()
-    assert enrich(app, provider, ui) is False
+    assert enrich(app, provider, ui).enriched is False
     assert responses.calls == []
     assert "roles" not in ui
 
 
 def test_missing_sub(app, provider, responses):
-    assert enrich(app, provider, {"iss": ISS}) is False
+    assert enrich(app, provider, {"iss": ISS}).enriched is False
     assert responses.calls == []
 
 
@@ -261,7 +270,7 @@ def test_missing_sub(app, provider, responses):
 def test_invalid_query_is_skipped(app, provider, responses, monkeypatch, query):
     configure(app, monkeypatch, [query])
     ui = {**userinfo(), "email": "u@example.org"}
-    assert enrich(app, provider, ui) is False
+    assert enrich(app, provider, ui).enriched is False
     assert responses.calls == []
     assert "roles" not in ui
 
@@ -314,7 +323,7 @@ def test_ras_compound_provider_composes_both(app, responses, monkeypatch):
         },
     }
 
-    assert enrich(app, provider, ui) is True
+    assert enrich(app, provider, ui).enriched is True
     assert [e["id"] for e in ui["roles"]] == ["tag:example.org,2026:role/curator"]
     assert provider.build_identities(ui)["u@login.gov"]["authenticated"] is True
     # Linked identities never reach the query.

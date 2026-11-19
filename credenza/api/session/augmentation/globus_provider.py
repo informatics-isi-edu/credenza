@@ -16,7 +16,7 @@
 import requests
 import logging
 from flask import current_app, abort
-from .base_provider import DefaultSessionAugmentationProvider
+from .base_provider import DefaultSessionAugmentationProvider, EnrichmentResult
 from ....api.common.util import get_effective_scopes
 from ...session.storage.session_store import SessionData, SessionType
 from ....telemetry import audit_event, audit_identity_snapshot
@@ -59,7 +59,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
 
     def enrich_userinfo(self, userinfo, additional_tokens):
         if self.GLOBUS_ISSUER != userinfo.get("iss"):
-            return False
+            return EnrichmentResult()
         # Group memberships require a dependent groups token and an external API
         # call, so they are fetched once at session creation and persisted.
         # (Canonical identities are a pure transform and are built at render
@@ -76,7 +76,7 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
             access_token = tokens.get("access_token")
         else:
             logger.debug(f"Tokens for {self.GLOBUS_GROUPS_SCOPE} not found")
-            return False
+            return EnrichmentResult()
 
         try:
             headers = {"Authorization": f"Bearer {access_token}"}
@@ -92,11 +92,11 @@ class GlobusSessionAugmentationProvider(DefaultSessionAugmentationProvider):
             else:
                 userinfo["groups"] = groups
             logger.debug(f"Augmented userinfo for {user} with {len(groups)} Globus groups.")
-            return True
+            return EnrichmentResult(enriched=True)
         except Exception as e:
             logger.warning(f"Failed to fetch Globus groups: {e}")
 
-        return False
+        return EnrichmentResult(failed_sources=("globus_groups",))
 
     def build_identities(self, userinfo):
         """Return a canonical "identities" map derived from Globus claims.

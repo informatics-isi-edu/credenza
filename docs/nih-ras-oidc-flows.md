@@ -809,10 +809,11 @@ Credenza session and to what that session did:
   ERMrest and hatrac request the session made), and `txn` joins Credenza's
   records to RAS's own audit logs.
 
-**Proposed (ADR-0012, not implemented).** A per-realm `audit_attributes` selector and a
-`session_attributes` event would record a session's selected role principals: at login after
-deferred augmentation, and again whenever a refresh changes them. Today the roles a session held
-are not in the audit log.
+**Session attributes (ADR-0012).** When the realm's profile declares `audit_attributes`, a
+`session_attributes_updated` event records the role principals its selectors pick from the session. It is
+written at login after deferred augmentation, and again when an upstream refresh changes the
+selection or an augmentation source fails. A session's permissions at time T are those in its
+latest `session_attributes_updated` record at or before T.
 
 ---
 
@@ -871,7 +872,5 @@ None of these is implemented.
   login-time role queries (Sec. 2). Under the proposal they would be held only after a time-boxed
   step-up through a forced RAS re-authentication. This depends on RAS honouring `prompt=login`
   / `max_age=0`, which has not been verified.
-- **ADR-0012 (configurable audit attributes).** Records a session's role principals in the audit
-  log (Sec. 7).
 - **ADR-0007 (refreshable derived sessions).** Changes how RAS device-session lifetime is capped
   (Sec. 4.3).

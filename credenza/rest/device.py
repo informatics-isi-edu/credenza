@@ -20,6 +20,7 @@ from flask import Blueprint, request, jsonify, redirect, abort, current_app, g, 
 from secrets import token_hex
 from .helpers import perf_logged, adapter_authenticate, GrantType, ip_rate_limited
 from ..telemetry import audit_event, audit_identity_snapshot
+from ..telemetry.audit.attributes import audit_session_attributes
 from ..api.common.crypto import generate_nonce
 from ..api.common.errors import OAuthError
 from ..api.session.storage.session_store import SessionType
@@ -307,7 +308,7 @@ def device_callback():
     }
 
     # Augment the session, if applicable
-    userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
+    userinfo, additional_tokens, enrichment = augment_session(tokens, realm, userinfo, metadata)
 
     session_id = store.generate_session_id()
     session_key, session_data = store.create_session(
@@ -331,7 +332,7 @@ def device_callback():
 
     if metadata.get("augmentation_deferred", False):
         g.session_key = session_key
-        userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
+        userinfo, additional_tokens, enrichment = augment_session(tokens, realm, userinfo, metadata)
         metadata.pop("augmentation_deferred", None)
         session_data.userinfo = userinfo
         session_data.additional_tokens = additional_tokens
@@ -351,6 +352,7 @@ def device_callback():
                 refresh_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at, timezone.utc).isoformat(),
                 **({"acr": userinfo.get("acr")} if userinfo.get("acr") else {}),
                 **({"txn": txn} if txn else {}))
+    audit_session_attributes(session_id, userinfo, realm, trigger="device_login", enrichment=enrichment)
 
     return render_template_string(SUCCESS_HTML)
 

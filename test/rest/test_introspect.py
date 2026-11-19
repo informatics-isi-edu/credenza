@@ -276,7 +276,7 @@ def rich_token(store):
             "roles": ["r1"],
             "passport_jwt_v11": "eyJ.passport.jwt",
             "txn": "TXN-1",
-            "department": "Craniofacial",
+            "department": "Research Computing",
         },
         allowed_resources=["https://rs.example.com"],
         expires_at=now + 3600,
@@ -308,7 +308,7 @@ def test_introspect_include_claims_adds_configured_claims(app, client, rich_toke
     rec = replace(_make_public_client("rs"), introspection_include_claims=["department", "txn", "absent"])
     _set_registry(app, rec)
     body = client.post("/introspect", data={"client_id": "rs", "token": rich_token}).get_json()
-    assert body["department"] == "Craniofacial"
+    assert body["department"] == "Research Computing"
     assert body["txn"] == "TXN-1"
     assert "absent" not in body
     assert "passport_jwt_v11" not in body
@@ -320,7 +320,7 @@ def test_introspect_include_claims_resolved_through_claim_map(app, client, rich_
     rec = replace(_make_public_client("rs"), introspection_include_claims=["org_unit"])
     _set_registry(app, rec)
     body = client.post("/introspect", data={"client_id": "rs", "token": rich_token}).get_json()
-    assert body["org_unit"] == "Craniofacial"
+    assert body["org_unit"] == "Research Computing"
 
 
 def test_client_record_rejects_reserved_include_claims():

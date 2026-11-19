@@ -24,6 +24,8 @@ from credenza.rest.session import session_blueprint
 from credenza.api.session.storage import session_store as ss
 from credenza.api.session.storage.session_store import SessionType
 from credenza.api.common.util import get_effective_scopes
+from credenza.telemetry.audit import attributes as aa
+from credenza.api.session.augmentation.base_provider import EnrichmentResult
 
 
 # Canonical identities are built at render time via the realm's augmentation
@@ -215,6 +217,60 @@ def test_put_session_with_refresh_access_token(client,
     assert updated.updated_at == pytest.approx(now, abs=1)
     expected_expires = max(original_expires_at, now + store.ttl)
     assert updated.expires_at == pytest.approx(expected_expires, abs=1)
+
+
+def test_put_session_refresh_records_changed_session_attributes(client, app, store, device_session,
+                                                                frozen_time, monkeypatch, audit_calls):
+    # An upstream refresh that changes the selected attributes writes a session_attributes_updated event.
+    sid = "S1"
+    now = frozen_time
+    sess = copy.deepcopy(device_session)
+    sess.session_metadata.system.update({
+        "access_token_expires_at": now - 1,
+        "refresh_token_expires_at": now + 600,
+    })
+    sess.refresh_token = "old_refresh_token"
+    sess.userinfo["roles"] = ["tag:x,2026:grant/1-OLD"]
+    monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+
+    class DummyClient:
+        def refresh_access_token(self, refresh_token):
+            return {"access_token": "new", "refresh_token": "new_rt", "id_token": "new_id",
+                    "expires_at": now + 3600, "refresh_expires_in": 7200}
+
+    class DummyFactory:
+        def get_client(self, realm, native_client=False):
+            return DummyClient()
+
+    class RoleProvider:
+        def enrich_userinfo(self, userinfo, additional_tokens):
+            userinfo["roles"] = ["tag:x,2026:grant/1-NEW"]
+            return EnrichmentResult(enriched=True)
+
+        def build_identities(self, userinfo):
+            return {}
+
+    monkeypatch.setattr(sm, "get_augmentation_provider", lambda realm: RoleProvider())
+    events = []
+    monkeypatch.setattr(aa, "audit_event", lambda e, **kw: events.append((e, kw)))
+    app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
+    app.config["TOKEN_EXPIRY_THRESHOLD"] = 300
+    app.config["AUDIT_ATTRIBUTE_SELECTORS"] = {sess.realm: aa.parse_audit_attributes(
+        [{"field": "permissions", "claim": "roles",
+          "match": r"^tag:x,2026:(grant/.+)$", "emit": r"\1"}], sess.realm)}
+    try:
+        resp = client.put("/session?refresh_upstream=true")
+        assert resp.status_code == 200
+    finally:
+        app.config["AUDIT_ATTRIBUTE_SELECTORS"] = {}
+
+    (event, kw), = events
+    assert event == "session_attributes_updated"
+    assert kw["trigger"] == "refresh"
+    assert kw["session_id"] == sid
+    assert kw["added"] == {"permissions": ["grant/1-NEW"]}
+    assert kw["removed"] == {"permissions": ["grant/1-OLD"]}
 
 
 def test_put_session_with_refresh_access_token_failure(client,

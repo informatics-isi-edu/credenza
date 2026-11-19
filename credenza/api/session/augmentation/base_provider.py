@@ -15,11 +15,35 @@
 #
 import time
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from flask import current_app
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class EnrichmentResult:
+    """Outcome of one enrich_userinfo() call.
+
+    enriched: at least one source contributed data to userinfo.
+    failed_sources: names of the sources that were attempted and failed (e.g. a named role query
+        that timed out). An empty tuple means every attempted source succeeded, so a caller can
+        tell "the user holds nothing" from "the lookup failed".
+    """
+    enriched: bool = False
+    failed_sources: Tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return not self.failed_sources
+
+    def merge(self, other: "EnrichmentResult") -> "EnrichmentResult":
+        """Combine with the result of a composed (super()) enrichment."""
+        return EnrichmentResult(enriched=self.enriched or other.enriched,
+                                failed_sources=tuple(other.failed_sources) + tuple(self.failed_sources))
+
 
 class SessionAugmentationProvider(ABC):
     """
@@ -71,8 +95,13 @@ class SessionAugmentationProvider(ABC):
         """Post-process or filter additional or dependent tokens."""
 
     @abstractmethod
-    def enrich_userinfo(self, userinfo: dict, additional_tokens: dict) -> bool:
-        """Augment userinfo with groups, roles, extra claims, etc."""
+    def enrich_userinfo(self, userinfo: dict, additional_tokens: dict) -> EnrichmentResult:
+        """Augment userinfo in place with groups, roles, extra claims, etc.
+
+        Returns an EnrichmentResult naming any source that failed. Providers are shared across
+        threads (one instance per realm), so per-call outcomes must be returned, never kept on
+        the instance.
+        """
 
 
 class DefaultSessionAugmentationProvider(SessionAugmentationProvider):
@@ -107,8 +136,8 @@ class DefaultSessionAugmentationProvider(SessionAugmentationProvider):
 
         return additional_tokens
 
-    def enrich_userinfo(self, userinfo, additional_tokens) -> bool:
-        return False
+    def enrich_userinfo(self, userinfo, additional_tokens) -> EnrichmentResult:
+        return EnrichmentResult()
 
     def build_identities(self, userinfo: dict) -> dict:
         """Derive canonical linked identities from userinfo at render time.
