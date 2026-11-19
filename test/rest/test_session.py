@@ -167,6 +167,8 @@ def test_put_session_with_refresh_access_token(client,
 
     # Stub out map_session
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     # Configure our dummy OIDC client factory in Flask config
     class DummyClient:
@@ -233,6 +235,8 @@ def test_put_session_refresh_records_changed_session_attributes(client, app, sto
     sess.userinfo["roles"] = ["tag:x,2026:grant/1-OLD"]
     monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     class DummyClient:
         def refresh_access_token(self, refresh_token):
@@ -299,6 +303,8 @@ def test_put_session_with_refresh_access_token_failure(client,
 
     # Patch map_session
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     # Configure dummy client that fails
     class DummyFailClient:
@@ -368,6 +374,8 @@ def test_put_session_additional_tokens_refresh(client,
     monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
 
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     # Capture calls to update_session, and make it return (session_key, session_data)
     updated_calls = []
@@ -443,6 +451,16 @@ def test_put_session_additional_tokens_refresh(client,
 # def test_patch_session_invalid_json(client):
 #     resp = client.patch("/session", data="not json", content_type="application/json")
 #     assert resp.status_code == 400
+
+
+def test_put_returns_404_when_session_was_deleted_mid_request(client, store, fake_current_session):
+    # get_current_session hands this request a copy; a concurrent logout then deletes the session.
+    # update_session must refuse to write the copy back, and the request reports the session gone.
+    sid, _ = fake_current_session
+    store.delete_session(sid)
+    resp = client.put("/session")
+    assert resp.status_code == 404
+    assert store.get_session_data(sid) is None
 
 
 def test_delete_session_legacy(client, app, monkeypatch):
@@ -640,6 +658,8 @@ def test_put_session_derived_with_matching_resource_200(monkeypatch, client, bas
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("derived-put-ok", base_session))
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
     monkeypatch.setattr(store, "update_session", lambda sid, sess: ("dummy-map-key", sess))
     stub = {"ok": True}
     monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
@@ -670,6 +690,8 @@ def test_put_session_service_match_200(monkeypatch, client, base_session, store)
 
     # Stub map_session so the backend doesn't receive None values
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     # Optionally stub update_session to avoid touching real persistence paths
     monkeypatch.setattr(store, "update_session", lambda sid, sess: ("dummy-map-key", sess))

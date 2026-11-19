@@ -27,6 +27,8 @@ from urllib3.util import Retry
 from urllib.parse import urlparse
 from requests import HTTPError, Timeout, ConnectionError
 from ..session.storage.session_store import SessionData
+from ..session.storage.session_lock import session_lock
+from ..auth.oidc_client import DEFAULT_IDP_HTTP_TIMEOUT
 from ..session.augmentation.base_provider import EnrichmentResult
 from ...telemetry import audit_event, audit_identity
 
@@ -156,6 +158,9 @@ def get_tokens_by_scope(session: SessionData) -> dict:
 # will never succeed, so the session should be evicted on the first occurrence
 # rather than waiting out the consecutive-failure counter.
 TERMINAL_REFRESH_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+# Margin, in seconds, added to a delete's wait for an in-flight refresh (see delete_lock_wait).
+DELETE_LOCK_WAIT_MARGIN = 5
 
 
 def _record_refresh_failure(session, exc) -> None:
@@ -312,6 +317,47 @@ def revoke_tokens(sid, session):
                 audit_event("refresh_token_revoked", session_id=sid, **identity, realm=realm, scope=k)
     except Exception as e:
         logger.warning(f"Exception during token revocation: {e}")
+
+
+def delete_lock_wait(realm) -> float:
+    """Seconds a delete waits for an in-flight refresh of a session in this realm.
+
+    Derived from the realm's IdP http_timeout so the two cannot drift apart: requests applies the
+    timeout to the connect and to each read separately, so one token call can take about twice
+    http_timeout, plus a small margin for the store reads and writes. A refresh that renews several
+    dependent tokens one after another can take longer; a delete that stops waiting early is still
+    safe, because update_session will not write the deleted session back.
+    """
+    profile = current_app.config.get("OIDC_IDP_PROFILES", {}).get(realm, {})
+    return 2 * profile.get("http_timeout", DEFAULT_IDP_HTTP_TIMEOUT) + DELETE_LOCK_WAIT_MARGIN
+
+
+def end_session(sid, session: SessionData, revoke: bool = True) -> SessionData:
+    """Revoke a session's upstream tokens (when revoke is true) and delete it.
+
+    For device sessions, which the background worker refreshes, this holds the session lock so a
+    refresh already in flight finishes first, then re-reads the session so the tokens revoked are
+    the current ones rather than a copy read before the refresh rotated them. If the lock cannot
+    be had within delete_lock_wait() seconds the session is deleted anyway: a logout must not
+    fail, and update_session refuses to write a deleted session back. Returns the session as it
+    was when deleted.
+    """
+    store = current_app.config["SESSION_STORE"]
+    if not session.is_device():
+        if revoke:
+            revoke_tokens(sid, session)
+        store.delete_session(sid)
+        return session
+
+    timeout = delete_lock_wait(session.realm)
+    with session_lock(sid, timeout=timeout) as locked:
+        if not locked:
+            logger.warning(f"Session lock for {sid} not acquired within {timeout}s; deleting session anyway")
+        current = store.get_session_data(sid) or session
+        if revoke:
+            revoke_tokens(sid, current)
+        store.delete_session(sid)
+        return current
 
 
 def parse_basic_auth(header_value: str) -> Optional[Dict[str, str]]:

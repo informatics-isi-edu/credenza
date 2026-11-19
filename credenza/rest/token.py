@@ -23,7 +23,7 @@ from ..api.auth.client.client_registry import ClientRegistry, ClientRecord, DEFA
 from ..api.auth.client.adapters.adapter import ProofContext, AdapterResult
 from ..api.common.errors import OAuthError
 from ..api.common.claim_mapper import merge_additional_claims, get_claim_map_for_realm
-from ..api.common.util import revoke_tokens, normalize_str_list, get_effective_scopes, MAX_SCOPES, MAX_RESOURCES
+from ..api.common.util import end_session, normalize_str_list, get_effective_scopes, MAX_SCOPES, MAX_RESOURCES
 from ..api.common.crypto import verify_pkce
 from .helpers import (
     validate_client,
@@ -157,12 +157,8 @@ def revoke_token():
                     request_id=get_request_id(), client_id=client_id)
         return current_app.response_class(status=200)
 
-    # revoke any dependent tokens
-    if session.is_primary():
-        revoke_tokens(sid, session)
-
-    # delete the session
-    store.delete_session(sid)
+    # revoke any dependent tokens (primary sessions only) and delete the session
+    end_session(sid, session, revoke=session.is_primary())
 
     audit_event(
         "token_revoked",

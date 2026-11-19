@@ -206,7 +206,7 @@ def test_logout_no_session(client, monkeypatch):
     assert urlparse(resp.headers["Location"]).path == "/"
 
 def test_logout_normal(client, app, store, monkeypatch, fake_current_session):
-    monkeypatch.setattr(lf, "revoke_tokens", lambda sid, session: None)
+    monkeypatch.setattr(_util, "revoke_tokens", lambda sid, session: None)
     monkeypatch.setattr(lf, "get_current_session", lambda dont_abort=True: fake_current_session)
     resp = client.get("/logout")
     assert resp.status_code in (302, 303)
@@ -216,7 +216,7 @@ def test_logout_normal(client, app, store, monkeypatch, fake_current_session):
 def test_logout_uses_client_logout_and_profile(client, app, store, monkeypatch, fake_current_session):
     sid = "sid"
     monkeypatch.setattr(lf, "get_current_session", lambda dont_abort=True: fake_current_session)
-    monkeypatch.setattr(lf, "revoke_tokens", lambda sid, session: None)
+    monkeypatch.setattr(_util, "revoke_tokens", lambda sid, session: None)
     store.create_session(sid,
                          session_type=SessionType.USER,
                          access_token="at",

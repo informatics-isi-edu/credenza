@@ -31,6 +31,7 @@ from ..api.common.util import (
     refresh_access_token,
     refresh_additional_tokens,
     revoke_tokens,
+    end_session,
     strtobool
 )
 
@@ -193,6 +194,9 @@ def get_session():
                                          enrichment=enrichment, before=before)
 
         skey, session_data = store.update_session(sid, session)
+        if session_data is None:
+            # The session was deleted (logout, revoke) while this request held a copy of it
+            abort(404, "session not found")
         audit_event("session_updated",
                     session_id=sid,
                     **identity,
@@ -227,14 +231,11 @@ def delete_session():
         return redirect(f"{current_app.config['BASE_URL']}/logout", 303)
 
     sid, session = get_current_session()
-    store = current_app.config["SESSION_STORE"]
 
     realm = session.realm
     identity = audit_identity(session.userinfo, realm)
 
-    revoke_tokens(sid, session)
-
-    store.delete_session(sid)
+    end_session(sid, session)
     audit_event("logout", session_id=sid, **identity, realm=realm)
 
     resp = jsonify({"status": "logged out"})

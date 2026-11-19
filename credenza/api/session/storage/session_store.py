@@ -335,10 +335,14 @@ class SessionStore:
 
         session_key = self.get_session_key_for_session_id(session_id)
         if not session_key:
-            # mapping missing
-            logger.warning("Missing session key mapping for session_id=%s; not remapping", session_id)
-        else:
-            self.map_session(session_key, session_id, ttl)
+            # The key mapping and the record are created, renewed and deleted together, so a missing
+            # mapping means the session was deleted (logout, revoke) after this writer read it.
+            # Writing the record back would leave an orphan that no key reaches but that the refresh
+            # worker would keep refreshing upstream.
+            logger.warning("Refusing to write session %s: its key mapping is gone (session was deleted)",
+                           session_id)
+            return None, None
+        self.map_session(session_key, session_id, ttl)
 
         if self.crypto_codec:
             session_json = self.crypto_codec.encrypt(json.dumps(session_data.to_dict(), separators=(",", ":")))

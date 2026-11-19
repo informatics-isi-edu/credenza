@@ -75,6 +75,13 @@ def break_loop(monkeypatch):
     monkeypatch.setattr(time, "sleep", _sleep)
 
 @pytest.fixture(autouse=True)
+def mapped_sessions(store, monkeypatch):
+    """Stubbed sessions are not created through the store, so give each one a key mapping;
+    otherwise the worker treats it as an orphaned record and deletes it."""
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda sid: f"skey-{sid}")
+
+
+@pytest.fixture(autouse=True)
 def audit_calls(monkeypatch):
     calls = []
     def _audit(event, **kwargs):
@@ -160,7 +167,7 @@ def test_refresh_extends_absolute_cap_prevents_deletion(app,
     deleted = []
     monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
     updated = []
-    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)) or ("skey", sd))
 
     class CapExtendingClient:
         def refresh_access_token(self, refresh_token):
@@ -219,7 +226,7 @@ def test_additional_token_refresh_success_and_failure(app,
 
     # Capture update_session calls
     updated = []
-    monkeypatch.setattr(store, "update_session", lambda s, sdata: updated.append((s, sdata)))
+    monkeypatch.setattr(store, "update_session", lambda s, sdata: updated.append((s, sdata)) or ("skey", sdata))
 
     # Stub factory.get_client to return a DummyClient that succeeds for "good"
     #    and raises for "fail"
@@ -317,6 +324,7 @@ def test_device_access_token_refresh(app,
         session_data.updated_at = frozen_time
         session_data.expires_at  = frozen_time + store.ttl
         updated.append((session_id, session_data))
+        return "skey", session_data
 
     monkeypatch.setattr(store, "update_session", fake_update_session)
     monkeypatch.setattr(store, "map_session", lambda *args, **kwargs: None)
@@ -400,7 +408,7 @@ def test_refresh_preserves_absolute_cap_when_refresh_expires_in_is_zero(
     deleted = []
     monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
     updated = []
-    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)) or ("skey", sd))
 
     class OfflineClient:
         def refresh_access_token(self, refresh_token):
@@ -459,7 +467,7 @@ def test_terminal_refresh_error_evicts_immediately(app, store, device_session, f
     deleted = []
     monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
     updated = []
-    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)) or ("skey", sd))
 
     class TerminalClient:
         def refresh_access_token(self, refresh_token):
@@ -493,7 +501,7 @@ def test_consecutive_failures_evict_at_threshold(app, store, device_session, fac
     monkeypatch.setattr(store, "get_session_data", lambda s: sess)
     deleted = []
     monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
-    monkeypatch.setattr(store, "update_session", lambda s, sd: None)
+    monkeypatch.setattr(store, "update_session", lambda s, sd: ("skey", sd))
 
     class FlakyClient:
         def refresh_access_token(self, refresh_token):
@@ -526,7 +534,7 @@ def test_failure_below_threshold_persists_counter(app, store, device_session, fa
     deleted = []
     monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
     updated = []
-    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)) or ("skey", sd))
 
     class FlakyClient:
         def refresh_access_token(self, refresh_token):
@@ -567,7 +575,7 @@ def test_successful_refresh_clears_failure_counter(app, store, device_session, f
     deleted = []
     monkeypatch.setattr(store, "delete_session", lambda s: deleted.append(s))
     updated = []
-    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)))
+    monkeypatch.setattr(store, "update_session", lambda s, sd: updated.append((s, sd)) or ("skey", sd))
 
     class GoodClient:
         def refresh_access_token(self, refresh_token):
@@ -608,7 +616,7 @@ def test_worker_survives_pass_exception(app,
     monkeypatch.setattr(store, "get_session_data", lambda _sid: (_ for _ in ()).throw(RuntimeError("boom")))
 
     # Keep other store methods inert if somehow called
-    monkeypatch.setattr(store, "update_session", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(store, "update_session", lambda s, sd: ("skey", sd), raising=False)
     monkeypatch.setattr(store, "delete_session", lambda *a, **k: None, raising=False)
 
     with app.app_context(), caplog.at_level(logging.ERROR):

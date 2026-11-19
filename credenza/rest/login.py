@@ -34,7 +34,7 @@ from ..api.common.util import (
     get_missing_scope_claims,
     extract_jwt_txn,
     check_acr,
-    revoke_tokens,
+    end_session,
     safe_referrer,
     is_transient_request_error
 )
@@ -350,8 +350,7 @@ def logout():
     logout_url = client.logout_url
     logout_url_params = profile.get("logout_url_params")
 
-    revoke_tokens(sid, session)
-    store.delete_session(sid)
+    end_session(sid, session)
 
     logger.info(f"Logout for {identity['identity']} with session id {sid} on realm {realm}.")
     audit_event("logout", session_id=sid, **identity, realm=realm)
