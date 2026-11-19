@@ -449,6 +449,9 @@ def test_make_session_response_non_legacy(app, store, base_session, monkeypatch)
 
     assert resp["seconds_remaining"] == store.get_ttl("sid123")
 
+    # the session id joins the caller's view of the session to the audit log
+    assert resp["session_id"] == "sid123"
+
 
 @pytest.mark.usefixtures("app", "store", "base_session")
 def test_make_session_response_legacy(app, store, base_session, monkeypatch):
@@ -494,6 +497,9 @@ def test_make_session_response_legacy(app, store, base_session, monkeypatch):
     assert abs(expires_dt.timestamp() - base_session.expires_at) < 1
 
     assert resp["seconds_remaining"] == store.get_ttl("sid123")
+
+    # 'tracking' carries the session id so webauthn2 request logs join to the audit log
+    assert resp["tracking"] == "sid123"
 
 
 @pytest.mark.usefixtures("app", "store", "base_session")

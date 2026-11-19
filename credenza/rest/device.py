@@ -347,7 +347,9 @@ def device_callback():
                 allowed_resources=session_data.allowed_resources,
                 realm=realm,
                 offline_access=offline_granted,
+                expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat(),
                 refresh_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at, timezone.utc).isoformat(),
+                **({"acr": userinfo.get("acr")} if userinfo.get("acr") else {}),
                 **({"txn": txn} if txn else {}))
 
     return render_template_string(SUCCESS_HTML)

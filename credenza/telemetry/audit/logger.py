@@ -25,6 +25,9 @@ from ...api.common import client_ip
 logger = logging.getLogger(__name__)
 svc_logger = logging.getLogger("credenza")
 
+# User-Agent values are client-controlled; cap what an audit record carries.
+MAX_USER_AGENT_LEN = 512
+
 def init_audit_logger(use_syslog=False):
     log_handler = StreamHandler()  # default: stderr
 
@@ -51,6 +54,9 @@ def audit_event(event, **kwargs):
         ip = client_ip(request)
         if ip is not None:
             extra["client_ip"] = ip
+        user_agent = request.headers.get("User-Agent")
+        if user_agent:
+            extra["user_agent"] = user_agent[:MAX_USER_AGENT_LEN]
 
     log_entry = {
         "event": event,

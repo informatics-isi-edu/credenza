@@ -16,6 +16,7 @@
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from secrets import token_urlsafe, token_hex
 from urllib.parse import urlencode, quote
 from flask import Blueprint, request, redirect, current_app, make_response, abort, jsonify, g
@@ -222,11 +223,18 @@ def callback():
         identity = audit_identity_snapshot(userinfo, realm)
         txn = extract_jwt_txn(tokens.get("access_token", ""))
         logger.info(f"Login successful for {identity['identity']} with session id {sid} on realm {realm}")
+        acr = userinfo.get("acr")
         audit_event("login",
                     session_id=sid,
                     **identity,
                     scopes=get_effective_scopes(session_data),
                     realm=realm,
+                    # With the expires_at of each later session_updated event, these bound when
+                    # the session ended if it timed out instead of being logged out.
+                    expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat(),
+                    absolute_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at,
+                                                               timezone.utc).isoformat(),
+                    **({"acr": acr} if acr else {}),
                     **({"txn": txn} if txn else {}))
 
         if metadata.get("augmentation_deferred", False):

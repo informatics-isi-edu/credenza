@@ -12,8 +12,9 @@ identity provider, for two distinct client experiences:
 
 It is written to illustrate Credenza's compliance and compatibility with the NIH RAS
 OpenID Provider (OP): PKCE, single-use authorization codes with atomic consumption,
-assurance-level (IAL2 / AAL2) enforcement, nonce binding, and the handling of
-RAS-specific claims (`federated_identities_ial2`).
+assurance-level (IAL2 / AAL2) enforcement, nonce binding, the handling of RAS-specific claims
+(`federated_identities_ial2` and the GA4GH Passport), and the audit trail that ties a RAS
+transaction (`txn`) to a Credenza session.
 
 > **Environment: RAS STAGING only.** Every flow, configuration value, and captured
 > example in this document was produced and verified against RAS **staging**
@@ -64,9 +65,14 @@ Credenza spans both planes. PKCE, authorization codes, `state`, and `nonce` exis
 | **Upstream**   | OIDC Relying Party                                | RAS OP                                     | RAS-issued, exchanged once by Credenza                                       | Credenza generates `code_verifier` per login                                                                                                                                  | Credenza generates `nonce` + `state`, validates in ID token |
 
 The bearer token Credenza ultimately returns to the client is an **opaque Credenza
-session key**, never the RAS access/ID token. RAS tokens are held server-side in the
-session record. This is the core brokering property: downstream resource servers
-introspect Credenza, not RAS.
+session key**, never the RAS access/ID token. RAS tokens and the raw RAS userinfo are held
+server-side in the session record. This is the core brokering property: downstream services
+ask Credenza about a session, never RAS.
+- webauthn consumers (DERIVA's ERMrest and hatrac) read `GET /session`.
+- OAuth resource servers call `POST /introspect`.
+
+Both endpoints render a fixed Credenza identity model (Sec. 3.6). Neither passes the stored RAS
+userinfo through.
 
 ---
 
@@ -80,7 +86,7 @@ The upstream relationship is declared as a realm in `oidc_idp_profiles.json`. Th
     "discovery_url": "https://stsstg.nih.gov/.well-known/openid-configuration",
     "userinfo_url": "https://stsstg.nih.gov/openid/connect/v1.1/userinfo",
     "logout_url": "https://authtest.nih.gov/siteminderagent/smlogout.asp",
-    "scopes": "openid email profile federated_identities_ial2",
+    "scopes": "openid email profile federated_identities_ial2 ga4gh_passport_v1",
     "scope_expected_claims": {
       "profile": ["name", "preferred_username", "federated_identities_ial2"]
     },
@@ -96,17 +102,42 @@ The upstream relationship is declared as a realm in `oidc_idp_profiles.json`. Th
 }
 ```
 
+A DERIVA deployment that keeps its role assignments in an ERMrest catalog uses
+`RasDerivaErmrestSessionAugmentationProvider` instead. This provider does two things:
+- It canonicalizes RAS identities, as `RasSessionAugmentationProvider` does.
+- It runs configured ERMrest queries that add role principals to the session's `roles` claim.
 
-| Setting                                                 | Compliance / compatibility role                                                                                                                                                                                                                    |
-|---------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `discovery_url`                                         | RFC 8414 / OIDC Discovery. Credenza fetches the RAS `authorization_endpoint`, `token_endpoint`, `jwks_uri`, etc. at startup; no endpoints are hardcoded.                                                                                           |
-| `scopes`                                                | Requested upstream scope set. `federated_identities_ial2` triggers RAS to return IAL2-verified linked identities.                                                                                                                                  |
-| `scope_expected_claims`                                 | Declares which claims each scope must yield. Drives the **userinfo fallback** (Sec. 3.3): if the ID token omits `federated_identities_ial2`, Credenza fetches it from the RAS `userinfo_url`.                                                      |
-| `required_acr`                                          | **Assurance enforcement.** Login is rejected unless the ID token `acr` claim contains *all* listed URIs (AAL2 **and** IAL2).                                                                                                                       |
-| `request_offline_access_scope_in_device_flow` = `false` | Credenza does not append the `offline_access` *scope* upstream. RAS keys refresh-token issuance off the `access_type=offline` parameter (still sent in the device flow), not this scope, so device sessions do receive a refresh token (Sec. 4.3). |
-| `skip_token_revocation` = `true`                        | On logout Credenza does not call an upstream RFC 7009 revocation endpoint (RAS STS does not expose a standard one); local session deletion is authoritative.                                                                                       |
-| `userinfo_url`                                          | Explicit RAS UserInfo endpoint used for the claims fallback.                                                                                                                                                                                       |
-| `session_augmentation_provider`                         | `RasSessionAugmentationProvider` -- exposes `build_identities()` to canonicalize `federated_identities_ial2` into the session's `identities` view (Sec. 6).                                                                                        |
+Those queries run as the user, with the new Credenza session key, so the provider requires
+deferred augmentation (Sec. 3.3):
+
+```json
+"session_augmentation_provider": "credenza.api.session.augmentation.deriva_provider:RasDerivaErmrestSessionAugmentationProvider",
+"session_augmentation_params": {
+  "defer_augmentation": true,
+  "ermrest_role_queries": [
+    {
+      "name": "assigned_roles",
+      "url": "https://<host>/ermrest/catalog/1/attribute/public:ERMrest_Client_role/ERMrest_Client={client_id}/public:role/Manual_Assume=false/Name,Description",
+      "claim": "roles",
+      "id": "tag:<host>,2026:role/{Name}",
+      "display_name": "{Description}"
+    }
+  ]
+}
+```
+
+
+| Setting                                                 | Compliance / compatibility role                                                                                                                                                                                                                     |
+|---------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `discovery_url`                                         | RFC 8414 / OIDC Discovery. Credenza fetches the RAS `authorization_endpoint`, `token_endpoint`, `jwks_uri`, etc. at startup; no endpoints are hardcoded.                                                                                            |
+| `scopes`                                                | Requested upstream scope set. `federated_identities_ial2` triggers RAS to return IAL2-verified linked identities. `ga4gh_passport_v1` makes RAS return the user's GA4GH Passport (Sec. 6.1), which Credenza stores but does not yet interpret.      |
+| `scope_expected_claims`                                 | Declares which claims each scope must yield. Drives the **userinfo fallback** (Sec. 3.3): if the ID token omits `federated_identities_ial2`, Credenza fetches it from the RAS `userinfo_url`.                                                       |
+| `required_acr`                                          | **Assurance enforcement.** Login is rejected unless the ID token `acr` claim contains *all* listed URIs (AAL2 **and** IAL2).                                                                                                                        |
+| `request_offline_access_scope_in_device_flow` = `false` | Credenza does not append the `offline_access` *scope* upstream. RAS keys refresh-token issuance off the `access_type=offline` parameter (still sent in the device flow), not this scope, so device sessions do receive a refresh token (Sec. 4.3).  |
+| `skip_token_revocation` = `true`                        | On logout Credenza does not call an upstream RFC 7009 revocation endpoint (RAS STS does not expose a standard one); local session deletion is authoritative.                                                                                        |
+| `userinfo_url`                                          | Explicit RAS UserInfo endpoint used for the claims fallback.                                                                                                                                                                                        |
+| `session_augmentation_provider`                         | `RasSessionAugmentationProvider` -- exposes `build_identities()` to canonicalize `federated_identities_ial2` into the session's `identities` view (Sec. 6). `RasDerivaErmrestSessionAugmentationProvider` adds ERMrest role mapping on top of that. |
+| `session_augmentation_params`                           | Provider parameters. `defer_augmentation: true` runs augmentation after the session exists (Sec. 3.3). `ermrest_role_queries` lists the role queries; `{client_id}` is the user's `<iss>/<sub>`.                                                    |
 
 ---
 
@@ -148,8 +179,9 @@ sequenceDiagram
     C->>Z: GET /callback?code&state
     Z->>R: POST RAS /token (code + Credenza code_verifier)
     R-->>Z: id_token, access_token (+ userinfo claims)
-    Z->>Z: Validate id_token + nonce, enforce required_acr (AAL2+IAL2), userinfo fallback
-    Z->>Z: Create USER session (SessionType.USER)
+    Z->>Z: Validate id_token + nonce, userinfo fallback, enforce required_acr (AAL2+IAL2)
+    Z->>Z: Create USER session (SessionType.USER), audit "login" (txn, session_id)
+    Z->>Z: Deferred augmentation (e.g. ERMrest role queries), if configured
     Z-->>C: 302 -> referrer + Set-Cookie session key (HttpOnly, Secure, SameSite=Lax)
     C->>Z: GET /session (cookie)
     Z-->>C: legacy webauthn session (client / attributes)
@@ -175,8 +207,9 @@ sequenceDiagram
     Z->>R: POST RAS /token (code + Credenza code_verifier)
     R-->>Z: id_token, access_token (+ userinfo claims)
     Z->>Z: Validate id_token signature + nonce
-    Z->>Z: Enforce required_acr (AAL2 + IAL2), userinfo fallback if claims missing
-    Z->>Z: Create USER session, mint single-use auth code (5 min TTL)
+    Z->>Z: Userinfo fallback if claims missing, enforce required_acr (AAL2 + IAL2)
+    Z->>Z: Create USER session, audit "login", deferred augmentation if configured
+    Z->>Z: Mint single-use auth code (5 min TTL)
     Z-->>C: 302 -> client redirect_uri?code=CREDENZA_CODE & state
     C->>Z: POST /token grant_type=authorization_code<br/>(code, redirect_uri, code_verifier)
     Note over Z: Atomically CONSUME code (replay-proof),<br/>verify client_id, redirect_uri, PKCE
@@ -240,15 +273,34 @@ the very end (Sec. 3.4):
 2. Exchanges the RAS code at the RAS token endpoint, presenting the **upstream**
    `code_verifier` (PKCE on the Credenza<->RAS leg).
 3. Validates the RAS **ID token signature** and the **nonce** binding.
-4. **ACR enforcement** -- `check_acr(userinfo, required_acr)` returns any missing assurance
-   URIs; a non-empty result yields `403 Insufficient authentication assurance level`.
+4. **UserInfo fallback** -- `get_missing_scope_claims()` checks the ID token against
+   `scope_expected_claims`. The ID token never carries `federated_identities_ial2`, so for
+   RAS this fires on every login.
+   - Credenza calls the RAS `userinfo_url`, with the RAS access token as bearer, and writes a
+     `userinfo_fetched` audit event carrying the RAS `txn`.
+   - Every claim the ID token lacks is merged into userinfo, including `passport_jwt_v11` when
+     `ga4gh_passport_v1` is requested (Sec. 6.1).
+5. **ACR enforcement** -- `check_acr(userinfo, required_acr)` returns any missing assurance
+   URIs. A non-empty result writes a `login_acr_rejected` audit event (with the presented `acr`
+   and an identity snapshot) and returns `403 Insufficient authentication assurance level`.
    For `nih-ras` this requires both `.../assurance/aal/2` and `.../assurance/ial/2`.
-5. **UserInfo fallback** -- `get_missing_scope_claims()` checks the ID token against
-   `scope_expected_claims`. If `federated_identities_ial2` is absent, Credenza calls the
-   RAS `userinfo_url` (bearer = RAS access token) and merges the result.
-6. Creates a `SessionType.USER` session holding the RAS tokens + userinfo. For A2 the
-   session is bound to the `oauth_resources` / `oauth_session_ttl` from the original
-   `/authorize`; for A1 (`/login`) it follows the default interactive session policy.
+6. **Session creation.** Credenza creates a `SessionType.USER` session holding the RAS tokens and
+   userinfo.
+   - For A2, the session is bound to the `oauth_resources` / `oauth_session_ttl` from the
+     original `/authorize`.
+   - For A1 (`/login`), it follows the default interactive session policy.
+   - A `login` audit event records the `session_id`, the subject (`iss`, `sub`, `identity`),
+     the RAS `txn` from the access token, the accepted `acr`, and a once-per-authentication identity snapshot
+     (Sec. 7).
+7. **Deferred augmentation** -- when the realm's provider sets `defer_augmentation`, augmentation
+   runs now, after the session exists. `RasDerivaErmrestSessionAugmentationProvider` then:
+   - runs its ERMrest role queries as the user, with the new session key;
+   - adds each result to the session's `roles` claim as a principal string, such as
+     `tag:<host>,2026:role/Member`. ERMrest and hatrac match ACLs against these principals.
+   - A failed query contributes no roles (fail closed), and the other queries still apply.
+
+   Roles are recomputed only when a `PUT /session` triggers an upstream refresh. A browser USER
+   session holds no RAS refresh token, so its roles are fixed for the life of the session.
 
 ### 3.4 Step 3 -- session delivery (where A1 and A2 diverge)
 
@@ -354,6 +406,32 @@ the session minted during `/callback`.
 }
 ```
 
+This capture is from a realm without ERMrest role mapping, so `attributes` holds only the client.
+`attributes` is the list of ACL principals.
+- With `RasDerivaErmrestSessionAugmentationProvider`, each role principal follows the client
+  entry, as `{"id": "tag:<host>,2026:role/Member", "display_name": "..."}`.
+- Linked identities never appear in `attributes`. They are informational only, inside `client`.
+
+The legacy response also carries `"tracking": <session_id>` (the modern response carries the same value as
+`session_id`) (not shown in the capture above, which
+predates it). ERMrest and hatrac copy it into the `track` field of every request log record (through
+webauthn2 today, and through deriva-server-common, which carries the same code, after migration), which joins those records to the session's audit events (Sec. 7). The session id is not
+a credential; no endpoint accepts it.
+
+The legacy shape is served only while `ENABLE_LEGACY_API` is on.
+
+Without `ENABLE_LEGACY_API`, `GET /session` returns Credenza's identity model:
+- `preferred_username`, `full_name`, `email`, `email_verified`;
+- `sub`, `iss`, `aud`, `id`;
+- `groups`, `roles`, and the canonical `identities` map (Sec. 6);
+- plus session metadata.
+
+`POST /introspect` renders the same identity model, with these differences:
+- `iss` is Credenza's base URL, `aud` is the token's bound resources, and the other RFC 7662
+  fields are added.
+- It adds any extra claims the calling client lists in its `introspection_include_claims`.
+- It never returns other stored userinfo, such as `passport_jwt_v11`, `txn` or `acr`.
+
 ---
 
 ## 4. Flow B -- Device Authorization Grant (RFC 8628)
@@ -383,8 +461,9 @@ sequenceDiagram
     U->>Z: GET /device/callback
     Z->>R: POST RAS /token (code + code_verifier)
     R-->>Z: id_token, access_token
-    Z->>Z: Validate id_token + nonce, enforce required_acr, userinfo fallback
-    Z->>Z: Create DEVICE session, mark flow verified
+    Z->>Z: Validate id_token + nonce, userinfo fallback, enforce required_acr
+    Z->>Z: Create DEVICE session, deferred augmentation if configured
+    Z->>Z: Audit "device_login" (txn, session_id), mark flow verified
     Z-->>U: "Device Authorized" page
     loop until verified or expired
         D->>Z: POST /token grant_type=device_code (device_code, client_id)
@@ -441,11 +520,18 @@ The `verify_device` function:
   `access_type=offline`, which is the mechanism RAS actually keys refresh-token issuance
   off of (see the note below).
 
-The `device_callback` function then mirrors the browser callback: RAS code exchange (with PKCE),
-ID-token + nonce validation, **`required_acr` enforcement (AAL2 + IAL2)**, userinfo
-fallback for `federated_identities_ial2`, and creation of a `SessionType.DEVICE` session.
-The flow is marked `verified` with the session key attached, and the PKCE verifier / nonce
-are cleared from the record.
+The `device_callback` function then mirrors the browser callback, in the same order:
+1. RAS code exchange, with PKCE.
+2. ID-token and nonce validation.
+3. Userinfo fallback for `federated_identities_ial2`.
+4. **`required_acr` enforcement (AAL2 + IAL2)**. A shortfall writes `device_login_acr_rejected`.
+5. Creation of a `SessionType.DEVICE` session.
+6. Deferred augmentation, if the realm configures it.
+7. A `device_login` audit event, carrying `txn`, `session_id`, the identity snapshot,
+   `offline_access` and `refresh_expires_at`.
+
+The flow is then marked `verified` with the session key attached, and the PKCE verifier and
+nonce are cleared from the record.
 
 > **Refresh tokens.** RAS issues a refresh token in response to `access_type=offline` on
 > the authorization request -- **not** in response to the `offline_access` scope. Because
@@ -460,6 +546,10 @@ are cleared from the record.
 >
 > _This refresh-token behavior is confirmed against RAS **staging** (`stsstg.nih.gov`);
 > production (`sts.nih.gov`) behavior should be validated before relying on it there._
+>
+> _Proposed (ADR-0007, not implemented): opt-in refresh tokens for derived sessions, plus a
+> three-tier wall-clock cap that would replace the fixed 14-day default for RAS device
+> sessions._
 
 **Background refresh and dead-grant eviction.** A per-process background worker
 (`refresh/refresh_worker.py`) keeps DEVICE-session access tokens fresh by exchanging the
@@ -469,7 +559,11 @@ failures on the session and **stops retrying** rather than hammering RAS indefin
 evicts the session immediately on a terminal OAuth error (`invalid_grant`, `invalid_client`,
 `unauthorized_client`) or after `MAX_REFRESH_FAILURES` (default 5) consecutive failures of
 any kind, emitting a `session_evicted_refresh_failures` audit event. The user must then
-re-authenticate. 
+re-authenticate.
+
+The worker refreshes tokens only; it does not re-run session augmentation. A DEVICE session's
+ERMrest roles therefore change only when a `PUT /session` triggers an upstream refresh, or at
+the next login.
 
 ### 4.4 Step 3 -- `POST /token` (`grant_type=urn:ietf:params:oauth:grant-type:device_code`)
 
@@ -530,9 +624,15 @@ On success the device flow record is deleted and the session key is returned:
 ## 5. Session storage representation
 
 Both flows persist a server-side session record (encrypted at rest, AES-GCM) keyed by the
-opaque session key. It holds the RAS tokens, the raw RAS userinfo (including
-`federated_identities_ial2`), the realm, session type, allowed resources, and lifetime
-metadata.
+opaque session key. It holds the RAS tokens, the realm, session type, allowed resources, and
+lifetime metadata. It also holds the raw RAS userinfo, which includes:
+- `federated_identities_ial2`;
+- `passport_jwt_v11`, when `ga4gh_passport_v1` is requested (it was not when this capture was
+  made);
+- any `roles` added by augmentation.
+
+The record is the only place the raw userinfo lives. Downstream services see it only through
+the identity model that `GET /session` and `POST /introspect` render (Sec. 3.6).
 
 > _Stored session payload (decrypted view) -- this capture is the **DEVICE** session from Sec. 4
 > (note `_session_type: "device"`, the `refresh_token`, and `offline_access_granted: true`).
@@ -639,7 +739,7 @@ detail) sub-blocks, keyed by source provider (e.g. `login.gov`):
 }
 ```
 
-The `RasSessionAugmentationProvider.build_identities()` function gocanonicalizes this **at render time**
+The `RasSessionAugmentationProvider.build_identities()` function canonicalizes this **at render time**
 (a pure transform of stored claims; nothing extra is persisted) into a map keyed by the
 identity id (`sources[src].identity_username`, matching RAS's own
 `default_identity` / `authenticated_identity` handle):
@@ -666,42 +766,112 @@ The legacy/webauthn-compatible `/session` view exposes the identity ids as a fla
 (`identities` keys) by default; the full detail map is available via the modern response
 or the `LEGACY_IDENTITY_DETAIL` opt-in.
 
----
+### 6.1 GA4GH Passport
 
-## 7. Compliance / compatibility matrix
+With `ga4gh_passport_v1` in `scopes`, RAS returns the user's GA4GH Passport as the
+`passport_jwt_v11` claim of the v1.1 userinfo response. The userinfo fallback (Sec. 3.3, step 4)
+merges it into the session's userinfo. When `federated_identities_ial2` is also granted, the
+Passport carries a linked-identity Visa, plus any dbGaP authorization Visas the user holds.
 
-| Requirement                                                     | Mechanism in Credenza                                                                                                                                  | Reference                                         |
-|-----------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------|
-| OIDC Discovery (no hardcoded endpoints)                         | RAS `discovery_url` fetched at startup                                                                                                                 | `oidc_idp_profiles.json`                          |
-| PKCE on the RP<->OP leg                                         | `create_authorization_url(use_pkce=True)`; `code_verifier` per login                                                                                   | `rest/authorize.py`, `rest/device.py`             |
-| PKCE on the client<->AS leg (S256, required for public clients) | `/authorize` validation + `verify_pkce` at `/token`                                                                                                    | `rest/authorize.py`, `rest/token.py`              |
-| Single-use authorization codes                                  | `set_authorization_code(ttl=300)` + atomic `consume_authorization_code`                                                                                | `rest/login.py`, `session_store.py`               |
-| Replay protection (read-and-delete)                             | `GETDEL` / `DELETE ... RETURNING` per backend                                                                                                          | `storage/backends/*`                              |
-| Nonce binding                                                   | generated per login, validated in `validate_id_token`                                                                                                  | `rest/login.py`, `rest/device.py`                 |
-| Assurance enforcement (IAL2 + AAL2)                             | `required_acr` + `check_acr`; `403` on shortfall                                                                                                       | `api/common/util.py`                              |
-| Exact redirect-URI matching                                     | `allowed_redirect_uris` at `/authorize`; re-checked at `/token`                                                                                        | `rest/authorize.py`, `rest/token.py`              |
-| RAS identity claims                                             | `federated_identities_ial2` scope + UserInfo fallback + `RasSessionAugmentationProvider`                                                               | `ras_provider.py`                                 |
-| Device grant (RFC 8628)                                         | `device_code`/`user_code`, `interval`, `slow_down`, `authorization_pending`, `expired_token`                                                           | `rest/device.py`, `rest/token.py`                 |
-| No upstream token leakage                                       | downstream bearer = opaque Credenza session key                                                                                                        | `rest/token.py`                                   |
-| Session cookie hardening (A1)                                   | cookie holds only the opaque session key (no RAS tokens/claims); `HttpOnly`, `Secure`, `SameSite=Lax`; tokens held server-side (AES-GCM at rest)       | `rest/login.py`                                   |
-| Token revocation peculiarity                                    | `skip_token_revocation` (RAS has no standard RFC 7009 endpoint)                                                                                        | `oidc_idp_profiles.json`                          |
-| Refresh rotation + dead-grant eviction                          | rotated refresh token persisted each cycle; worker evicts on terminal OAuth error or after `MAX_REFRESH_FAILURES` (`session_evicted_refresh_failures`) | `refresh/refresh_worker.py`, `api/common/util.py` |
+Credenza does not parse the Passport or its Visas. It plays no part in any access decision, it is
+never written to the audit log, and no Credenza endpoint returns it.
+
+The scope is requested so that a future consumer can read the Passport from the stored userinfo
+without a configuration change. The natural consumer is an augmentation provider that turns
+Visas into session roles. `RasDerivaErmrestSessionAugmentationProvider` composes through the
+MRO, so such parsing added to `RasSessionAugmentationProvider` applies to it unchanged.
 
 ---
 
-## 8. Endpoint reference
+## 7. Audit trail
 
-| Endpoint                                  | Method  | Plane      | Purpose                                                                     |
-|-------------------------------------------|---------|------------|-----------------------------------------------------------------------------|
-| `/.well-known/oauth-authorization-server` | GET     | Downstream | RFC 8414 AS metadata                                                        |
-| `/login`                                  | GET     | Downstream | Legacy session-cookie login (A1, webauthn consumers -- the path under test) |
-| `/authorize`                              | GET     | Downstream | OAuth 2.1 Authorization Code + PKCE (A2)                                    |
-| `/callback`                               | GET     | Upstream   | RAS OIDC redirect handler (browser)                                         |
-| `/token`                                  | POST    | Downstream | `authorization_code`, `device_code`, `token-exchange`, `client_credentials` |
-| `/device_authorization` (`/device/start`) | POST    | Downstream | RFC 8628 device authorization request                                       |
-| `/device/verify/{user_code}`              | GET     | Upstream   | User verification -> RAS login                                              |
-| `/device/callback`                        | GET     | Upstream   | RAS OIDC redirect handler (device)                                          |
-| `/session`                                | GET/PUT | Downstream | Session introspection / extension                                           |
-| `/introspect`                             | POST    | Downstream | RFC 7662 token introspection (resource servers)                             |
-| `/logout`                                 | GET     | Downstream | Session termination                                                         |
+Credenza writes JSON audit events (`docs/audit-events.md`) that tie a RAS transaction to a
+Credenza session and to what that session did:
 
+| Event                                              | When                                              | RAS-relevant fields                                                                                                                                  |
+|----------------------------------------------------|---------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `userinfo_fetched`                                 | the userinfo fallback calls RAS (every RAS login) | `txn`, `iss` / `sub` / `identity`                                                                                                                    |
+| `login_acr_rejected` / `device_login_acr_rejected` | `required_acr` not met                            | presented `acr`, identity snapshot                                                                                                                   |
+| `login` / `device_login`                           | session created                                   | `session_id`, `txn`, `acr`, `expires_at` and the absolute limit, identity snapshot (`preferred_username`, `full_name`, `email`, linked `identities`) |
+| `session_updated`, `access_token_refreshed`        | session extended / tokens refreshed               | `session_id`; `txn` of the refreshed token where present                                                                                             |
+| `logout`, `session_evicted_refresh_failures`       | session ends                                      | `session_id`                                                                                                                                         |
+
+- **Session end.** No event is written when a session times out. Its end time is derived: the
+  `expires_at` on `login` / `device_login` and on the latest `session_updated`, capped by the absolute
+  limit recorded at login.
+- **Request context.** Every event written while handling a request carries `client_ip` and
+  `user_agent`.
+- **Identifying events.** Every event about a subject carries `iss`, `sub` and `identity`
+  (`<iss>/<sub>`), the same client id ERMrest records for the user.
+- **Personal information.** The identity snapshot appears only on events that record an
+  authentication outcome. `CREDENZA_AUDIT_INCLUDE_PII=false` reduces it to the identifiers.
+- **Tracing.** `session_id` joins every event in a session's life (and, through `track`, every
+  ERMrest and hatrac request the session made), and `txn` joins Credenza's
+  records to RAS's own audit logs.
+
+**Proposed (ADR-0012, not implemented).** A per-realm `audit_attributes` selector and a
+`session_attributes` event would record a session's selected role principals: at login after
+deferred augmentation, and again whenever a refresh changes them. Today the roles a session held
+are not in the audit log.
+
+---
+
+## 8. Compliance / compatibility matrix
+
+| Requirement                                                     | Mechanism in Credenza                                                                                                                                                    | Reference                                              |
+|-----------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
+| OIDC Discovery (no hardcoded endpoints)                         | RAS `discovery_url` fetched at startup                                                                                                                                   | `oidc_idp_profiles.json`                               |
+| PKCE on the RP<->OP leg                                         | `create_authorization_url(use_pkce=True)`; `code_verifier` per login                                                                                                     | `rest/login.py`, `rest/authorize.py`, `rest/device.py` |
+| PKCE on the client<->AS leg (S256, required for public clients) | `/authorize` validation + `verify_pkce` at `/token`                                                                                                                      | `rest/authorize.py`, `rest/token.py`                   |
+| Single-use authorization codes                                  | `set_authorization_code(ttl=300)` + atomic `consume_authorization_code`                                                                                                  | `rest/login.py`, `session_store.py`                    |
+| Replay protection (read-and-delete)                             | `GETDEL` / `DELETE ... RETURNING` per backend                                                                                                                            | `storage/backends/*`                                   |
+| Nonce binding                                                   | generated per login, validated in `validate_id_token`                                                                                                                    | `rest/login.py`, `rest/device.py`                      |
+| Assurance enforcement (IAL2 + AAL2)                             | `required_acr` + `check_acr`; `403` on shortfall                                                                                                                         | `api/common/util.py`                                   |
+| Exact redirect-URI matching                                     | `allowed_redirect_uris` at `/authorize`; re-checked at `/token`                                                                                                          | `rest/authorize.py`, `rest/token.py`                   |
+| RAS identity claims                                             | `federated_identities_ial2` scope + UserInfo fallback + `RasSessionAugmentationProvider`                                                                                 | `ras_provider.py`                                      |
+| Device grant (RFC 8628)                                         | `device_code`/`user_code`, `interval`, `slow_down`, `authorization_pending`, `expired_token`                                                                             | `rest/device.py`, `rest/token.py`                      |
+| No upstream token leakage                                       | downstream bearer = opaque Credenza session key                                                                                                                          | `rest/token.py`                                        |
+| No upstream claim passthrough                                   | `GET /session` and `POST /introspect` render a fixed identity model (`session_identity_claims`); introspection extras only via per-client `introspection_include_claims` | `rest/session.py`, `rest/introspect.py`                |
+| GA4GH Passport                                                  | `ga4gh_passport_v1` requested; Passport stored server-side, not interpreted, never returned or logged                                                                    | `oidc_idp_profiles.json`, `rest/introspect.py`         |
+| Authentication-to-session traceability                          | RAS `txn` + `session_id` + identity snapshot on `login` / `device_login`; `txn` on `userinfo_fetched` and refreshes                                                      | `rest/login.py`, `rest/device.py`, `telemetry/audit/`  |
+| Catalog-held roles                                              | `RasDerivaErmrestSessionAugmentationProvider` role queries (deferred augmentation) add ACL principals to `roles`                                                         | `deriva_provider.py`                                   |
+| Session cookie hardening (A1)                                   | cookie holds only the opaque session key (no RAS tokens/claims); `HttpOnly`, `Secure`, `SameSite=Lax`; tokens held server-side (AES-GCM at rest)                         | `rest/login.py`                                        |
+| Token revocation peculiarity                                    | `skip_token_revocation` (RAS has no standard RFC 7009 endpoint)                                                                                                          | `oidc_idp_profiles.json`                               |
+| Refresh rotation + dead-grant eviction                          | rotated refresh token persisted each cycle; worker evicts on terminal OAuth error or after `MAX_REFRESH_FAILURES` (`session_evicted_refresh_failures`)                   | `refresh/refresh_worker.py`, `api/common/util.py`      |
+
+---
+
+## 9. Endpoint reference
+
+| Endpoint                                  | Method  | Plane      | Purpose                                                                                                           |
+|-------------------------------------------|---------|------------|-------------------------------------------------------------------------------------------------------------------|
+| `/.well-known/oauth-authorization-server` | GET     | Downstream | RFC 8414 AS metadata                                                                                              |
+| `/login`                                  | GET     | Downstream | Legacy session-cookie login (A1, webauthn consumers -- the path under test)                                       |
+| `/authorize`                              | GET     | Downstream | OAuth 2.1 Authorization Code + PKCE (A2)                                                                          |
+| `/callback`                               | GET     | Upstream   | RAS OIDC redirect handler (browser)                                                                               |
+| `/token`                                  | POST    | Downstream | `authorization_code`, `device_code`, `token-exchange`, `client_credentials`                                       |
+| `/device_authorization` (`/device/start`) | POST    | Downstream | RFC 8628 device authorization request                                                                             |
+| `/device/verify/{user_code}`              | GET     | Upstream   | User verification -> RAS login                                                                                    |
+| `/device/callback`                        | GET     | Upstream   | RAS OIDC redirect handler (device)                                                                                |
+| `/session`                                | GET/PUT | Downstream | Session introspection / extension                                                                                 |
+| `/introspect`                             | POST    | Downstream | RFC 7662 token introspection (resource servers); fixed identity model + per-client `introspection_include_claims` |
+| `/logout`                                 | GET     | Downstream | Session termination                                                                                               |
+
+
+---
+
+## 10. Proposed changes affecting these flows
+
+None of these is implemented.
+
+- **ADR-0009 (legacy API retirement).** Proposes retiring `ENABLE_LEGACY_API`. The A1 path
+  depends on it, because webauthn consumers read the legacy `client` / `attributes` shape of
+  `GET /session` (Sec. 3.6). Every DERIVA consumer must migrate before A1 can drop it.
+- **ADR-0011 (step-up role assumption).** Roles marked `Manual_Assume` are excluded from the
+  login-time role queries (Sec. 2). Under the proposal they would be held only after a time-boxed
+  step-up through a forced RAS re-authentication. This depends on RAS honouring `prompt=login`
+  / `max_age=0`, which has not been verified.
+- **ADR-0012 (configurable audit attributes).** Records a session's role principals in the audit
+  log (Sec. 7).
+- **ADR-0007 (refreshable derived sessions).** Changes how RAS device-session lifetime is capped
+  (Sec. 4.3).

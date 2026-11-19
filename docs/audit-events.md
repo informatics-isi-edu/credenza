@@ -11,9 +11,11 @@ how subjects are identified, and when personal information is recorded.
 | `event`      | always                     | Event type, e.g. `login`, `logout`, `access_token_refreshed`.        |
 | `timestamp`  | always                     | ISO 8601 local time with UTC offset.                                 |
 | `client_ip`  | when handling a request    | Client address as seen by Credenza (see `CREDENZA_ENABLE_PROXYFIX`). |
+| `user_agent` | when the request sends one | The request's `User-Agent` header, truncated to 512 characters.      |
 | `session_id` | events about a session     | Credenza session id. Joins every event in a session's life.          |
 | `realm`      | events about a session/IdP | Configured IdP profile name. A local alias, not an identifier.       |
 | `txn`        | when the IdP supplies one  | IdP transaction id from the access token (NIH RAS).                  |
+| `acr`        | `login`, `device_login`    | The assurance the IdP asserted for an accepted authentication.       |
 
 Event-specific fields (scopes, resources, `client_id` of the OAuth client, error details, and so
 on) follow these.
@@ -22,11 +24,11 @@ on) follow these.
 
 Every event about an authenticated subject carries three identifier fields:
 
-| Field      | Meaning                                                                              |
-|------------|--------------------------------------------------------------------------------------|
-| `iss`      | Issuer of the subject's identity (the IdP). `null` for service (M2M) subjects.       |
-| `sub`      | Subject identifier, unique only within `iss`.                                        |
-| `identity` | `<iss>/<sub>`, or the bare `sub` when there is no issuer.                            |
+| Field      | Meaning                                                                        |
+|------------|--------------------------------------------------------------------------------|
+| `iss`      | Issuer of the subject's identity (the IdP). `null` for service (M2M) subjects. |
+| `sub`      | Subject identifier, unique only within `iss`.                                  |
+| `identity` | `<iss>/<sub>`, or the bare `sub` when there is no issuer.                      |
 
 `sub` alone does not identify anyone: two IdPs can issue the same `sub` to different people, and
 `realm` is a configuration alias that can be renamed or repointed. `iss` is therefore always
@@ -78,14 +80,14 @@ Role assumption (ADR-0011, not yet implemented) re-authenticates an existing ses
 the IdP before granting a time-boxed role. That re-authentication creates no session, but it is an
 authentication outcome, so the same rule applies:
 
-| Event                                                                          | Snapshot             |
-|--------------------------------------------------------------------------------|----------------------|
-| `role_assumption_requested`                                                    | no                   |
-| `role_assumption_denied` before the IdP round trip (role not eligible)         | no                   |
-| `role_assumed`                                                                 | yes                  |
-| `role_assumption_denied` after the callback (stale `auth_time`, insufficient `acr`, role no longer eligible) | yes |
-| `role_assumption_denied` with `failed_check: subject_mismatch`                 | yes, both identities |
-| `role_assumption_expired`, `role_dropped`                                      | no                   |
+| Event                                                                                                        | Snapshot             |
+|--------------------------------------------------------------------------------------------------------------|----------------------|
+| `role_assumption_requested`                                                                                  | no                   |
+| `role_assumption_denied` before the IdP round trip (role not eligible)                                       | no                   |
+| `role_assumed`                                                                                               | yes                  |
+| `role_assumption_denied` after the callback (stale `auth_time`, insufficient `acr`, role no longer eligible) | yes                  |
+| `role_assumption_denied` with `failed_check: subject_mismatch`                                               | yes, both identities |
+| `role_assumption_expired`, `role_dropped`                                                                    | no                   |
 
 On a subject mismatch, a different subject completed the step-up than the one that owns the
 session. The record carries the session's subject in the standard `iss`, `sub` and `identity`
@@ -155,6 +157,7 @@ Field values are illustrative.
   "event": "login",
   "timestamp": "2026-10-28T11:25:35.109849-07:00",
   "client_ip": "198.51.100.10",
+  "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
   "session_id": "6a53fd87-f029-41a7-9982-84b240617697",
   "iss": "https://stsstg.nih.gov",
   "sub": "3nON_ztMzYm4SFDwvVtqrBiYgWNG4YRFwmEF6Au0evU",
@@ -166,6 +169,9 @@ Field values are illustrative.
   "identities": ["00000000-0000-0000-0000-000000000000@login.gov"],
   "scopes": ["openid", "profile", "federated_identities_ial2", "email"],
   "realm": "nih-ras-staging",
+  "expires_at": "2026-10-28T19:00:35+00:00",
+  "absolute_expires_at": "2026-10-29T18:25:35+00:00",
+  "acr": "https://stsstg.nih.gov/assurance/aal/2 https://stsstg.nih.gov/assurance/ial/2",
   "txn": "e283775edf3dff76.355374a01c8bfa1b"
 }
 ```

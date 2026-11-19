@@ -15,6 +15,7 @@
 #
 import time
 import logging
+from typing import Optional
 from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from .helpers import make_json_response, perf_logged
@@ -309,42 +310,19 @@ def make_session_response(sid, session: SessionData):
         response["since"] = datetime.fromtimestamp(session.created_at, timezone.utc).isoformat()
         response["expires"] = datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat()
         response["seconds_remaining"] = store.get_ttl(sid)
+
+        # DERIVA resource servers (ERMrest, hatrac) copy "tracking" into the "track" field of every
+        # request log record (via webauthn2 today, deriva-server-common after migration), which joins those records to this session's Credenza audit events
+        # (and through the login event to the IdP transaction id). The session id is not a
+        # credential: it is not derived from the session key and no endpoint accepts it.
+        response["tracking"] = sid
     else:
-        preferred_username = _claim(session, "preferred_username", session.userinfo.get("preferred_username"))
-        full_name =          _claim(session, "full_name", session.userinfo.get("name"))
-        email =              _claim(session, "email", session.userinfo.get("email"))
-        email_verified =     _claim(session, "email_verified", session.userinfo.get("email_verified", "unknown"))
-        sub =                _claim(session, "sub", session.userinfo.get("sub"))
-        iss =                _claim(session, "iss", session.userinfo.get("iss"))
-        aud =                _claim(session, "aud", session.userinfo.get("aud"))
-        groups =             _claim(session, "groups", session.userinfo.get("groups", []), listify=True)
-        roles =              _claim(session, "roles", session.userinfo.get("roles", []), listify=True)
-        userid =             _claim(session, "userid", session.userinfo.get("userid"))
-
-        # normalize email_verified if it arrives as a string
-        if isinstance(email_verified, str):
-            lv = email_verified.strip().lower()
-            if lv in ("1", "yes"):
-                email_verified = "true"
-            elif lv in ("0", "no"):
-                email_verified = "false"
-
-        _id = f"{iss}/{sub}" if iss else sub
-
+        response.update(session_identity_claims(session, canonical_identities))
         response.update(
             {
-                "preferred_username": preferred_username,
-                "full_name":          full_name,
-                "email":              email,
-                "email_verified":     email_verified,
-                "sub":                sub,
-                "iss":                iss,
-                "aud":                aud,
-                "id":                 _id,
-                "userid":             userid,
-                "groups":             groups,
-                "roles":              roles,
-                "identities":         canonical_identities,
+                # Joins the caller's view of the session to Credenza's audit events; the legacy
+                # response carries the same value as "tracking". Not a credential.
+                "session_id":         sid,
                 "scopes":             get_effective_scopes(session),
                 "resources":          session.allowed_resources,
                 "metadata":           session.session_metadata.to_dict(),
@@ -354,7 +332,57 @@ def make_session_response(sid, session: SessionData):
                 "seconds_remaining":  store.get_ttl(sid),
             }
         )
-        if userid is None:
-            del response["userid"]
 
     return response
+
+
+def session_identity_claims(session: SessionData, canonical_identities: Optional[dict] = None) -> dict:
+    """Return Credenza's identity model for a session.
+
+    This is the fixed set of identity claims Credenza emits about a session's subject, each
+    resolved through the realm's claim map: preferred_username, full_name, email,
+    email_verified, sub, iss, aud, id ("<iss>/<sub>"), userid (only when present), groups,
+    roles and identities. It is shared by GET /session and POST /introspect so that the two
+    cannot drift apart. Upstream claims outside this model (for example an IDP's raw
+    userinfo extras) are never included; introspection clients name any extra claims they
+    need in their registry entry (introspection_include_claims).
+    """
+    if canonical_identities is None:
+        canonical_identities = _canonical_identities(session)
+
+    preferred_username = _claim(session, "preferred_username", session.userinfo.get("preferred_username"))
+    full_name =          _claim(session, "full_name", session.userinfo.get("name"))
+    email =              _claim(session, "email", session.userinfo.get("email"))
+    email_verified =     _claim(session, "email_verified", session.userinfo.get("email_verified", "unknown"))
+    sub =                _claim(session, "sub", session.userinfo.get("sub"))
+    iss =                _claim(session, "iss", session.userinfo.get("iss"))
+    aud =                _claim(session, "aud", session.userinfo.get("aud"))
+    groups =             _claim(session, "groups", session.userinfo.get("groups", []), listify=True)
+    roles =              _claim(session, "roles", session.userinfo.get("roles", []), listify=True)
+    userid =             _claim(session, "userid", session.userinfo.get("userid"))
+
+    # normalize email_verified if it arrives as a string
+    if isinstance(email_verified, str):
+        lv = email_verified.strip().lower()
+        if lv in ("1", "yes"):
+            email_verified = "true"
+        elif lv in ("0", "no"):
+            email_verified = "false"
+
+    claims = {
+        "preferred_username": preferred_username,
+        "full_name":          full_name,
+        "email":              email,
+        "email_verified":     email_verified,
+        "sub":                sub,
+        "iss":                iss,
+        "aud":                aud,
+        "id":                 f"{iss}/{sub}" if iss else sub,
+        "userid":             userid,
+        "groups":             groups,
+        "roles":              roles,
+        "identities":         canonical_identities,
+    }
+    if userid is None:
+        del claims["userid"]
+    return claims

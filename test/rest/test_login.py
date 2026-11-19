@@ -16,6 +16,7 @@
 import pytest
 import time
 import uuid
+from datetime import datetime
 from flask import g
 from unittest.mock import Mock
 from urllib.parse import urlparse, parse_qs, unquote
@@ -453,6 +454,34 @@ def test_callback_userinfo_fallback_uses_scope_expected_claims_override(client, 
         cookie_val = resp.headers["Set-Cookie"].split(";")[0].split("=", 1)[1]
         _, session = store.get_session_by_session_key(cookie_val)
         assert session.userinfo.get("identity_set") == [{"sub": "u1"}]
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_callback_login_audit_records_acr(client, app, store, monkeypatch):
+    # The satisfied assurance (acr) is recorded on the successful login event.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {
+        "skip_userinfo_fallback": True,
+        "required_acr": ["https://example.com/aal/2", "https://example.com/ial/2"],
+    }
+    try:
+        acr = "https://example.com/aal/2 https://example.com/ial/2"
+        stub = StubOIDCClient(
+            tokens={"id_token": "id", "access_token": "acc", "scope": "openid"},
+            userinfo={"sub": "u1", "iss": "https://issuer", "aud": ["cid"], "acr": acr},
+        )
+        state = _setup_fallback_callback(app, store, stub, monkeypatch)
+        events = []
+        monkeypatch.setattr(lf, "audit_event", lambda e, **kw: events.append((e, kw)))
+        resp = client.get("/callback", query_string={"code": "c", "state": state})
+        assert resp.status_code == 302
+        login = next(kw for e, kw in events if e == "login")
+        assert login["acr"] == acr
+        # expiry bounds let an investigator tell when a timed-out session ended
+        _, session = store.get_session_by_session_key(
+            resp.headers["Set-Cookie"].split(";")[0].split("=", 1)[1])
+        assert datetime.fromisoformat(login["expires_at"]).timestamp() == session.expires_at
+        assert datetime.fromisoformat(login["absolute_expires_at"]).timestamp() == session.absolute_expires_at
     finally:
         app.config["OIDC_IDP_PROFILES"].pop("test", None)
 

@@ -456,8 +456,14 @@ def test_device_callback_acr_passes_when_satisfied(client, app, store, monkeypat
             userinfo={"sub": "u1", "acr": "https://example.com/aal/2 https://example.com/ial/2"},
         )
         device_code = _setup_fallback_device_flow(app, store, stub, monkeypatch, device_code="DCACRPASS")
+        events = []
+        monkeypatch.setattr(df, "audit_event", lambda e, **kw: events.append((e, kw)))
         resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
         assert resp.status_code == 200
+        # the satisfied assurance is recorded on the success event
+        login = next(kw for e, kw in events if e == "device_login")
+        assert login["acr"] == "https://example.com/aal/2 https://example.com/ial/2"
+        assert "expires_at" in login and "refresh_expires_at" in login
     finally:
         app.config["OIDC_IDP_PROFILES"].pop("test", None)
 
