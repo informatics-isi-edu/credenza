@@ -20,6 +20,17 @@ how subjects are identified, and when personal information is recorded.
 Event-specific fields (scopes, resources, `client_id` of the OAuth client, error details, and so
 on) follow these.
 
+In the device flow the user approves the login in a browser, which may run on a different machine
+from the client. `device_login` is written during that approval, so its `client_ip` and
+`user_agent` are the browser's. The client's appear on `device_token_issued`, written when the
+client collects its token, which carries the same `session_id`.
+
+A rejected token request that presents an existing session names that session in `session_id`, so
+the attempt appears on the session's audit trail. A denied token exchange names the session whose
+token was presented, and a failed authorization-code redemption (wrong client, redirect URI or PKCE
+verifier) names the session the code was issued for. A successful token exchange names the new
+derived session in `session_id` and the presented one in `base_session_id`.
+
 ## Subject identifiers
 
 Every event about an authenticated subject carries three identifier fields:

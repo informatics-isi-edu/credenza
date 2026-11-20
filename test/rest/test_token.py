@@ -552,6 +552,9 @@ def test_client_credentials_long_absolute_lifetime_triggers_audit_event(caplog, 
     events = [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict) and "event" in r.msg]
     assert "token_issued_long_absolute_lifetime" in events
     assert "token_issued" in events  # issuance itself is unaffected
+    [issued] = _audit_records(caplog, "token_issued")
+    assert issued["session_id"] in app.config["SESSION_STORE"].list_session_ids()
+    assert "session" not in issued
 
 
 def test_client_credentials_normal_lifetime_no_long_lifetime_audit_event(caplog, app):
@@ -960,6 +963,11 @@ _RESOURCE_TC = "https://api.example/"
 _VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"  # 43-char RFC 7636 example
 
 
+def _audit_records(caplog, event):
+    """Audit records of the given event type captured by caplog."""
+    return [r.msg for r in caplog.records if isinstance(r.msg, dict) and r.msg.get("event") == event]
+
+
 def _s256(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -1115,19 +1123,22 @@ def test_authz_code_single_use(app, store):
     assert r2.status_code == 400
 
 
-def test_authz_code_client_mismatch(app, store):
-    """Code issued to different client -- 400."""
+def test_authz_code_client_mismatch(caplog, app, store):
+    """Code issued to different client -- 400, audited against the code's session."""
     _make_authz_client(app)
     sid, _ = _create_user_session(store)
     code, _ = _store_code(store, session_id=sid, client_id="other-client")
-    with app.test_client() as c:
-        resp = c.post("/token", data={
-            "client_id":    "authz-client",
-            "grant_type":   "authorization_code",
-            "code":         code,
-            "redirect_uri": _REDIRECT_URI_TC,
-        })
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":    "authz-client",
+                "grant_type":   "authorization_code",
+                "code":         code,
+                "redirect_uri": _REDIRECT_URI_TC,
+            })
     assert resp.status_code == 400
+    [record] = _audit_records(caplog, "token_authz_code_client_mismatch")
+    assert record["session_id"] == sid
 
 
 def test_authz_code_redirect_uri_mismatch(app, store):
@@ -1145,22 +1156,25 @@ def test_authz_code_redirect_uri_mismatch(app, store):
     assert resp.status_code == 400
 
 
-def test_authz_code_pkce_wrong_verifier(app, store):
-    """Wrong code_verifier -- 400 INVALID_GRANT."""
+def test_authz_code_pkce_wrong_verifier(caplog, app, store):
+    """Wrong code_verifier -- 400 INVALID_GRANT, audited against the code's session."""
     _make_authz_client(app)
     sid, _ = _create_user_session(store)
     challenge = _s256(_VERIFIER)
     code, _ = _store_code(store, session_id=sid,
                           code_challenge=challenge, code_challenge_method="S256")
-    with app.test_client() as c:
-        resp = c.post("/token", data={
-            "client_id":     "authz-client",
-            "grant_type":    "authorization_code",
-            "code":          code,
-            "redirect_uri":  _REDIRECT_URI_TC,
-            "code_verifier": "wrong-verifier-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        })
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":     "authz-client",
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  _REDIRECT_URI_TC,
+                "code_verifier": "wrong-verifier-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            })
     assert resp.status_code == 400
+    [record] = _audit_records(caplog, "token_authz_code_pkce_failed")
+    assert record["session_id"] == sid
 
 
 def test_authz_code_pkce_missing_verifier(app, store):
@@ -1332,8 +1346,8 @@ def test_token_exchange_invalid_subject_token(app, store):
     assert resp.status_code == 400
 
 
-def test_token_exchange_transitive_denied(app, store):
-    """DERIVED sessions cannot be used as subject tokens."""
+def test_token_exchange_transitive_denied(caplog, app, store):
+    """DERIVED sessions cannot be used as subject tokens; the denial names the presented session."""
     _make_exchange_client(app)
     sid = store.generate_session_id()
     skey, _ = store.create_session(
@@ -1345,14 +1359,18 @@ def test_token_exchange_transitive_denied(app, store):
         scopes="openid",
         allowed_resources=[_RESOURCE_TC],
     )
-    with app.test_client() as c:
-        resp = c.post("/token", data={
-            "client_id":          "exchange-client",
-            "grant_type":         _TOKEN_EXCHANGE_GRANT,
-            "subject_token":      skey,
-            "subject_token_type": _TOKEN_TYPE_ACCESS,
-        })
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":          "exchange-client",
+                "grant_type":         _TOKEN_EXCHANGE_GRANT,
+                "subject_token":      skey,
+                "subject_token_type": _TOKEN_TYPE_ACCESS,
+            })
     assert resp.status_code == 403
+    [record] = _audit_records(caplog, "token_exchange_transitive_denied")
+    assert record["session_id"] == sid
+    assert "sid" not in record
 
 
 def test_token_exchange_default_deny_no_targets(app, store):
@@ -1443,19 +1461,22 @@ def test_token_exchange_cross_resource_delegation_denied_without_target(app, sto
     assert resp.status_code == 403
 
 
-def test_token_exchange_scope_escalation_beyond_subject(app, store):
-    """Requesting a scope not held by the subject -- 403."""
+def test_token_exchange_scope_escalation_beyond_subject(caplog, app, store):
+    """Requesting a scope not held by the subject -- 403; the denial names the presented session."""
     _make_exchange_client(app, allowed_scopes=["openid", "email", "admin"])
-    _, skey = _create_subject_session(store, scopes="openid email")
-    with app.test_client() as c:
-        resp = c.post("/token", data={
-            "client_id":          "exchange-client",
-            "grant_type":         _TOKEN_EXCHANGE_GRANT,
-            "subject_token":      skey,
-            "subject_token_type": _TOKEN_TYPE_ACCESS,
-            "scope":              "openid email admin",
-        })
+    sid, skey = _create_subject_session(store, scopes="openid email")
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":          "exchange-client",
+                "grant_type":         _TOKEN_EXCHANGE_GRANT,
+                "subject_token":      skey,
+                "subject_token_type": _TOKEN_TYPE_ACCESS,
+                "scope":              "openid email admin",
+            })
     assert resp.status_code == 403
+    [record] = _audit_records(caplog, "token_exchange_scope_escalation")
+    assert record["session_id"] == sid
 
 
 def test_token_exchange_scope_beyond_client_allowed(app, store):
@@ -1781,6 +1802,58 @@ def test_device_token_success(app, store):
     assert "expires_in" in data
     # Device flow must be cleaned up
     assert store.get_device_flow("success-code") is None
+
+
+def test_device_token_issued_audit_names_session(caplog, app, store):
+    """device_token_issued carries the session id, joining the polling client's IP and user agent
+    to the device_login event, which records the approving browser's."""
+    _make_device_poll_client(app)
+    sid, skey, session = _make_device_session(store)
+    store.set_device_flow("audit-code", {
+        "client_id":   DEVICE_CLIENT_ID,
+        "verified":    True,
+        "session_key": skey,
+        "interval":    0,
+        "last_poll_at": 0,
+    }, ttl=60)
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":   DEVICE_CLIENT_ID,
+                "grant_type":  DEVICE_GRANT,
+                "device_code": "audit-code",
+            })
+    assert resp.status_code == 200
+    issued = [r.msg for r in caplog.records
+              if isinstance(r.msg, dict) and r.msg.get("event") == "device_token_issued"]
+    assert len(issued) == 1
+    assert issued[0]["session_id"] == sid
+    assert issued[0]["client_id"] == DEVICE_CLIENT_ID
+
+
+def test_device_token_session_gone_returns_expired_token(caplog, app, store):
+    """A verified flow whose session has ended returns expired_token, not a server error."""
+    _make_device_poll_client(app)
+    sid, skey, session = _make_device_session(store)
+    store.delete_session(sid)
+    store.set_device_flow("lost-code", {
+        "client_id":   DEVICE_CLIENT_ID,
+        "verified":    True,
+        "session_key": skey,
+        "interval":    0,
+        "last_poll_at": 0,
+    }, ttl=60)
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":   DEVICE_CLIENT_ID,
+                "grant_type":  DEVICE_GRANT,
+                "device_code": "lost-code",
+            })
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "expired_token"
+    events = [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict) and "event" in r.msg]
+    assert "device_token_session_lost" in events
 
 
 def test_device_token_flow_deleted_on_success(app, store):
