@@ -50,13 +50,14 @@ An event carries an identity snapshot when it records the outcome of an authenti
 whether Credenza accepted or rejected the result. The snapshot holds the identifying attributes the
 IdP asserted in that authentication.
 
-| Field                | Meaning                                                                                                                                                                                                               |
-|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `preferred_username` | IdP username. For NIH RAS this is an opaque `<uuid>@login.gov` style id.                                                                                                                                              |
-| `full_name`          | Display name.                                                                                                                                                                                                         |
-| `email`              | Email address as asserted by the IdP; not necessarily verified.                                                                                                                                                       |
-| `email_verified`     | The IdP's verification flag, when supplied.                                                                                                                                                                           |
-| `identities`         | Sorted list of linked identity ids from the realm's augmentation provider: `<iss>/<sub>` for Globus linked identities, the source `identity_username` for RAS federated identities. Empty when the IdP supplies none. |
+| Field                | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `preferred_username` | IdP username. For NIH RAS this is an opaque `<uuid>@login.gov` style id.                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `full_name`          | Display name.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `email`              | Email address as asserted by the IdP; not necessarily verified.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `email_verified`     | The IdP's verification flag, when supplied.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `identities`         | Sorted list of linked identity ids from the realm's augmentation provider: `<iss>/<sub>` for Globus linked identities, the source `identity_username` for RAS federated identities. Empty when the IdP supplies none.                                                                                                                                                                                                                                                                             |
+| `identity_provider`  | The upstream identity provider the user signed in with, when the realm federates several and its augmentation provider marks the one used (for NIH RAS, the source key such as `login.gov` or `id.me`). Omitted otherwise, including for Globus. Globus can report the identities authenticated in a session (token introspection with `session_info`), but Credenza does not currently request that information. Not personal information, so it is recorded even when the snapshot is disabled. |
 
 Events carrying the snapshot:
 
@@ -126,7 +127,8 @@ personal information and are recorded whatever `CREDENZA_AUDIT_INCLUDE_PII` is s
 ### Disabling the snapshot
 
 `CREDENZA_AUDIT_INCLUDE_PII` (default `true`) controls the snapshot. When `false`, the snapshot
-events carry only `iss`, `sub` and `identity` (and a `presented` object holds only those three),
+events carry only `iss`, `sub`, `identity` and, when known, `identity_provider` (and a `presented`
+object holds only those),
 and the audit log contains no names or email addresses. Identifying a person then requires resolving identifiers against an external registry
 such as `ERMrest_client`.
 
@@ -193,6 +195,7 @@ Field values are illustrative.
   "full_name": "Example User",
   "email": "user@example.org",
   "email_verified": null,
+  "identity_provider": "login.gov",
   "identities": ["00000000-0000-0000-0000-000000000000@login.gov"],
   "scopes": ["openid", "profile", "federated_identities_ial2", "email"],
   "realm": "nih-ras-staging",

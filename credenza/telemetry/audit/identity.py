@@ -34,17 +34,26 @@ def _include_pii():
     return bool(current_app.config.get("AUDIT_INCLUDE_PII", True))
 
 
-def _linked_identities(userinfo, realm):
+def _linked_identities(userinfo, realm) -> dict:
+    """The realm's augmentation provider's identities map ({id: detail}), or {} if none."""
     if not has_app_context():
-        return []
+        return {}
     provider = (current_app.config.get("SESSION_AUGMENTATION_PROVIDERS") or {}).get(realm)
     if provider is None:
-        return []
+        return {}
     try:
-        return sorted(provider.build_identities(userinfo) or {})
+        return provider.build_identities(userinfo) or {}
     except Exception:
         logger.exception(f"Failed to build linked identities for audit on realm {realm}")
-        return []
+        return {}
+
+
+def _authenticated_provider(identities: dict):
+    """The upstream provider of the identity marked as used to authenticate, or None."""
+    for detail in identities.values():
+        if isinstance(detail, dict) and detail.get("authenticated"):
+            return detail.get("provider")
+    return None
 
 
 def audit_identity(userinfo, realm=None):
@@ -69,15 +78,23 @@ def audit_identity_snapshot(userinfo, realm=None):
     rejected, so that personal information is written once per authentication; all other events
     carry audit_identity() and join back to the snapshot through session_id. The attributes are the values the IdP
     asserted at that moment, which may differ from the subject's current values. Linked
-    identities come from the realm's augmentation provider. When AUDIT_INCLUDE_PII is false the
-    snapshot reduces to audit_identity().
+    identities come from the realm's augmentation provider.
+
+    When the realm federates several upstream identity providers and its augmentation provider
+    marks the identity used to sign in, identity_provider names that upstream provider (for
+    example "login.gov"). It is not personal information, so it is recorded even when
+    AUDIT_INCLUDE_PII is false; otherwise the snapshot then reduces to audit_identity().
     """
     fields = audit_identity(userinfo, realm)
+    userinfo = userinfo or {}
+    identities = _linked_identities(userinfo, realm)
+    upstream = _authenticated_provider(identities)
+    if upstream:
+        fields["identity_provider"] = upstream
     if not _include_pii():
         return fields
-    userinfo = userinfo or {}
     claim_map = _claim_map(realm)
     for claim in PII_CLAIMS:
         fields[claim] = resolve_claim(userinfo, claim_map, claim)
-    fields["identities"] = _linked_identities(userinfo, realm)
+    fields["identities"] = sorted(identities)
     return fields

@@ -112,3 +112,32 @@ def test_snapshot_survives_failing_identities_provider(app, monkeypatch):
 def test_snapshot_unknown_realm_has_no_linked_identities(app):
     with app.app_context():
         assert audit_identity_snapshot(USERINFO, "no-such-realm")["identities"] == []
+
+
+FEDERATED = {
+    "alice@upstream-a.example": {"provider": "upstream-a.example", "authenticated": True},
+    "alice@upstream-b.example": {"provider": "upstream-b.example"},
+}
+
+
+def test_snapshot_names_the_upstream_provider_used_to_sign_in(app, monkeypatch):
+    monkeypatch.setitem(app.config["SESSION_AUGMENTATION_PROVIDERS"], "test", _IdentitiesProvider(FEDERATED))
+    with app.app_context():
+        fields = audit_identity_snapshot(USERINFO, "test")
+    assert fields["identity_provider"] == "upstream-a.example"
+    assert fields["identities"] == sorted(FEDERATED)
+
+
+def test_snapshot_keeps_identity_provider_when_pii_disabled(app, monkeypatch):
+    app.config["AUDIT_INCLUDE_PII"] = False
+    monkeypatch.setitem(app.config["SESSION_AUGMENTATION_PROVIDERS"], "test", _IdentitiesProvider(FEDERATED))
+    with app.app_context():
+        fields = audit_identity_snapshot(USERINFO, "test")
+    assert fields == {**audit_identity(USERINFO, "test"), "identity_provider": "upstream-a.example"}
+
+
+def test_snapshot_omits_identity_provider_when_none_is_marked(app, monkeypatch):
+    unmarked = {k: {"provider": v["provider"]} for k, v in FEDERATED.items()}
+    monkeypatch.setitem(app.config["SESSION_AUGMENTATION_PROVIDERS"], "test", _IdentitiesProvider(unmarked))
+    with app.app_context():
+        assert "identity_provider" not in audit_identity_snapshot(USERINFO, "test")
