@@ -116,6 +116,10 @@ class DerivaErmrestSessionAugmentationProvider(DefaultSessionAugmentationProvide
 
     AUGMENTED_KEY = "deriva_ermrest_augmented"
     ALLOWED_CLAIMS = ("roles", "groups")
+    # Sent on every lookup so ERMrest records it as the request's dcctx. The
+    # lookups run with the user's session key and so log as the user; this
+    # marks them as Credenza's own requests rather than the user's activity.
+    CLIENT_CONTEXT = '{"cid":"credenza"}'
     PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
     def enrich_userinfo(self, userinfo, additional_tokens):
@@ -219,7 +223,8 @@ class DerivaErmrestSessionAugmentationProvider(DefaultSessionAugmentationProvide
         try:
             resp = requests.get(url,
                                 headers={"Authorization": f"Bearer {auth}",
-                                         "Accept": "application/json"},
+                                         "Accept": "application/json",
+                                         "Deriva-Client-Context": self.CLIENT_CONTEXT},
                                 timeout=params.get("ermrest_timeout", 5),
                                 verify=not params.get("ermrest_bypass_cert_verify", False))
             resp.raise_for_status()

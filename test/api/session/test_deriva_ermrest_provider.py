@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import json
 import pytest
 import requests
 from types import SimpleNamespace
@@ -123,6 +124,16 @@ def test_uses_user_session_key_and_encoded_client_id(app, provider, responses):
     assert "user=https%3A%2F%2Fsts.nih.gov%2Fabc123/s:role" in call["url"]
     assert call["timeout"] == 5
     assert call["verify"] is True
+
+
+def test_lookups_identify_credenza_in_client_context(app, provider, responses):
+    """ERMrest logs the request's Deriva-Client-Context, so log readers can tell Credenza's own
+    lookups (which carry the user's identity) from the user's activity."""
+    enrich(app, provider, userinfo(), session_key="the-user-key")
+
+    assert len(responses.calls) == 2
+    for call in responses.calls:
+        assert json.loads(call["headers"]["Deriva-Client-Context"]) == {"cid": "credenza"}
 
 
 def test_encoding_keeps_hostile_sub_a_single_literal(app, provider, responses):
