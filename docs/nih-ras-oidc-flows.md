@@ -299,8 +299,9 @@ the very end (Sec. 3.4):
      `tag:<host>,2026:role/Member`. ERMrest and hatrac match ACLs against these principals.
    - A failed query contributes no roles (fail closed), and the other queries still apply.
 
-   Roles are recomputed only when a `PUT /session` triggers an upstream refresh. A browser USER
-   session holds no RAS refresh token, so its roles are fixed for the life of the session.
+   A browser USER session holds no RAS refresh token, so its roles are fixed for the life of the
+   session. A DEVICE session's roles are recomputed after each automatic token refresh by the
+   background worker, and on an explicit `PUT /session?refresh_upstream=true` (Sec. 4.3).
 
 ### 3.4 Step 3 -- session delivery (where A1 and A2 diverge)
 
@@ -561,9 +562,19 @@ evicts the session immediately on a terminal OAuth error (`invalid_grant`, `inva
 any kind, emitting a `session_evicted_refresh_failures` audit event. The user must then
 re-authenticate.
 
-The worker refreshes tokens only; it does not re-run session augmentation. A DEVICE session's
-ERMrest roles therefore change only when a `PUT /session` triggers an upstream refresh, or at
-the next login.
+After each successful token refresh, the worker re-runs session augmentation, so a DEVICE
+session that logged in with automatic refresh picks up role changes on the refresh cycle (about
+every 30 minutes for RAS). Other DEVICE sessions pick them up on an explicit
+`PUT /session?refresh_upstream=true`, which a batch or ETL client can send before a bulk task, or
+at their next login.
+
+In legacy mode every `PUT /session` refreshes the session's tokens when they are due, as it did
+before the `refresh_upstream` parameter existed, but only an explicit `refresh_upstream=true` re-runs
+augmentation. The ERMrest role queries go to ERMrest with the user's own session key, and on a
+cache miss for that key ERMrest's session proxy sends `PUT /session` for the same session. If
+every `PUT` re-ran augmentation, that proxy `PUT` would re-run the role queries from inside the
+outer one. Augmentation always runs with the session lock released, and its result is merged into
+a freshly read session under the lock.
 
 ### 4.4 Step 3 -- `POST /token` (`grant_type=urn:ietf:params:oauth:grant-type:device_code`)
 
@@ -811,34 +822,35 @@ Credenza session and to what that session did:
 
 **Session attributes (ADR-0012).** When the realm's profile declares `audit_attributes`, a
 `session_attributes_updated` event records the role principals its selectors pick from the session. It is
-written at login after deferred augmentation, and again when an upstream refresh changes the
-selection or an augmentation source fails. A session's permissions at time T are those in its
+written at login after deferred augmentation, and again when a worker refresh or an explicit
+`refresh_upstream=true` re-runs augmentation and the selection changed or a source failed. A session's permissions at time T are those in its
 latest `session_attributes_updated` record at or before T.
 
 ---
 
 ## 8. Compliance / compatibility matrix
 
-| Requirement                                                     | Mechanism in Credenza                                                                                                                                                    | Reference                                              |
-|-----------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
-| OIDC Discovery (no hardcoded endpoints)                         | RAS `discovery_url` fetched at startup                                                                                                                                   | `oidc_idp_profiles.json`                               |
-| PKCE on the RP<->OP leg                                         | `create_authorization_url(use_pkce=True)`; `code_verifier` per login                                                                                                     | `rest/login.py`, `rest/authorize.py`, `rest/device.py` |
-| PKCE on the client<->AS leg (S256, required for public clients) | `/authorize` validation + `verify_pkce` at `/token`                                                                                                                      | `rest/authorize.py`, `rest/token.py`                   |
-| Single-use authorization codes                                  | `set_authorization_code(ttl=300)` + atomic `consume_authorization_code`                                                                                                  | `rest/login.py`, `session_store.py`                    |
-| Replay protection (read-and-delete)                             | `GETDEL` / `DELETE ... RETURNING` per backend                                                                                                                            | `storage/backends/*`                                   |
-| Nonce binding                                                   | generated per login, validated in `validate_id_token`                                                                                                                    | `rest/login.py`, `rest/device.py`                      |
-| Assurance enforcement (IAL2 + AAL2)                             | `required_acr` + `check_acr`; `403` on shortfall                                                                                                                         | `api/common/util.py`                                   |
-| Exact redirect-URI matching                                     | `allowed_redirect_uris` at `/authorize`; re-checked at `/token`                                                                                                          | `rest/authorize.py`, `rest/token.py`                   |
-| RAS identity claims                                             | `federated_identities_ial2` scope + UserInfo fallback + `RasSessionAugmentationProvider`                                                                                 | `ras_provider.py`                                      |
-| Device grant (RFC 8628)                                         | `device_code`/`user_code`, `interval`, `slow_down`, `authorization_pending`, `expired_token`                                                                             | `rest/device.py`, `rest/token.py`                      |
-| No upstream token leakage                                       | downstream bearer = opaque Credenza session key                                                                                                                          | `rest/token.py`                                        |
-| No upstream claim passthrough                                   | `GET /session` and `POST /introspect` render a fixed identity model (`session_identity_claims`); introspection extras only via per-client `introspection_include_claims` | `rest/session.py`, `rest/introspect.py`                |
-| GA4GH Passport                                                  | `ga4gh_passport_v1` requested; Passport stored server-side, not interpreted, never returned or logged                                                                    | `oidc_idp_profiles.json`, `rest/introspect.py`         |
-| Authentication-to-session traceability                          | RAS `txn` + `session_id` + identity snapshot on `login` / `device_login`; `txn` on `userinfo_fetched` and refreshes                                                      | `rest/login.py`, `rest/device.py`, `telemetry/audit/`  |
-| Catalog-held roles                                              | `RasDerivaErmrestSessionAugmentationProvider` role queries (deferred augmentation) add ACL principals to `roles`                                                         | `deriva_provider.py`                                   |
-| Session cookie hardening (A1)                                   | cookie holds only the opaque session key (no RAS tokens/claims); `HttpOnly`, `Secure`, `SameSite=Lax`; tokens held server-side (AES-GCM at rest)                         | `rest/login.py`                                        |
-| Token revocation peculiarity                                    | `skip_token_revocation` (RAS has no standard RFC 7009 endpoint)                                                                                                          | `oidc_idp_profiles.json`                               |
-| Refresh rotation + dead-grant eviction                          | rotated refresh token persisted each cycle; worker evicts on terminal OAuth error or after `MAX_REFRESH_FAILURES` (`session_evicted_refresh_failures`)                   | `refresh/refresh_worker.py`, `api/common/util.py`      |
+| Requirement                                                     | Mechanism in Credenza                                                                                                                                                                                                         | Reference                                                                             |
+|-----------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| OIDC Discovery (no hardcoded endpoints)                         | RAS `discovery_url` fetched at startup                                                                                                                                                                                        | `oidc_idp_profiles.json`                                                              |
+| PKCE on the RP<->OP leg                                         | `create_authorization_url(use_pkce=True)`; `code_verifier` per login                                                                                                                                                          | `rest/login.py`, `rest/authorize.py`, `rest/device.py`                                |
+| PKCE on the client<->AS leg (S256, required for public clients) | `/authorize` validation + `verify_pkce` at `/token`                                                                                                                                                                           | `rest/authorize.py`, `rest/token.py`                                                  |
+| Single-use authorization codes                                  | `set_authorization_code(ttl=300)` + atomic `consume_authorization_code`                                                                                                                                                       | `rest/login.py`, `session_store.py`                                                   |
+| Replay protection (read-and-delete)                             | `GETDEL` / `DELETE ... RETURNING` per backend                                                                                                                                                                                 | `storage/backends/*`                                                                  |
+| Nonce binding                                                   | generated per login, validated in `validate_id_token`                                                                                                                                                                         | `rest/login.py`, `rest/device.py`                                                     |
+| Assurance enforcement (IAL2 + AAL2)                             | `required_acr` + `check_acr`; `403` on shortfall                                                                                                                                                                              | `api/common/util.py`                                                                  |
+| Exact redirect-URI matching                                     | `allowed_redirect_uris` at `/authorize`; re-checked at `/token`                                                                                                                                                               | `rest/authorize.py`, `rest/token.py`                                                  |
+| RAS identity claims                                             | `federated_identities_ial2` scope + UserInfo fallback + `RasSessionAugmentationProvider`                                                                                                                                      | `ras_provider.py`                                                                     |
+| Device grant (RFC 8628)                                         | `device_code`/`user_code`, `interval`, `slow_down`, `authorization_pending`, `expired_token`                                                                                                                                  | `rest/device.py`, `rest/token.py`                                                     |
+| No upstream token leakage                                       | downstream bearer = opaque Credenza session key                                                                                                                                                                               | `rest/token.py`                                                                       |
+| No upstream claim passthrough                                   | `GET /session` and `POST /introspect` render a fixed identity model (`session_identity_claims`); introspection extras only via per-client `introspection_include_claims`                                                      | `rest/session.py`, `rest/introspect.py`                                               |
+| GA4GH Passport                                                  | `ga4gh_passport_v1` requested; Passport stored server-side, not interpreted, never returned or logged                                                                                                                         | `oidc_idp_profiles.json`, `rest/introspect.py`                                        |
+| Authentication-to-session traceability                          | RAS `txn` + `session_id` + identity snapshot on `login` / `device_login`; `txn` on `userinfo_fetched` and refreshes                                                                                                           | `rest/login.py`, `rest/device.py`, `telemetry/audit/`                                 |
+| Catalog-held roles                                              | `RasDerivaErmrestSessionAugmentationProvider` role queries (deferred augmentation) add ACL principals to `roles`                                                                                                              | `deriva_provider.py`                                                                  |
+| Session cookie hardening (A1)                                   | cookie holds only the opaque session key (no RAS tokens/claims); `HttpOnly`, `Secure`, `SameSite=Lax`; tokens held server-side (AES-GCM at rest)                                                                              | `rest/login.py`                                                                       |
+| Token revocation peculiarity                                    | `skip_token_revocation` (RAS has no standard RFC 7009 endpoint)                                                                                                                                                               | `oidc_idp_profiles.json`                                                              |
+| Refresh rotation + dead-grant eviction                          | rotated refresh token persisted each cycle; worker evicts on terminal OAuth error or after `MAX_REFRESH_FAILURES` (`session_evicted_refresh_failures`)                                                                        | `refresh/refresh_worker.py`, `api/common/util.py`                                     |
+| Concurrent refresh safety                                       | per-session locks serialize refresh, extension and delete, so a rotated refresh token is never spent twice; augmentation runs with the lock released; a deleted session is never written back (`update_session` orphan guard) | `api/session/storage/session_lock.py`, `refresh/refresh_worker.py`, `rest/session.py` |
 
 ---
 

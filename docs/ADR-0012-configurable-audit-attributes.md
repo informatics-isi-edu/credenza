@@ -2,15 +2,15 @@
 
 ## 1. Status
 
-**Proposed**
-Decision Date: 2026-11-16
+**Accepted**
+Decision Date: 2026-11-19
 
 ### Review History
 
 | Date       | Status   | Notes                                                                                               |
 |------------|----------|-----------------------------------------------------------------------------------------------------|
 | 2026-11-16 | Proposed | Initial draft                                                                                       |
-| 2026-11-19 | Proposed | Implemented on `ras_compat`; `complete` / `failed_sources` and the refresh trigger revised to match |
+| 2026-11-19 | Accepted | Implemented on `ras_compat` (`af7d8b7`); `complete` / `failed_sources` and the refresh trigger revised to match |
 
 ---
 
@@ -27,7 +27,7 @@ joins back to it through `session_id`. The log does not answer the second questi
 In DERIVA deployments, permissions reach the resource servers as session attributes. The realm's
 augmentation provider adds groups and roles to the session's userinfo, and ERMrest and hatrac
 match ACLs against those principal strings. For example, `DerivaErmrestSessionAugmentationProvider`
-runs configured ERMrest queries at login and on each upstream refresh, and adds principals such as
+runs configured ERMrest queries at login and whenever augmentation re-runs, and adds principals such as
 `tag:example.org,2026:role/Curator` or `tag:example.org,2026:grant/1-ABC2`.
 
 None of these values is written to the audit log. The ERMrest and hatrac request logs record only
@@ -52,8 +52,9 @@ an authorization trail during an incident, need these values in the audit log.
   created, so these providers set `defer_augmentation: true`, and their lookup runs after the
   session is created and the `login` event has been written. The `login` event, and the identity
   snapshot it carries, therefore cannot include the roles.
-- **Attributes change during a session.** `PUT /session` with an upstream refresh calls the
-  provider's `enrich_userinfo` again. The role set can differ before and after that call.
+- **Attributes change during a session.** Augmentation re-runs after the background worker
+  refreshes a device session's tokens, and on an explicit `PUT /session?refresh_upstream=true`.
+  The role set can differ before and after.
 - **Volume and PII.** The audit log writes a user's personal information (name, email) only once
   per authentication, on the login event, and `CREDENZA_AUDIT_INCLUDE_PII` can turn even that off.
   Attribute logging should be equally sparing: write the values when they are first established
@@ -167,11 +168,10 @@ nobody notices until an investigation.
   `device_login` event. By then the session exists and augmentation has finished, including any
   deferred lookup. The event is written even when nothing is selected, because "held nothing" is
   worth recording.
-- **Refresh.** When `PUT /session` refreshes the session from the IdP, augmentation runs again.
-  Credenza computes the selection just before and just after it, within the same request, so
-  nothing extra is stored. The event is written only if the selection changed or a source failed.
-  A refresh that changes nothing writes nothing, since `session_updated` already records that the
-  refresh happened.
+- **Refresh.** Augmentation re-runs after the refresh worker refreshes a device session's tokens,
+  and on an explicit `PUT /session?refresh_upstream=true`. Credenza computes the selection just
+  before and just after, so nothing extra is stored. The event is written only if the selection
+  changed or a source failed. A re-run that changes nothing writes nothing.
 - **Logout and expiry.** No event is written. The session's last `session_attributes_updated` record
   stands until the session ends.
 
@@ -217,10 +217,9 @@ and it is out of scope.
 2. **Derived sessions (token exchange).** A DERIVED session inherits its parent's userinfo. Should
    its creation write a `session_attributes_updated` record of its own, or is the parent's record enough,
    given the exchange event links the two sessions?
-3. **Refresh worker.** The background refresh worker refreshes tokens but does not re-run
-   augmentation, so it writes no `session_attributes_updated` events. That is consistent with this design,
-   but a deployment relying on long device sessions should know that attribute changes appear only
-   on `PUT /session` refresh or at the next login.
+3. **Sessions without automatic refresh.** The refresh worker re-runs augmentation only for
+   device sessions it refreshes. A device session that did not opt into automatic refresh picks up
+   attribute changes only on an explicit `refresh_upstream=true` or at its next login.
 4. **Value cap default.** 100 values per field is a guess; the right default depends on observed
    role counts.
 

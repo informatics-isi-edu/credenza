@@ -23,7 +23,8 @@ the "legacy" surface that are genuinely valuable.
   document instead of the modern shape.
 - Identities flatten to a list of id strings (`session.py:303`) unless `LEGACY_IDENTITY_DETAIL`;
   `client.id` is the `iss/sub` composite (`session.py:290`).
-- `GET /session` forces `refresh_upstream=True` (`session.py:60`).
+- `PUT /session` refreshes upstream tokens when due, as if `refresh_upstream=true` were passed,
+  but does not re-run augmentation.
 
 The modern shape already exists (`session.py:314-362`): `preferred_username`, `full_name`,
 `email`, `email_verified`, `sub`, `iss`, `aud`, `id`, `userid`, `groups`, `roles`,
@@ -198,9 +199,11 @@ The migration must keep the ACL-relevant id strings unchanged where continuity i
 
 ## 6. Open questions
 
-- **`refresh_upstream` semantics.** Legacy forces `refresh_upstream=True` on every `/session`
-  (`session.py:60`). Do modern consumers want always-live semantics, or explicit opt-in? Affects
-  upstream load/latency.
+- **Target end state.** Section 7 collects strategies for what replaces the legacy session lookup,
+  extension and authorization model; it is the working space for choosing among them.
+- **`refresh_upstream` semantics.** Legacy makes every `PUT /session` refresh upstream tokens when
+  they are due; augmentation re-runs only on an explicit `refresh_upstream=true`. Do modern
+  consumers want always-live token semantics, or explicit opt-in? Affects upstream load/latency.
 - **`LEGACY_IDENTITY_DETAIL`** -- does any consumer need the flat-list identity form, or can the
   modern `identities` map be the single representation from the start?
 - **Cookie name.** Keep `webauthn` during transition (since we keep the flow), or decouple cookie
@@ -208,3 +211,133 @@ The migration must keep the ACL-relevant id strings unchanged where continuity i
 - **Group/role provenance.** Are DERIVA groups sourced from the IDP `groups` claim or a separate
   DERIVA groups service? Determines whether group-id continuity is a Credenza concern at all.
 - **Deprecation window** length for the legacy block, and whether it is per-deployment.
+
+---
+
+## 7. Target end state after legacy mode (strategies under discussion)
+
+This section is a working space for strategies, not decisions. It describes where the session
+contract could end up once `ENABLE_LEGACY_API` and the webauthn2-era consumers are gone, so the
+phasing above has a destination to aim at. Each strategy lists what it would remove, what it would
+cost and what is still open. Nothing here is settled.
+
+### 7.1 Why the current design is convoluted
+
+Four properties of the legacy contract force most of the complexity in Credenza's session code
+today:
+
+1. **Session lookup is a write.** Resource servers (ERMrest, hatrac) identify a caller through the
+   webauthn2 session proxy, which sends `PUT /authn/session`. That both returns the session and
+   extends it, and in legacy mode also refreshes upstream tokens when due. The most frequent
+   request Credenza serves is therefore a read-modify-write on the session record. That is why
+   device-session `PUT`s need a per-session lock, a 2-second wait cap and a no-write fallback.
+2. **Authorization data lives in the resource server that needs it.** Role and access-grant
+   principals are computed by querying ERMrest with the user's own session key, while ERMrest may
+   itself be in the middle of asking Credenza who the user is. On a cache miss ERMrest's proxy
+   sends `PUT /authn/session` for the same session, so re-running augmentation on every lookup
+   would recurse. Today that is avoided by re-running augmentation only on an explicit
+   `refresh_upstream=true` or after a worker token refresh, and always outside the session lock.
+3. **Authorization is a snapshot frozen into the session.** Principals are copied into the session
+   at login and on refresh, so revoking a grant takes effect only when the snapshot is recomputed:
+   about 30 minutes for automatically refreshed device sessions, and not until the session ends
+   for browser sessions (up to 24 hours).
+4. **The legacy document shape is the contract.** The `client` / `attributes` block, the flattened
+   identities list and the `webauthn` cookie name all exist for compatibility.
+
+### 7.2 Strategies
+
+#### A. Read-only lookup for resource servers
+
+Resource servers stop extending sessions as a side effect of identifying the caller.
+
+- **A1. RFC 7662 introspection.** ERMrest and hatrac register as Credenza clients and call
+  `POST /introspect`, caching the answer briefly. Introspection never extends a session, refreshes
+  tokens or re-runs augmentation, so the frequent path is a pure read: no writes, no locks, no
+  calls to ERMrest or the IdP. The response already carries Credenza's identity model, including
+  `roles` and `groups`. Adding a `sid` claim (the OIDC name for a session id, not a credential)
+  would give resource servers the log-correlation key directly, replacing the `tracking` field.
+  - Cost: each resource server needs client credentials, and its session client library changes
+    from parsing `/session` to parsing introspection. It also departs from section 3's
+    single-`/session` approach, so the two would need reconciling.
+- **A2. Read-only `GET /session`.** Keep `/session` as the lookup (consistent with section 3), but
+  the modern session client library sends `GET`, which never writes. Extension then has to happen
+  elsewhere (strategy B).
+  - Cost: a smaller consumer change than A1, but `/session` keeps serving two audiences, browsers
+    and resource servers, with different needs.
+- Open: whether the resource-server cache TTL (60 s today) is acceptable as the effective
+  revocation delay once the hot path no longer writes.
+
+#### B. Explicit session extension
+
+If lookups stop extending sessions, something else must.
+
+- **Browser sessions:** Chaise extends its own session from user activity, rate-limited (the
+  cookie login flow is kept, per decision #1).
+- **Device sessions:** drop sliding expiry in favour of a fixed absolute lifetime plus the
+  worker's refresh cycle, so nothing needs to extend them on use.
+- Effect: with A and B together, the per-session lock is needed only around refresh and delete,
+  both of which are infrequent.
+- Open: whether any consumer relies on a session staying alive purely because a resource server
+  keeps looking it up (for example long-running server-side jobs holding a user's token).
+
+#### C. Authorization data from a source that does not depend on Credenza
+
+- **C1. Credenza computes principals with its own credential.** Augmentation queries the role and
+  access-grant tables using a Credenza service identity with a narrow, read-only grant, instead of
+  the user's session key. Recursion becomes impossible by construction, and augmentation no longer
+  needs a live user session.
+  - Cost: a new trust edge. Credenza reads authorization tables directly, and the scope of that
+    grant has to be defined and reviewed per deployment.
+- **C2. Push instead of poll.** A change to a role binding or access grant triggers recomputing or
+  invalidating the affected sessions: an event from ERMrest, or a periodic diff of the source
+  tables. Revocation then reaches open sessions within seconds, not on the next refresh.
+  - Cost: needs a change feed or diffing mechanism, and a way to map a changed grant to the
+    sessions it affects.
+- C1 and C2 combine: C1 removes the recursion, C2 removes the revocation delay.
+- Open: C1 or C2 first; and whether C2 should target only revocations (the security-relevant
+  direction) while grants keep arriving on the normal refresh cycle.
+
+#### D. Evaluate some authorization inside the resource server
+
+ERMrest's dynamic ACL bindings can decide membership at request time by joining the client id to
+role or access-grant tables, so a grant change applies on the next request with no session
+principal at all.
+
+- Limits: hatrac ACLs are static principal lists, so file access would still need principals
+  carried in the session. D can complement C but not replace it.
+- Cost: moves policy into catalog ACL configuration, and makes each request's authorization
+  depend on query cost.
+- Open: how far dynamic bindings can express the access rules deployments actually use.
+
+#### E. One session document
+
+The modern document only: the `identities` map rather than the flattened list, linked identities
+never treated as ACL principals, the cookie name decoupled from `webauthn`, and no
+`refresh_upstream` overloading of the lookup.
+
+- This is the end point of the phasing in section 5; it is listed here so the other strategies can
+  assume it.
+
+#### F. Scaling beyond one process
+
+The session locks are in-process and assume a single Credenza process. With A and B the frequent
+path no longer takes them, so only refresh and delete would need a store-provided lease (for
+example `SET NX` on Redis/Valkey or an advisory lock on PostgreSQL) to run several processes or
+hosts against a shared store.
+
+- Open: whether horizontal scaling is a real requirement; today it is not expected.
+
+### 7.3 What the end state would remove
+
+- the legacy forced upstream refresh on every `PUT /session`;
+- the lock, 2-second cap and no-write fallback on the frequent lookup path;
+- the out-of-lock re-augmentation (`reaugment_session`) and the recursion risk it guards against;
+- the `tracking` field as a log-correlation workaround;
+- most of the revocation delay for open sessions.
+
+### 7.4 Open questions for this section
+
+- A1 or A2 for resource-server lookup, and how either fits section 3's single-`/session` approach.
+- Whether a Credenza service identity reading authorization tables (C1) is acceptable in
+  principle, or the end state should lean on push from the catalog (C2).
+- Which of these can ride on the phasing in section 5 and which need their own phases.

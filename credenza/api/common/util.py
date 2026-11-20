@@ -22,7 +22,8 @@ import requests
 from datetime import datetime, timezone
 from requests.adapters import HTTPAdapter
 from typing import Iterable, Optional, Set, Tuple, List, Dict, Union
-from flask import current_app, request, abort
+import copy
+from flask import current_app, request, abort, g
 from urllib3.util import Retry
 from urllib.parse import urlparse
 from requests import HTTPError, Timeout, ConnectionError
@@ -31,6 +32,7 @@ from ..session.storage.session_lock import session_lock
 from ..auth.oidc_client import DEFAULT_IDP_HTTP_TIMEOUT
 from ..session.augmentation.base_provider import EnrichmentResult
 from ...telemetry import audit_event, audit_identity
+from ...telemetry.audit.attributes import audit_session_attributes, select_session_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +163,10 @@ TERMINAL_REFRESH_ERRORS = frozenset({"invalid_grant", "invalid_client", "unautho
 
 # Margin, in seconds, added to a delete's wait for an in-flight refresh (see delete_lock_wait).
 DELETE_LOCK_WAIT_MARGIN = 5
+
+# Seconds a short critical section (a session extension, or merging re-augmented claims) waits for a
+# session lock before giving up and leaving the stored session as it is.
+SHORT_LOCK_WAIT = 2
 
 
 def _record_refresh_failure(session, exc) -> None:
@@ -317,6 +323,52 @@ def revoke_tokens(sid, session):
                 audit_event("refresh_token_revoked", session_id=sid, **identity, realm=realm, scope=k)
     except Exception as e:
         logger.warning(f"Exception during token revocation: {e}")
+
+
+def reaugment_session(sid, realm, lock_timeout: float = SHORT_LOCK_WAIT) -> Optional[SessionData]:
+    """Re-run the realm's augmentation for an existing session and persist the result.
+
+    Augmentation can call a resource server as the user (the ERMrest role provider does), and that
+    server looks the session up with PUT /session, which takes this session's lock. So the provider
+    runs on a copy of the session's claims with no lock held, and the lock is taken only to merge
+    the result into a freshly read session and write it. Writes a session_attributes_updated event
+    (trigger "refresh") when the realm selects attributes and they changed or a source failed.
+
+    Returns the written session, or None if the session is gone or the lock was not had within
+    lock_timeout seconds (the stored session is then left as it was).
+    """
+    store = current_app.config["SESSION_STORE"]
+    session = store.get_session_data(sid)
+    session_key = store.get_session_key_for_session_id(sid) if session else None
+    if not session or not session_key:
+        return None
+
+    before, _ = select_session_attributes(session.userinfo, realm)
+    userinfo = copy.deepcopy(session.userinfo)
+    provider = get_augmentation_provider(realm)
+    # providers that query as the user read the session key from g
+    had_key, previous_key = hasattr(g, "session_key"), getattr(g, "session_key", None)
+    g.session_key = session_key
+    try:
+        enrichment = provider.enrich_userinfo(userinfo, session.additional_tokens)
+    finally:
+        if had_key:
+            g.session_key = previous_key
+        else:
+            g.pop("session_key", None)
+
+    with session_lock(sid, timeout=lock_timeout) as locked:
+        if not locked:
+            logger.info(f"Session lock for {sid} busy; re-augmented claims not saved this time")
+            return None
+        fresh = store.get_session_data(sid)
+        if not fresh:
+            return None
+        fresh.userinfo = userinfo
+        _, written = store.update_session(sid, fresh)
+    if written is not None:
+        audit_session_attributes(sid, userinfo, realm, trigger="refresh", enrichment=enrichment, before=before)
+    return written
 
 
 def delete_lock_wait(realm) -> float:

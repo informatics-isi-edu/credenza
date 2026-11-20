@@ -235,12 +235,16 @@ Behavior:
     - `token_type`: `"Bearer"`
     - `expires_in`: remaining seconds in the session
 
-#### Device logout: `POST /authn/device/logout`
-- Uses `get_current_session()` to resolve session from bearer or cookie.
-- Confirms the session is a device session via `session_type == DEVICE` (returns 403 otherwise).
-- Revokes upstream tokens (if user session; service sessions are skipped in `revoke_tokens`).
-- Deletes the session from the store.
-- Returns `{"status": "logged out"}`.
+#### Device logout: `POST /authn/revoke` (RFC 7009)
+Device clients end their session with standard token revocation. There is no device-specific
+logout endpoint.
+
+- Form body: `token=<session_key>` and `client_id=<client_id>`. Public clients such as deriva-py
+  send only those two fields; confidential clients also authenticate.
+- Revokes the session's upstream tokens (unless the realm sets `skip_token_revocation`), then
+  deletes the session. If a background refresh of the session is in flight, the revocation waits
+  for it, so the current tokens are the ones revoked.
+- Returns HTTP 200 whether or not the token was valid (RFC 7009 sec. 2.2).
 
 ### 4.2 Device-session metadata
 
@@ -298,17 +302,22 @@ On success:
 
 > User sessions **skip** all audience checks here because the OIDC login flow already validated the token issuance context.
 
-### 5.4 User-session refresh rules on PUT
+### 5.4 Session refresh rules on PUT
 
-For **user** sessions, PUT `/authn/session` may:
-- enforce refresh-token lifetime (`refresh_expires_at`) and hard-expire sessions near expiry,
-- refresh the upstream access token (if `refresh_upstream=true` or legacy mode forces it),
+For **user and device** sessions, PUT `/authn/session` may enforce the absolute lifetime and
+hard-expire a session near it.
+
+For **device** sessions only (the only type that holds an upstream refresh token), it may also:
+- refresh the upstream access token when it is due (if `refresh_upstream=true`, or always in
+  legacy mode),
 - refresh any additional tokens with refresh tokens,
-- re-enrich userinfo via the session augmentation provider.
+- re-enrich userinfo via the session augmentation provider (only on an explicit
+  `refresh_upstream=true`).
 
 Key toggles:
-- `ENABLE_LEGACY_API`: forces upstream refresh behavior and changes response shape.
-- `refresh_upstream` query param: controls upstream refresh attempt (best-effort).
+- `ENABLE_LEGACY_API`: makes every PUT refresh upstream tokens when due, and changes the response
+  shape. It does not re-run augmentation.
+- `refresh_upstream` query param: refreshes upstream tokens when due and re-runs augmentation.
 
 ### 5.5 `/authn/session` PATCH
 Allows patching session metadata tags (user-scope tags) via JSON dict.

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from .helpers import make_json_response, perf_logged
 from ..telemetry import audit_event, audit_identity
-from ..telemetry.audit.attributes import audit_session_attributes, select_session_attributes
+from ..api.session.storage.session_lock import session_lock
 from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
 from ..api.session.storage.session_store import SessionData, SessionType
 from ..api.common.util import (
@@ -32,6 +32,8 @@ from ..api.common.util import (
     refresh_additional_tokens,
     revoke_tokens,
     end_session,
+    reaugment_session,
+    SHORT_LOCK_WAIT,
     strtobool
 )
 
@@ -57,11 +59,16 @@ def whoami():
 def get_session():
 
     try:
-        upstream = strtobool(str(request.args.get("refresh_upstream", False)))
+        explicit_upstream = strtobool(str(request.args.get("refresh_upstream", False)))
     except ValueError:
-        upstream = False
-    if current_app.config.get("ENABLE_LEGACY_API", False):
-        upstream = True
+        explicit_upstream = False
+    # Legacy consumers (webauthn2 session proxies) cannot pass refresh_upstream, so in legacy mode
+    # every PUT refreshes upstream tokens when they are due, as PUT did before the parameter existed.
+    # Augmentation re-runs only on an explicit refresh_upstream=true. The ERMrest role provider
+    # queries ERMrest with the user's own session key, and on a cache miss for that key ERMrest's
+    # session proxy sends PUT /session for this same session; re-running augmentation on every PUT
+    # would have that proxy PUT re-run the role queries from inside this one.
+    upstream = explicit_upstream or bool(current_app.config.get("ENABLE_LEGACY_API", False))
 
     sid, session = get_current_session()
     store = current_app.config["SESSION_STORE"]
@@ -144,67 +151,87 @@ def get_session():
             )
 
     if request.method == "PUT":
-
-        if session.is_service() or session.is_derived():
-            max_ttl = session.session_ttl
-            now_i = int(now)
-
-            # Clamp final expiry to session.session_ttl if configured.
-            # Derived sessions are non-extendable by design; so we allow a PUT on a derived session
-            # to receive a valid session response without triggering the can_extend() guard.
-            if max_ttl > 0:
-                cap = now_i + max_ttl
-                if session.expires_at > cap:
-                    session.expires_at = cap
-                    session.session_ttl = 0  # do not extend expires_at in update_session()
-                    audit_event(
-                        "service_session_ttl_clamped",
-                        session_id=sid,
-                        realm=realm,
-                        clamped_expires_at=datetime.fromtimestamp(cap, timezone.utc).isoformat(),
-                        max_session_ttl_seconds=max_ttl)
+        if session.is_device():
+            # Device sessions are refreshed upstream, by this request or the background worker,
+            # so extend them under the session lock: a copy read before a concurrent refresh must
+            # not overwrite its rotated tokens. Wait only briefly; this is the frequent path for
+            # every session proxy. If the lock is busy, answer with the session as stored.
+            with session_lock(sid, timeout=SHORT_LOCK_WAIT) as locked:
+                if not locked:
+                    logger.info(f"Session lock for {sid} busy; returning session without extending it")
+                    return make_json_response(make_session_response(sid, session))
+                session = store.get_session_data(sid)
+                if session is None:
+                    abort(404, "session not found")
+                _extend_session(sid, session, upstream, now, identity, realm, store)
         else:
-            if not session.can_extend():
-                audit_event("session_not_extendable",
-                            session_id=sid,
-                            **identity,
-                            realm=realm,
-                            expires_at=datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat())
-                abort(403, "session cannot be extended")
+            _extend_session(sid, session, upstream, now, identity, realm, store)
 
-            # enforce max refreshable lifetime for user sessions
-            session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
-            absolute_expires_at = session.absolute_expires_at
-            if absolute_expires_at and now > (absolute_expires_at - session_expiry_threshold):
-                revoke_tokens(sid, session)
-                store.delete_session(sid)
-                audit_event("session_absolute_lifetime_expired", session_id=sid, **identity, realm=realm)
-                abort(401, "session_absolute_lifetime_expired")
-
-            if upstream and session.can_refresh_upstream():
-                # Potentially refresh our access token from upstream, if we've got a refresh token to do so
-                refresh_access_token(sid, session)
-                # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
-                refresh_additional_tokens(sid, session)
-                # Enrich userinfo, if applicable, and record any change in the selected attributes
-                provider = get_augmentation_provider(realm)
-                before, _ = select_session_attributes(session.userinfo, realm)
-                enrichment = provider.enrich_userinfo(session.userinfo, session.additional_tokens)
-                audit_session_attributes(sid, session.userinfo, realm, trigger="refresh",
-                                         enrichment=enrichment, before=before)
-
-        skey, session_data = store.update_session(sid, session)
-        if session_data is None:
-            # The session was deleted (logout, revoke) while this request held a copy of it
-            abort(404, "session not found")
-        audit_event("session_updated",
-                    session_id=sid,
-                    **identity,
-                    realm=realm,
-                    expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat())
+        if explicit_upstream and session.can_refresh_upstream():
+            # Outside the lock: augmentation may call back into this endpoint for the same session.
+            session = reaugment_session(sid, realm) or session
 
     response = make_session_response(sid, session)
     return make_json_response(response)
+
+
+def _extend_session(sid, session: SessionData, upstream: bool, now: int, identity: dict, realm, store):
+    """Extend a session for PUT /session, refreshing upstream tokens when asked and due, and write it.
+
+    For device sessions the caller holds the session lock, so the absolute-lifetime delete below
+    deletes directly rather than through end_session(), which would try to take the same lock.
+    """
+    if session.is_service() or session.is_derived():
+        max_ttl = session.session_ttl
+        now_i = int(now)
+
+        # Clamp final expiry to session.session_ttl if configured.
+        # Derived sessions are non-extendable by design; so we allow a PUT on a derived session
+        # to receive a valid session response without triggering the can_extend() guard.
+        if max_ttl > 0:
+            cap = now_i + max_ttl
+            if session.expires_at > cap:
+                session.expires_at = cap
+                session.session_ttl = 0  # do not extend expires_at in update_session()
+                audit_event(
+                    "service_session_ttl_clamped",
+                    session_id=sid,
+                    realm=realm,
+                    clamped_expires_at=datetime.fromtimestamp(cap, timezone.utc).isoformat(),
+                    max_session_ttl_seconds=max_ttl)
+    else:
+        if not session.can_extend():
+            audit_event("session_not_extendable",
+                        session_id=sid,
+                        **identity,
+                        realm=realm,
+                        expires_at=datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat())
+            abort(403, "session cannot be extended")
+
+        # enforce max refreshable lifetime for user sessions
+        session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
+        absolute_expires_at = session.absolute_expires_at
+        if absolute_expires_at and now > (absolute_expires_at - session_expiry_threshold):
+            revoke_tokens(sid, session)
+            store.delete_session(sid)
+            audit_event("session_absolute_lifetime_expired", session_id=sid, **identity, realm=realm)
+            abort(401, "session_absolute_lifetime_expired")
+
+        if upstream and session.can_refresh_upstream():
+            # Potentially refresh our access token from upstream, if we've got a refresh token to do so
+            refresh_access_token(sid, session)
+            # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
+            refresh_additional_tokens(sid, session)
+
+    skey, session_data = store.update_session(sid, session)
+    if session_data is None:
+        # The session was deleted (logout, revoke) while this request held a copy of it
+        abort(404, "session not found")
+    audit_event("session_updated",
+                session_id=sid,
+                **identity,
+                realm=realm,
+                expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat())
 
 
 # @session_blueprint.route("/session", methods=["PATCH"])

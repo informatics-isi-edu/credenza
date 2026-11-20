@@ -95,6 +95,7 @@ token lifecycle across the deployment.
 * #### [ADR-0009: DERIVA Session Modernization](docs/ADR-0009-deriva-session-modernization.md) — retiring `ENABLE_LEGACY_API` axis by axis, migrating DERIVA consumers off the webauthn2-compatible session contract without a coordinated flag day
 * #### [ADR-0010: M2M Client Credential Provisioning CLI](docs/ADR-0010-credenza-manage-cli.md) — `credenza-manage` CLI that manages client registry entries (secret hashing included) and mints `client_credentials` tokens into deriva-py credential files, covering the standalone and CI test workflows `webauthn2-manage` supports today
 * #### [ADR-0011: Step-Up Role Assumption](docs/ADR-0011-step-up-role-assumption.md) — time-boxed assumption of privileged catalog roles after a fresh IdP re-authentication, instead of standing grants
+* #### [ADR-0012: Configurable Session Attributes in the Audit Log](docs/ADR-0012-configurable-audit-attributes.md) — per-realm selectors that write a session's role and permission principals to the audit log
 
 ### Project Status
 

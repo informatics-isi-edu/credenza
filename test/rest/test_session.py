@@ -164,6 +164,8 @@ def test_put_session_with_refresh_access_token(client,
 
     # Stub get_current_session -> (sid, sess)
     monkeypatch.setattr(sm,"get_current_session", lambda: (sid, sess))
+    # device PUTs re-read the session under its lock; serve the stubbed one
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
 
     # Stub out map_session
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
@@ -234,6 +236,8 @@ def test_put_session_refresh_records_changed_session_attributes(client, app, sto
     sess.refresh_token = "old_refresh_token"
     sess.userinfo["roles"] = ["tag:x,2026:grant/1-OLD"]
     monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    # device PUTs re-read the session under its lock; serve the stubbed one
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
     # the session is stubbed rather than created, so give it the key mapping a real one has
     monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
@@ -256,6 +260,7 @@ def test_put_session_refresh_records_changed_session_attributes(client, app, sto
             return {}
 
     monkeypatch.setattr(sm, "get_augmentation_provider", lambda realm: RoleProvider())
+    monkeypatch.setattr(um, "get_augmentation_provider", lambda realm: RoleProvider())
     events = []
     monkeypatch.setattr(aa, "audit_event", lambda e, **kw: events.append((e, kw)))
     app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
@@ -300,6 +305,8 @@ def test_put_session_with_refresh_access_token_failure(client,
 
     # Patch get_current_session
     monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    # device PUTs re-read the session under its lock; serve the stubbed one
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
 
     # Patch map_session
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
@@ -372,6 +379,10 @@ def test_put_session_additional_tokens_refresh(client,
 
     # Stub get_current_session so GET/PUT /session uses our SID and session
     monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    # device PUTs re-read the session under its lock; serve the stubbed one
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+    # this test covers dependent-token refresh; re-augmentation on refresh_upstream is tested separately
+    monkeypatch.setattr(sm, "reaugment_session", lambda sid, realm: None)
 
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
     # the session is stubbed rather than created, so give it the key mapping a real one has

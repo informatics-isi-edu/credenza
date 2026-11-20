@@ -142,8 +142,9 @@ typically role or permission principals added by the augmentation provider. It i
 
 - once at `login` / `device_login`, after augmentation (including deferred augmentation) has run,
   even when nothing was selected;
-- on a `PUT /session` upstream refresh, only when the selection changed or an augmentation source
-  failed.
+- when augmentation re-runs (after the refresh worker refreshes a device session's tokens, or on an
+  explicit `PUT /session?refresh_upstream=true`), only when the selection changed or an augmentation
+  source failed.
 
 | Field            | Meaning                                                                                         |
 |------------------|-------------------------------------------------------------------------------------------------|

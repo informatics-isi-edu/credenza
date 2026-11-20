@@ -75,6 +75,12 @@ def break_loop(monkeypatch):
     monkeypatch.setattr(time, "sleep", _sleep)
 
 @pytest.fixture(autouse=True)
+def no_reaugmentation(monkeypatch):
+    """These tests cover token refresh; re-augmentation after a refresh is covered separately."""
+    monkeypatch.setattr(rw, "reaugment_session", lambda sid, realm: None)
+
+
+@pytest.fixture(autouse=True)
 def mapped_sessions(store, monkeypatch):
     """Stubbed sessions are not created through the store, so give each one a key mapping;
     otherwise the worker treats it as an orphaned record and deletes it."""

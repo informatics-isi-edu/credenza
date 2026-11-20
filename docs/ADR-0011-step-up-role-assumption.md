@@ -25,8 +25,9 @@ external groups service. Two tables in the catalog's `public` schema hold them:
 - `ERMrest_Client_role`: binds an `ERMrest_Client.ID` (the user's `<iss>/<sub>` client id) to a
   role `Name`.
 
-Credenza's `DerivaErmrestSessionAugmentationProvider` reads these at login and on each upstream
-refresh, using the user's own session key, and adds each returned role to the session's `roles`
+Credenza's `DerivaErmrestSessionAugmentationProvider` reads these at login, after each automatic
+token refresh of a device session, and on an explicit `PUT /session?refresh_upstream=true`, using
+the user's own session key, and adds each returned role to the session's `roles`
 as a principal string such as `tag:example.org,2026:role/Member`. ERMrest then matches ACLs
 against those strings.
 
