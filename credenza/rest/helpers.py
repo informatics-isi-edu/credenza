@@ -244,6 +244,26 @@ def get_cookie_domain() -> Optional[str]:
     return None
 
 
+def set_auth_cache_headers(response, has_cookie, has_auth):
+    """
+    Force a private/no-store cache policy on any auth-bearing response.
+
+    Applies whenever the request carried a session cookie or an Authorization
+    header, since either can make the response vary per-principal; Vary
+    reflects whichever of the two was actually present.
+    """
+    if has_cookie or has_auth:
+        response.headers["Cache-Control"] = "private, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        vary = []
+        if has_cookie:
+            vary.append("Cookie")
+        if has_auth:
+            vary.append("Authorization")
+        response.headers["Vary"] = ", ".join(vary)
+    return response
+
+
 def is_browser_client(req):  # pragma: no cover
     accept = (req.headers.get("Accept") or "").lower()
     content_type = (req.headers.get("Content-Type") or "").lower()

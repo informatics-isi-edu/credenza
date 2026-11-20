@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Optional, Tuple
 from .backends.base import StorageBackend
 from .backends.memory import MemoryBackend
-from ....telemetry import audit_event
+from ....telemetry import audit_event, audit_identity
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +119,8 @@ class SessionData:
 
 
 class SessionStore:
-    def __init__(self, backend: StorageBackend = MemoryBackend(), ttl=2100, crypto_codec=None):
-        self.backend = backend
+    def __init__(self, backend: Optional[StorageBackend] = None, ttl=2100, crypto_codec=None):
+        self.backend = backend if backend is not None else MemoryBackend()
         self.ttl = ttl
         self.prefix = "credenza:"
         self.sid_prefix = "session:"
@@ -292,7 +292,7 @@ class SessionStore:
                 audit_event("session_deleted_absolute_lifetime_expired",
                             session_id=sid,
                             realm=session.realm,
-                            sub=session.userinfo.get("sub"),
+                            **audit_identity(session.userinfo, session.realm),
                             absolute_expires_at=cap)
             except Exception:
                 logger.exception(f"failed deleting session after absolute expiry for sid={sid}")
@@ -335,10 +335,14 @@ class SessionStore:
 
         session_key = self.get_session_key_for_session_id(session_id)
         if not session_key:
-            # mapping missing
-            logger.warning("Missing session key mapping for session_id=%s; not remapping", session_id)
-        else:
-            self.map_session(session_key, session_id, ttl)
+            # The key mapping and the record are created, renewed and deleted together, so a missing
+            # mapping means the session was deleted (logout, revoke) after this writer read it.
+            # Writing the record back would leave an orphan that no key reaches but that the refresh
+            # worker would keep refreshing upstream.
+            logger.warning("Refusing to write session %s: its key mapping is gone (session was deleted)",
+                           session_id)
+            return None, None
+        self.map_session(session_key, session_id, ttl)
 
         if self.crypto_codec:
             session_json = self.crypto_codec.encrypt(json.dumps(session_data.to_dict(), separators=(",", ":")))

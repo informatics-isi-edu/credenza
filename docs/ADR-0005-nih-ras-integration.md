@@ -83,7 +83,8 @@ three extension points:
 - `fetch_dependent_tokens(access_token, userinfo, ...)`: obtain additional
   tokens from the IDP (used by the Globus provider for dependent tokens).
 - `process_additional_tokens(tokens, ...)`: post-process token responses.
-- `enrich_userinfo(userinfo, additional_tokens)`: add claims to the session.
+- `enrich_userinfo(userinfo, additional_tokens)`: add claims to the session. (Since ADR-0012 it
+  returns an `EnrichmentResult` naming any source that failed.)
 
 The `GlobusSessionAugmentationProvider` is the reference implementation,
 demonstrating the pattern for IDP-specific augmentation. The RAS provider

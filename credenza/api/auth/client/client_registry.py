@@ -38,6 +38,15 @@ RE_REALM_SHORT = re.compile(r"^[A-Za-z0-9._\-]{1,256}$")
 MAX_RESOURCE_LEN = 1024
 MIN_RESOURCE_LEN = 3
 
+# Claims every active introspection response carries: the RFC 7662 structural fields plus
+# Credenza's identity model (rest/session.py:session_identity_claims). A client's
+# introspection_include_claims may not name any of these.
+INTROSPECTION_RESERVED_CLAIMS = frozenset({
+    "active", "iss", "sub", "aud", "exp", "iat", "token_type", "scope",
+    "preferred_username", "full_name", "email", "email_verified", "id", "userid",
+    "groups", "roles", "identities",
+})
+
 
 def _normalize_grant_type(value: str) -> str:
     # Resolve via GrantType (handles aliases via _missing_); unknown values pass through unchanged.
@@ -211,6 +220,7 @@ class ClientRecord:
     allowed_auth_methods: List[str] = field(default_factory=list)
     allowed_redirect_uris: List[str] = field(default_factory=list)
     allowed_introspection_resources: List[str] = field(default_factory=list)
+    introspection_include_claims: List[str] = field(default_factory=list)
     allowed_token_exchange_targets: List[str] = field(default_factory=list)
     max_session_ttl_seconds: Optional[int] = DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL
     absolute_session_lifetime_seconds: Optional[int] = DEFAULT_CLIENT_AUTH_MAX_ABSOLUTE_LIFETIME
@@ -283,6 +293,20 @@ class ClientRecord:
                                validate_resources_list(self.allowed_introspection_resources))
         except ValueError as ex:
             raise ValueError(f"invalid allowed_introspection_resources for client={self.client_id}: {ex}") from ex
+
+        # validate introspection_include_claims: plain claim names, none of which may shadow a
+        # claim Credenza always emits (the identity model or the RFC 7662 structural fields)
+        try:
+            include_claims = normalize_str_list(self.introspection_include_claims)
+        except ValueError as ex:
+            raise ValueError(f"invalid introspection_include_claims for client={self.client_id}: {ex}") from ex
+        reserved = sorted(set(include_claims) & INTROSPECTION_RESERVED_CLAIMS)
+        if reserved:
+            raise ValueError(
+                f"introspection_include_claims for client={self.client_id} names claims that "
+                f"introspection always emits: {reserved}"
+            )
+        object.__setattr__(self, "introspection_include_claims", include_claims)
 
     @property
     def adapter_name(self) -> str:
@@ -523,6 +547,7 @@ def load_client_registry(path: str) -> ClientRegistry:
             allowed_auth_methods=list(spec.get("allowed_auth_methods") or []),
             allowed_redirect_uris=list(spec.get("allowed_redirect_uris") or []),
             allowed_introspection_resources=list(spec.get("allowed_introspection_resources") or []),
+            introspection_include_claims=list(spec.get("introspection_include_claims") or []),
             allowed_token_exchange_targets=list(spec.get("allowed_token_exchange_targets") or []),
             max_session_ttl_seconds=spec.get("max_session_ttl_seconds"),
             absolute_session_lifetime_seconds=spec.get("absolute_session_lifetime_seconds"),

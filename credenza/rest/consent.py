@@ -19,7 +19,7 @@ from secrets import token_urlsafe
 from urllib.parse import urlencode
 from flask import Blueprint, request, redirect, current_app, abort, render_template_string
 
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
 from ..api.session.storage.session_store import CONSENT_DEFAULT_TTL
 
 logger = logging.getLogger(__name__)
@@ -272,7 +272,7 @@ def consent_submit():
         audit_event("consent_denied",
                     session_id=pending.get("session_id"),
                     client_id=pending.get("client_id"),
-                    sub=pending.get("sub"))
+                    **audit_identity(pending, pending.get("realm")))
         return redirect(f"{redirect_uri}?{urlencode(params)}")
 
     # Approve: store consent records then issue authorization code
@@ -308,7 +308,7 @@ def consent_submit():
     audit_event("authorization_code_issued",
                 session_id=sid,
                 client_id=client_id,
-                sub=pending.get("sub"),
+                **audit_identity(pending, realm),
                 realm=realm,
                 via_consent=True)
 

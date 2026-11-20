@@ -60,6 +60,11 @@ class OIDCClientFactory:
         return self._client_cache[cache_key]
 
 
+# Seconds to wait for the IdP on token refresh, dependent-token and revocation calls. These run
+# while holding a session lock (see session_lock), so they must not block indefinitely.
+DEFAULT_IDP_HTTP_TIMEOUT = 15
+
+
 class OIDCClient:
     def __init__(self, profile, native_client=False):
         self.client_secret_file = profile["client_secret_file"]
@@ -67,6 +72,7 @@ class OIDCClient:
         self.redirect_uri = profile.get("redirect_uri")
         self.profile = profile
         self.native_client = native_client
+        self.http_timeout = profile.get("http_timeout", DEFAULT_IDP_HTTP_TIMEOUT)
 
         discovery_url = profile.get("discovery_url")
         metadata = {}
@@ -181,7 +187,8 @@ class OIDCClient:
             return client.refresh_token(
                 url=self.token_url,
                 refresh_token=refresh_token,
-                scope=None
+                scope=None,
+                timeout=self.http_timeout
             )
         except Exception as e:
             logger.exception("Token refresh failed")
@@ -204,7 +211,8 @@ class OIDCClient:
                                        token=access_token,
                                        scope=scope,
                                        grant_type=grant_type,
-                                       access_type=access_type)
+                                       access_type=access_type,
+                                       timeout=self.http_timeout)
             return token
         except Exception as e:
             logger.exception("Dependent token fetch failed")
@@ -243,6 +251,7 @@ class OIDCClient:
                 url=self.revocation_url,
                 token=token,
                 token_type_hint=token_type_hint,
+                timeout=self.http_timeout,
             )
             return resp.status_code == 200
         except Exception as e:

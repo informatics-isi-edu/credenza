@@ -75,9 +75,9 @@ def app(store, discovery_response, dummy_profile, monkeypatch):
     app.config["SERVER_NAME"] = "localhost"
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = \
         {"test":
-             import_string("credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider")(),
+             import_string("credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider")("test"),
          "globus":
-             import_string("credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider")()}
+             import_string("credenza.api.session.augmentation.globus_provider:GlobusSessionAugmentationProvider")("globus")}
 
     app.config["REFRESH_WORKER_POLL_INTERVAL"] = 60
     app.config["SESSION_EXPIRY_THRESHOLD"] = 300

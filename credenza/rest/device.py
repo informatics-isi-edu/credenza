@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, redirect, abort, current_app, g, render_template_string
 from secrets import token_hex
 from .helpers import perf_logged, adapter_authenticate, GrantType, ip_rate_limited
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity_snapshot
+from ..telemetry.audit.attributes import audit_session_attributes
 from ..api.common.crypto import generate_nonce
 from ..api.common.errors import OAuthError
 from ..api.session.storage.session_store import SessionType
@@ -29,6 +30,11 @@ from ..api.common.util import (
     get_effective_scopes,
     get_request_resource_args,
     augment_session,
+    enrich_userinfo_from_endpoint,
+    get_missing_scope_claims,
+    extract_jwt_txn,
+    check_acr,
+    realm_max_lifetime,
     strtobool
 )
 
@@ -249,26 +255,75 @@ def device_callback():
         logger.error(f"{msg}: {e}")
         abort(400, description=msg)
 
-    # Determine refresh expiration
+    # Fallback to IDP userinfo endpoint if the ID token is missing key claims.
+    # Same logic as the browser login path -- opt out per realm with skip_userinfo_fallback: true.
+    profile = current_app.config["OIDC_IDP_PROFILES"].get(realm, {})
+    if not profile.get("skip_userinfo_fallback"):
+        missing = get_missing_scope_claims(
+            profile.get("scopes", ""),
+            userinfo,
+            profile.get("scope_expected_claims"),
+        )
+        if missing:
+            logger.debug(
+                "userinfo fallback triggered for realm=%s sub=%s missing=%s",
+                realm, userinfo.get("sub"), missing,
+            )
+            userinfo = enrich_userinfo_from_endpoint(
+                client,
+                tokens.get("access_token"),
+                userinfo,
+                missing,
+                realm=realm,
+                sub=userinfo.get("sub"),
+            )
+
+    # ACR assertion: reject login if the ID token does not meet configured assurance requirements.
+    required_acr = profile.get("required_acr")
+    if required_acr:
+        failed_acr = check_acr(userinfo, required_acr)
+        if failed_acr:
+            audit_event("device_login_acr_rejected",
+                        realm=realm,
+                        **audit_identity_snapshot(userinfo, realm),
+                        acr=userinfo.get("acr"),
+                        failed_requirements=failed_acr)
+            abort(403, description="Insufficient authentication assurance level")
+
+    # Determine the session's lifetime. The absolute lifetime is the upstream refresh token's
+    # lifetime (0 or None from the IdP means "not stated", so fall back to MAX_REFRESH_TOKEN_LIFETIME
+    # days), never longer than the realm's device-session cap.
     now = int(time.time())
     absolute_session_lifetime_secs = tokens.get("refresh_expires_in")
-    # 0 generally indicates "no expiry" (dubious) and None isn't helpful, so fall back to the configured value or default
     if not absolute_session_lifetime_secs:
-        # default to 14 days if not configured
         absolute_session_lifetime_secs = current_app.config.get("MAX_REFRESH_TOKEN_LIFETIME", 14) * 86400
-        absolute_expires_at = now + absolute_session_lifetime_secs
-    else:
-        absolute_expires_at = now + absolute_session_lifetime_secs
+    device_cap = realm_max_lifetime(realm, "device")
+    if device_cap:
+        absolute_session_lifetime_secs = min(absolute_session_lifetime_secs, device_cap)
+    absolute_expires_at = now + absolute_session_lifetime_secs
+
+    # With automatic refresh the worker keeps the upstream tokens alive, so the session lasts its
+    # absolute lifetime. Without it, the session lasts only as long as the upstream access token:
+    # it does not slide on use (session_ttl 0), and only an upstream refresh the client asks for
+    # extends it (see refresh_access_token), never past the absolute lifetime.
+    auto_refresh = bool(flow.get("refresh", False))
+    session_ttl = None
+    expires_at = absolute_expires_at
+    if not auto_refresh:
+        session_ttl = 0
+        token_expires_at = _upstream_token_expires_at(tokens, now)
+        if token_expires_at:
+            expires_at = min(token_expires_at, absolute_expires_at)
 
     metadata = {
-        "allow_automatic_refresh":  flow.get("refresh", False),
+        "allow_automatic_refresh":  auto_refresh,
         "offline_access_granted":   offline_granted,
         "access_token_expires_at":  tokens.get("expires_at"),
         "refresh_token_expires_at": absolute_expires_at
     }
 
     # Augment the session, if applicable
-    userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
+    userinfo, additional_tokens, enrichment = augment_session(tokens, realm, userinfo, metadata)
 
     session_id = store.generate_session_id()
     session_key, session_data = store.create_session(
@@ -283,8 +338,9 @@ def device_callback():
         allowed_resources=flow.get("allowed_resources",[]),
         metadata=metadata,
         additional_tokens=additional_tokens,
-        expires_at=absolute_expires_at,
-        absolute_session_lifetime_secs = absolute_session_lifetime_secs
+        expires_at=expires_at,
+        session_ttl=session_ttl,
+        absolute_session_lifetime_secs=absolute_session_lifetime_secs
     )
 
     flow.update({"verified": True, "session_key": session_key, "nonce": None, "code_verifier": None})
@@ -292,26 +348,38 @@ def device_callback():
 
     if metadata.get("augmentation_deferred", False):
         g.session_key = session_key
-        userinfo, additional_tokens = augment_session(tokens, realm, userinfo, metadata)
+        userinfo, additional_tokens, enrichment = augment_session(tokens, realm, userinfo, metadata)
         metadata.pop("augmentation_deferred", None)
         session_data.userinfo = userinfo
         session_data.additional_tokens = additional_tokens
         store.update_session(session_id, session_data)
 
-    sub = userinfo.get("sub")
-    user = userinfo.get("email")
-    logger.info(f"Device login successful for user {user} ({sub}) with session id {session_id} on realm {realm}")
+    identity = audit_identity_snapshot(userinfo, realm)
+    txn = extract_jwt_txn(tokens.get("access_token", ""))
+    logger.info(f"Device login successful for {identity['identity']} with session id {session_id} on realm {realm}")
     audit_event("device_login",
                 session_id=session_id,
-                user=user,
-                sub=sub,
+                **identity,
                 scopes=get_effective_scopes(session_data),
                 allowed_resources=session_data.allowed_resources,
                 realm=realm,
                 offline_access=offline_granted,
-                refresh_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at, timezone.utc).isoformat())
+                expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat(),
+                refresh_expires_at=datetime.fromtimestamp(session_data.absolute_expires_at, timezone.utc).isoformat(),
+                **({"acr": userinfo.get("acr")} if userinfo.get("acr") else {}),
+                **({"txn": txn} if txn else {}))
+    audit_session_attributes(session_id, userinfo, realm, trigger="device_login", enrichment=enrichment)
 
     return render_template_string(SUCCESS_HTML)
+
+
+def _upstream_token_expires_at(tokens: dict, now: int):
+    """Absolute expiry of the upstream access token in a token response, or None if not stated."""
+    if tokens.get("expires_at"):
+        return int(tokens["expires_at"])
+    if tokens.get("expires_in"):
+        return now + int(tokens["expires_in"])
+    return None
 
 
 SUCCESS_HTML = \

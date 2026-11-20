@@ -284,7 +284,7 @@ def flask_app(store, stub_oidc, monkeypatch):
     app.config["SESSION_AUGMENTATION_PROVIDERS"] = {
         "test": import_string(
             "credenza.api.session.augmentation.base_provider:DefaultSessionAugmentationProvider"
-        )()
+        )("test")
     }
     app.extensions["rate_limits"] = {
         "10_per_min": FixedWindowJitterLimiter(limit=10, window_sec=60),

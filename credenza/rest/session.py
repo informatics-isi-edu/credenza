@@ -15,10 +15,12 @@
 #
 import time
 import logging
+from typing import Optional
 from datetime import datetime, timezone
 from flask import Blueprint, request, redirect, jsonify, abort, current_app
 from .helpers import make_json_response, perf_logged
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
+from ..api.session.storage.session_lock import session_lock
 from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
 from ..api.session.storage.session_store import SessionData, SessionType
 from ..api.common.util import (
@@ -29,6 +31,9 @@ from ..api.common.util import (
     refresh_access_token,
     refresh_additional_tokens,
     revoke_tokens,
+    end_session,
+    reaugment_session,
+    SHORT_LOCK_WAIT,
     strtobool
 )
 
@@ -54,20 +59,23 @@ def whoami():
 def get_session():
 
     try:
-        upstream = strtobool(str(request.args.get("refresh_upstream", False)))
+        explicit_upstream = strtobool(str(request.args.get("refresh_upstream", False)))
     except ValueError:
-        upstream = False
-    if current_app.config.get("ENABLE_LEGACY_API", False):
-        upstream = True
+        explicit_upstream = False
+    # Legacy session-proxy clients do not pass refresh_upstream, so in legacy mode a PUT refreshes
+    # upstream tokens when they are due, as PUT did before the parameter existed (see
+    # _upstream_refresh_requested for which sessions). Augmentation re-runs only on an explicit
+    # refresh_upstream=true. An augmentation provider may call a resource server with the user's
+    # own session key, and that server may resolve the key by sending PUT /session for this same
+    # session; re-running augmentation on every PUT would then re-enter the provider from inside
+    # this request.
 
     sid, session = get_current_session()
     store = current_app.config["SESSION_STORE"]
     now = int(time.time())
 
     realm = session.realm
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email") \
-        if not session.is_service() else session.userinfo.get("name","service")
+    identity = audit_identity(session.userinfo, realm)
 
     # Accept multiple resource hints via repeated query params: ?resource=A&resource=B
     req_resources = get_request_resource_args(request.args.getlist("resource"))
@@ -143,63 +151,107 @@ def get_session():
             )
 
     if request.method == "PUT":
-
-        if session.is_service() or session.is_derived():
-            max_ttl = session.session_ttl
-            now_i = int(now)
-
-            # Clamp final expiry to session.session_ttl if configured.
-            # Derived sessions are non-extendable by design; so we allow a PUT on a derived session
-            # to receive a valid session response without triggering the can_extend() guard.
-            if max_ttl > 0:
-                cap = now_i + max_ttl
-                if session.expires_at > cap:
-                    session.expires_at = cap
-                    session.session_ttl = 0  # do not extend expires_at in update_session()
-                    audit_event(
-                        "service_session_ttl_clamped",
-                        session_id=sid,
-                        realm=realm,
-                        clamped_expires_at=datetime.fromtimestamp(cap, timezone.utc).isoformat(),
-                        max_session_ttl_seconds=max_ttl)
+        if session.is_device():
+            # Device sessions are refreshed upstream, by this request or the background worker,
+            # so extend them under the session lock: a copy read before a concurrent refresh must
+            # not overwrite its rotated tokens. Wait only briefly; this is the frequent path for
+            # every session proxy. If the lock is busy, answer with the session as stored.
+            with session_lock(sid, timeout=SHORT_LOCK_WAIT) as locked:
+                if not locked:
+                    logger.info(f"Session lock for {sid} busy; returning session without extending it")
+                    return make_json_response(make_session_response(sid, session))
+                session = store.get_session_data(sid)
+                if session is None:
+                    abort(404, "session not found")
+                upstream = _upstream_refresh_requested(session, explicit_upstream)
+                _extend_session(sid, session, upstream, now, identity, realm, store)
         else:
-            if not session.can_extend():
-                audit_event("session_not_extendable",
-                            session_id=sid,
-                            user=user,
-                            sub=sub,
-                            realm=realm,
-                            expires_at=datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat())
-                abort(403, "session cannot be extended")
+            _extend_session(sid, session, _upstream_refresh_requested(session, explicit_upstream),
+                            now, identity, realm, store)
 
-            # enforce max refreshable lifetime for user sessions
-            session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
-            absolute_expires_at = session.absolute_expires_at
-            if absolute_expires_at and now > (absolute_expires_at - session_expiry_threshold):
-                revoke_tokens(sid, session)
-                store.delete_session(sid)
-                audit_event("session_absolute_lifetime_expired", session_id=sid)
-                abort(401, "session_absolute_lifetime_expired")
-
-            if upstream and session.can_refresh_upstream():
-                # Potentially refresh our access token from upstream, if we've got a refresh token to do so
-                refresh_access_token(sid, session)
-                # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
-                refresh_additional_tokens(sid, session)
-                # Enrich userinfo, if applicable
-                provider = get_augmentation_provider(realm)
-                provider.enrich_userinfo(session.userinfo, session.additional_tokens)
-
-        skey, session_data = store.update_session(sid, session)
-        audit_event("session_updated",
-                    session_id=sid,
-                    user=user,
-                    sub=sub,
-                    realm=realm,
-                    expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat())
+        if explicit_upstream and session.can_refresh_upstream():
+            # Outside the lock: augmentation may call back into this endpoint for the same session.
+            session = reaugment_session(sid, realm) or session
 
     response = make_session_response(sid, session)
     return make_json_response(response)
+
+
+def _upstream_refresh_requested(session: SessionData, explicit_upstream: bool) -> bool:
+    """Whether this PUT should refresh the session's upstream tokens (when they are due).
+
+    An explicit refresh_upstream=true always asks for it. In legacy mode a plain PUT asks for it
+    too, but only for sessions with automatic refresh: a device session logged in without
+    automatic refresh is refreshed only when its client asks, so it ends with its upstream access
+    token. LEGACY_DEVICE_REFRESH_ON_USE=true restores the older behavior, in which session-proxy
+    PUTs refresh such sessions as well and so keep them alive while in use.
+    """
+    if explicit_upstream:
+        return True
+    if not current_app.config.get("ENABLE_LEGACY_API", False):
+        return False
+    if session.session_metadata.system.get("allow_automatic_refresh"):
+        return True
+    return bool(current_app.config.get("LEGACY_DEVICE_REFRESH_ON_USE", False))
+
+
+def _extend_session(sid, session: SessionData, upstream: bool, now: int, identity: dict, realm, store):
+    """Extend a session for PUT /session, refreshing upstream tokens when asked and due, and write it.
+
+    For device sessions the caller holds the session lock, so the absolute-lifetime delete below
+    deletes directly rather than through end_session(), which would try to take the same lock.
+    """
+    if session.is_service() or session.is_derived():
+        max_ttl = session.session_ttl
+        now_i = int(now)
+
+        # Clamp final expiry to session.session_ttl if configured.
+        # Derived sessions are non-extendable by design; so we allow a PUT on a derived session
+        # to receive a valid session response without triggering the can_extend() guard.
+        if max_ttl > 0:
+            cap = now_i + max_ttl
+            if session.expires_at > cap:
+                session.expires_at = cap
+                session.session_ttl = 0  # do not extend expires_at in update_session()
+                audit_event(
+                    "service_session_ttl_clamped",
+                    session_id=sid,
+                    realm=realm,
+                    clamped_expires_at=datetime.fromtimestamp(cap, timezone.utc).isoformat(),
+                    max_session_ttl_seconds=max_ttl)
+    else:
+        if not session.can_extend():
+            audit_event("session_not_extendable",
+                        session_id=sid,
+                        **identity,
+                        realm=realm,
+                        expires_at=datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat())
+            abort(403, "session cannot be extended")
+
+        # enforce max refreshable lifetime for user sessions
+        session_expiry_threshold = current_app.config.get("SESSION_EXPIRY_THRESHOLD", 300)
+        absolute_expires_at = session.absolute_expires_at
+        if absolute_expires_at and now > (absolute_expires_at - session_expiry_threshold):
+            revoke_tokens(sid, session)
+            store.delete_session(sid)
+            audit_event("session_absolute_lifetime_expired", session_id=sid, **identity, realm=realm)
+            abort(401, "session_absolute_lifetime_expired")
+
+        if upstream and session.can_refresh_upstream():
+            # Potentially refresh our access token from upstream, if we've got a refresh token to do so
+            refresh_access_token(sid, session)
+            # Potentially refresh additional access tokens (if present) from upstream, and we've got refresh tokens for them
+            refresh_additional_tokens(sid, session)
+
+    skey, session_data = store.update_session(sid, session)
+    if session_data is None:
+        # The session was deleted (logout, revoke) while this request held a copy of it
+        abort(404, "session not found")
+    audit_event("session_updated",
+                session_id=sid,
+                **identity,
+                realm=realm,
+                expires_at=datetime.fromtimestamp(session_data.expires_at, timezone.utc).isoformat())
 
 
 # @session_blueprint.route("/session", methods=["PATCH"])
@@ -226,16 +278,12 @@ def delete_session():
         return redirect(f"{current_app.config['BASE_URL']}/logout", 303)
 
     sid, session = get_current_session()
-    store = current_app.config["SESSION_STORE"]
 
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    identity = audit_identity(session.userinfo, realm)
 
-    revoke_tokens(sid, session)
-
-    store.delete_session(sid)
-    audit_event("logout", session_id=sid, user=user, sub=sub, realm=realm)
+    end_session(sid, session)
+    audit_event("logout", session_id=sid, **identity, realm=realm)
 
     resp = jsonify({"status": "logged out"})
     resp.set_cookie(current_app.config["COOKIE_NAME"], "", expires=0)
@@ -262,9 +310,22 @@ def _format_attributes(claim_names: list, attributes: list, session: SessionData
     return attributes
 
 
+def _canonical_identities(session: SessionData) -> dict:
+    """Build the canonical identities map for a session at render time.
+
+    Linked-identity canonicalization is a pure transform of claims already in
+    userinfo (no I/O), so it is computed on demand via the realm's augmentation
+    provider rather than persisted into the session. Returns a dict keyed by
+    canonical identity id whose values hold per-identity detail.
+    """
+    provider = get_augmentation_provider(session.realm)
+    return provider.build_identities(session.userinfo) if provider else {}
+
+
 def make_session_response(sid, session: SessionData):
     response = {}
     store = current_app.config["SESSION_STORE"]
+    canonical_identities = _canonical_identities(session)
 
     if current_app.config.get("ENABLE_LEGACY_API", False):
         issuer =             _claim(session, "iss", session.userinfo.get("iss"))
@@ -275,23 +336,25 @@ def make_session_response(sid, session: SessionData):
 
         # format "client" object
         client_id = f"{issuer}/{sub}" if issuer else sub
-        client = {
-            "id": client_id,
-            "display_name": preferred_username,
-            "full_name": full_name,
-            "email": email,
-        }
+        client = {"id": client_id,
+                  "display_name": preferred_username,
+                  "full_name": full_name,
+                  "email": email}
 
-        identity_set = session.userinfo.get("identity_set", session.userinfo.get("identity_set_detail"))
-        identities = []
-        if identity_set:
-            for ident in identity_set:
-                ident_sub = ident.get("sub", ident.get("id", ident.get("userid")))
-                identities.append(f"{issuer}/{ident_sub}" if issuer else ident_sub)
-        client["identities"] = identities
+        # The legacy webauthn contract is a flat list of identity-id strings, so
+        # default to the ids (the keys of the canonical identities map) to avoid
+        # breaking existing consumers. Deployments that want the full detail
+        # objects can opt in via LEGACY_IDENTITY_DETAIL.
+        if current_app.config.get("LEGACY_IDENTITY_DETAIL", False):
+            client["identities"] = canonical_identities
+        else:
+            client["identities"] = list(canonical_identities.keys())
         response["client"] = client
 
-        # format "attributes" array
+        # format "attributes" array -- entries here are ACL principals: legacy
+        # consumers match ACLs against attributes[].id. Only the client is one,
+        # and its id is the authenticated subject. Linked identities stay inside
+        # the client object as information, never as members of this array.
         attributes = [client]
         _format_attributes(["groups", "roles", "resources", "scopes", "claims"], attributes, session)
         response["attributes"] = attributes
@@ -299,41 +362,19 @@ def make_session_response(sid, session: SessionData):
         response["since"] = datetime.fromtimestamp(session.created_at, timezone.utc).isoformat()
         response["expires"] = datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat()
         response["seconds_remaining"] = store.get_ttl(sid)
+
+        # Resource servers can copy "tracking" into their request log records, which joins those
+        # records to this session's Credenza audit events (and through the login event to the IdP
+        # transaction id). The session id is not a credential: it is not derived from the session
+        # key and no endpoint accepts it.
+        response["tracking"] = sid
     else:
-        preferred_username = _claim(session, "preferred_username", session.userinfo.get("preferred_username"))
-        full_name =          _claim(session, "full_name", session.userinfo.get("name"))
-        email =              _claim(session, "email", session.userinfo.get("email"))
-        email_verified =     _claim(session, "email_verified", session.userinfo.get("email_verified", "unknown"))
-        sub =                _claim(session, "sub", session.userinfo.get("sub"))
-        iss =                _claim(session, "iss", session.userinfo.get("iss"))
-        aud =                _claim(session, "aud", session.userinfo.get("aud"))
-        groups =             _claim(session, "groups", session.userinfo.get("groups", []), listify=True)
-        roles =              _claim(session, "roles", session.userinfo.get("roles", []), listify=True)
-        userid =             _claim(session, "userid", session.userinfo.get("userid"))
-
-        # normalize email_verified if it arrives as a string
-        if isinstance(email_verified, str):
-            lv = email_verified.strip().lower()
-            if lv in ("1", "yes"):
-                email_verified = "true"
-            elif lv in ("0", "no"):
-                email_verified = "false"
-
-        _id = f"{iss}/{sub}" if iss else sub
-
+        response.update(session_identity_claims(session, canonical_identities))
         response.update(
             {
-                "preferred_username": preferred_username,
-                "full_name":          full_name,
-                "email":              email,
-                "email_verified":     email_verified,
-                "sub":                sub,
-                "iss":                iss,
-                "aud":                aud,
-                "id":                 _id,
-                "userid":             userid,
-                "groups":             groups,
-                "roles":              roles,
+                # Joins the caller's view of the session to Credenza's audit events; the legacy
+                # response carries the same value as "tracking". Not a credential.
+                "session_id":         sid,
                 "scopes":             get_effective_scopes(session),
                 "resources":          session.allowed_resources,
                 "metadata":           session.session_metadata.to_dict(),
@@ -343,7 +384,57 @@ def make_session_response(sid, session: SessionData):
                 "seconds_remaining":  store.get_ttl(sid),
             }
         )
-        if userid is None:
-            del response["userid"]
 
     return response
+
+
+def session_identity_claims(session: SessionData, canonical_identities: Optional[dict] = None) -> dict:
+    """Return Credenza's identity model for a session.
+
+    This is the fixed set of identity claims Credenza emits about a session's subject, each
+    resolved through the realm's claim map: preferred_username, full_name, email,
+    email_verified, sub, iss, aud, id ("<iss>/<sub>"), userid (only when present), groups,
+    roles and identities. It is shared by GET /session and POST /introspect so that the two
+    cannot drift apart. Upstream claims outside this model (for example an IDP's raw
+    userinfo extras) are never included; introspection clients name any extra claims they
+    need in their registry entry (introspection_include_claims).
+    """
+    if canonical_identities is None:
+        canonical_identities = _canonical_identities(session)
+
+    preferred_username = _claim(session, "preferred_username", session.userinfo.get("preferred_username"))
+    full_name =          _claim(session, "full_name", session.userinfo.get("name"))
+    email =              _claim(session, "email", session.userinfo.get("email"))
+    email_verified =     _claim(session, "email_verified", session.userinfo.get("email_verified", "unknown"))
+    sub =                _claim(session, "sub", session.userinfo.get("sub"))
+    iss =                _claim(session, "iss", session.userinfo.get("iss"))
+    aud =                _claim(session, "aud", session.userinfo.get("aud"))
+    groups =             _claim(session, "groups", session.userinfo.get("groups", []), listify=True)
+    roles =              _claim(session, "roles", session.userinfo.get("roles", []), listify=True)
+    userid =             _claim(session, "userid", session.userinfo.get("userid"))
+
+    # normalize email_verified if it arrives as a string
+    if isinstance(email_verified, str):
+        lv = email_verified.strip().lower()
+        if lv in ("1", "yes"):
+            email_verified = "true"
+        elif lv in ("0", "no"):
+            email_verified = "false"
+
+    claims = {
+        "preferred_username": preferred_username,
+        "full_name":          full_name,
+        "email":              email,
+        "email_verified":     email_verified,
+        "sub":                sub,
+        "iss":                iss,
+        "aud":                aud,
+        "id":                 f"{iss}/{sub}" if iss else sub,
+        "userid":             userid,
+        "groups":             groups,
+        "roles":              roles,
+        "identities":         canonical_identities,
+    }
+    if userid is None:
+        del claims["userid"]
+    return claims

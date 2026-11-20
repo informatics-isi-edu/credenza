@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import logging
 import time
 import pytest
 from flask import request
@@ -28,6 +29,9 @@ from credenza.api.auth.client.client_registry import ClientRegistry, ClientRecor
 from credenza.api.common.errors import OAuthError
 from credenza.api.common.rate_limit import FixedWindowJitterLimiter
 from credenza.api.session.storage.session_store import SessionType
+
+
+_UNSET = object()  # distinguishes "not passed" from an explicit None override
 
 
 class DummyAdapter(AdapterInterface):
@@ -87,7 +91,8 @@ def make_client_record(client_id: str, *,
                        allowed_claims=None,
                        allowed_auth_methods=None,
                        allowed_redirect_uris=None,
-                       allowed_token_exchange_targets=None):
+                       allowed_token_exchange_targets=None,
+                       absolute_session_lifetime_seconds=_UNSET):
     """Construct a ClientRecord suitable for tests (mirrors registry-loaded shape)."""
 
     # Default to allowing client_credentials unless test overrides it.
@@ -120,7 +125,11 @@ def make_client_record(client_id: str, *,
         allowed_redirect_uris=list(allowed_redirect_uris or []),
         allowed_token_exchange_targets=list(allowed_token_exchange_targets or []),
         max_session_ttl_seconds=token_mod.DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL,
-        absolute_session_lifetime_seconds=token_mod.DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL,
+        absolute_session_lifetime_seconds=(
+            token_mod.DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL
+            if absolute_session_lifetime_seconds is _UNSET
+            else absolute_session_lifetime_seconds
+        ),
         default_resources=list(default_resources),
         default_scopes=list(default_scopes),
         additional_claims=additional_claims,
@@ -412,6 +421,174 @@ def test_client_credentials_happy_path_end_to_end(app):
 
         assert body["token_type"] == "bearer"
         assert isinstance(body["expires_in"], int)
+
+
+def test_client_credentials_absolute_lifetime_clamped_to_ceiling(app):
+    """
+    A client configuring an absolute_session_lifetime_seconds larger than the
+    server-wide MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS ceiling gets clamped down to
+    the ceiling, not the larger client-configured value.
+    """
+    subj = Subject(provider="client_secret", subject_id="svc-ceiling")
+    ar = AdapterResult(subject=subj, additional_claims={}, auth_context={})
+    adapter = StubAdapter(result=ar, raise_exc=None)
+
+    client = make_client_record(
+        "svc-ceiling-client",
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+        adapter_instance=adapter,
+        absolute_session_lifetime_seconds=31536000,  # 1 year, exceeds the default ceiling
+    )
+    registry = ClientRegistry(version="1", clients={"svc-ceiling-client": client})
+
+    app.config["CLIENT_REGISTRY"] = registry
+    app.config["IDP_CLAIM_MAPS"] = {}
+    # exercise the default ceiling explicitly rather than relying on app.py's env default
+    app.config["MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS"] = token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS
+
+    before = int(time.time())
+    with app.test_client() as c:
+        resp = c.post(
+            "/token",
+            data={
+                "client_id": "svc-ceiling-client",
+                "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+            },
+        )
+        assert resp.status_code == 200
+
+        # SessionStore()'s default backend arg is shared across tests (a mutable
+        # default argument), so filter by sub rather than assuming index 0.
+        store = app.config["SESSION_STORE"]
+        session = next(
+            s for sid in store.list_session_ids()
+            if (s := store.get_session_data(sid)) and s.userinfo.get("sub") == subj.to_sub()
+        )
+        # absolute_expires_at must reflect the ceiling (86400s), not the client's
+        # requested 31536000s.
+        assert session.absolute_expires_at <= before + token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS + 5
+        assert session.absolute_expires_at < before + 31536000
+
+
+def test_client_credentials_absolute_lifetime_unset_uses_ceiling_default(app):
+    """
+    A client with no absolute_session_lifetime_seconds configured (None, as happens
+    when the field is omitted from client_registry.json) falls back to the ceiling
+    itself, preserving today's default behavior.
+    """
+    subj = Subject(provider="client_secret", subject_id="svc-unset")
+    ar = AdapterResult(subject=subj, additional_claims={}, auth_context={})
+    adapter = StubAdapter(result=ar, raise_exc=None)
+
+    client = make_client_record(
+        "svc-unset-client",
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+        adapter_instance=adapter,
+        absolute_session_lifetime_seconds=None,
+    )
+    registry = ClientRegistry(version="1", clients={"svc-unset-client": client})
+
+    app.config["CLIENT_REGISTRY"] = registry
+    app.config["IDP_CLAIM_MAPS"] = {}
+    app.config["MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS"] = token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS
+
+    before = int(time.time())
+    with app.test_client() as c:
+        resp = c.post(
+            "/token",
+            data={
+                "client_id": "svc-unset-client",
+                "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+            },
+        )
+        assert resp.status_code == 200
+
+        store = app.config["SESSION_STORE"]
+        session = next(
+            s for sid in store.list_session_ids()
+            if (s := store.get_session_data(sid)) and s.userinfo.get("sub") == subj.to_sub()
+        )
+        assert before + token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS <= session.absolute_expires_at <= \
+               before + token_mod.MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS + 5
+
+
+def test_client_credentials_long_absolute_lifetime_triggers_audit_event(caplog, app):
+    """
+    A client whose (post-ceiling-clamp) absolute lifetime exceeds
+    LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS gets a non-blocking
+    token_issued_long_absolute_lifetime audit event -- issuance still succeeds.
+    """
+    subj = Subject(provider="client_secret", subject_id="svc-long-lived")
+    ar = AdapterResult(subject=subj, additional_claims={}, auth_context={})
+    adapter = StubAdapter(result=ar, raise_exc=None)
+
+    client = make_client_record(
+        "svc-long-lived-client",
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+        adapter_instance=adapter,
+        absolute_session_lifetime_seconds=31536000,  # 1 year, well past the 14-day threshold
+    )
+    registry = ClientRegistry(version="1", clients={"svc-long-lived-client": client})
+
+    app.config["CLIENT_REGISTRY"] = registry
+    app.config["IDP_CLAIM_MAPS"] = {}
+    # raise the ceiling too, so the configured value isn't clamped below the threshold
+    app.config["MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS"] = 31536000
+
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post(
+                "/token",
+                data={
+                    "client_id": "svc-long-lived-client",
+                    "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+                },
+            )
+            assert resp.status_code == 200
+
+    events = [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict) and "event" in r.msg]
+    assert "token_issued_long_absolute_lifetime" in events
+    assert "token_issued" in events  # issuance itself is unaffected
+    [issued] = _audit_records(caplog, "token_issued")
+    assert issued["session_id"] in app.config["SESSION_STORE"].list_session_ids()
+    assert "session" not in issued
+
+
+def test_client_credentials_normal_lifetime_no_long_lifetime_audit_event(caplog, app):
+    """A client with a normal (default, ~30-minute) absolute lifetime does not
+    trigger the long-lifetime audit event."""
+    subj = Subject(provider="client_secret", subject_id="svc-normal")
+    ar = AdapterResult(subject=subj, additional_claims={}, auth_context={})
+    adapter = StubAdapter(result=ar, raise_exc=None)
+
+    client = make_client_record(
+        "svc-normal-client",
+        allowed_resources=["urn:svc:r1"],
+        default_resources=["urn:svc:r1"],
+        adapter_instance=adapter,
+    )
+    registry = ClientRegistry(version="1", clients={"svc-normal-client": client})
+
+    app.config["CLIENT_REGISTRY"] = registry
+    app.config["IDP_CLAIM_MAPS"] = {}
+
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post(
+                "/token",
+                data={
+                    "client_id": "svc-normal-client",
+                    "grant_type": token_mod.GrantType.CLIENT_CREDENTIALS.value,
+                },
+            )
+            assert resp.status_code == 200
+
+    events = [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict) and "event" in r.msg]
+    assert "token_issued_long_absolute_lifetime" not in events
+    assert "token_issued" in events
 
 
 def test_adapter_autherror_propagates(monkeypatch, app):
@@ -786,6 +963,11 @@ _RESOURCE_TC = "https://api.example/"
 _VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"  # 43-char RFC 7636 example
 
 
+def _audit_records(caplog, event):
+    """Audit records of the given event type captured by caplog."""
+    return [r.msg for r in caplog.records if isinstance(r.msg, dict) and r.msg.get("event") == event]
+
+
 def _s256(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -941,19 +1123,22 @@ def test_authz_code_single_use(app, store):
     assert r2.status_code == 400
 
 
-def test_authz_code_client_mismatch(app, store):
-    """Code issued to different client -- 400."""
+def test_authz_code_client_mismatch(caplog, app, store):
+    """Code issued to different client -- 400, audited against the code's session."""
     _make_authz_client(app)
     sid, _ = _create_user_session(store)
     code, _ = _store_code(store, session_id=sid, client_id="other-client")
-    with app.test_client() as c:
-        resp = c.post("/token", data={
-            "client_id":    "authz-client",
-            "grant_type":   "authorization_code",
-            "code":         code,
-            "redirect_uri": _REDIRECT_URI_TC,
-        })
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":    "authz-client",
+                "grant_type":   "authorization_code",
+                "code":         code,
+                "redirect_uri": _REDIRECT_URI_TC,
+            })
     assert resp.status_code == 400
+    [record] = _audit_records(caplog, "token_authz_code_client_mismatch")
+    assert record["session_id"] == sid
 
 
 def test_authz_code_redirect_uri_mismatch(app, store):
@@ -971,22 +1156,25 @@ def test_authz_code_redirect_uri_mismatch(app, store):
     assert resp.status_code == 400
 
 
-def test_authz_code_pkce_wrong_verifier(app, store):
-    """Wrong code_verifier -- 400 INVALID_GRANT."""
+def test_authz_code_pkce_wrong_verifier(caplog, app, store):
+    """Wrong code_verifier -- 400 INVALID_GRANT, audited against the code's session."""
     _make_authz_client(app)
     sid, _ = _create_user_session(store)
     challenge = _s256(_VERIFIER)
     code, _ = _store_code(store, session_id=sid,
                           code_challenge=challenge, code_challenge_method="S256")
-    with app.test_client() as c:
-        resp = c.post("/token", data={
-            "client_id":     "authz-client",
-            "grant_type":    "authorization_code",
-            "code":          code,
-            "redirect_uri":  _REDIRECT_URI_TC,
-            "code_verifier": "wrong-verifier-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        })
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":     "authz-client",
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  _REDIRECT_URI_TC,
+                "code_verifier": "wrong-verifier-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            })
     assert resp.status_code == 400
+    [record] = _audit_records(caplog, "token_authz_code_pkce_failed")
+    assert record["session_id"] == sid
 
 
 def test_authz_code_pkce_missing_verifier(app, store):
@@ -1158,8 +1346,8 @@ def test_token_exchange_invalid_subject_token(app, store):
     assert resp.status_code == 400
 
 
-def test_token_exchange_transitive_denied(app, store):
-    """DERIVED sessions cannot be used as subject tokens."""
+def test_token_exchange_transitive_denied(caplog, app, store):
+    """DERIVED sessions cannot be used as subject tokens; the denial names the presented session."""
     _make_exchange_client(app)
     sid = store.generate_session_id()
     skey, _ = store.create_session(
@@ -1171,14 +1359,18 @@ def test_token_exchange_transitive_denied(app, store):
         scopes="openid",
         allowed_resources=[_RESOURCE_TC],
     )
-    with app.test_client() as c:
-        resp = c.post("/token", data={
-            "client_id":          "exchange-client",
-            "grant_type":         _TOKEN_EXCHANGE_GRANT,
-            "subject_token":      skey,
-            "subject_token_type": _TOKEN_TYPE_ACCESS,
-        })
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":          "exchange-client",
+                "grant_type":         _TOKEN_EXCHANGE_GRANT,
+                "subject_token":      skey,
+                "subject_token_type": _TOKEN_TYPE_ACCESS,
+            })
     assert resp.status_code == 403
+    [record] = _audit_records(caplog, "token_exchange_transitive_denied")
+    assert record["session_id"] == sid
+    assert "sid" not in record
 
 
 def test_token_exchange_default_deny_no_targets(app, store):
@@ -1269,19 +1461,22 @@ def test_token_exchange_cross_resource_delegation_denied_without_target(app, sto
     assert resp.status_code == 403
 
 
-def test_token_exchange_scope_escalation_beyond_subject(app, store):
-    """Requesting a scope not held by the subject -- 403."""
+def test_token_exchange_scope_escalation_beyond_subject(caplog, app, store):
+    """Requesting a scope not held by the subject -- 403; the denial names the presented session."""
     _make_exchange_client(app, allowed_scopes=["openid", "email", "admin"])
-    _, skey = _create_subject_session(store, scopes="openid email")
-    with app.test_client() as c:
-        resp = c.post("/token", data={
-            "client_id":          "exchange-client",
-            "grant_type":         _TOKEN_EXCHANGE_GRANT,
-            "subject_token":      skey,
-            "subject_token_type": _TOKEN_TYPE_ACCESS,
-            "scope":              "openid email admin",
-        })
+    sid, skey = _create_subject_session(store, scopes="openid email")
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":          "exchange-client",
+                "grant_type":         _TOKEN_EXCHANGE_GRANT,
+                "subject_token":      skey,
+                "subject_token_type": _TOKEN_TYPE_ACCESS,
+                "scope":              "openid email admin",
+            })
     assert resp.status_code == 403
+    [record] = _audit_records(caplog, "token_exchange_scope_escalation")
+    assert record["session_id"] == sid
 
 
 def test_token_exchange_scope_beyond_client_allowed(app, store):
@@ -1607,6 +1802,58 @@ def test_device_token_success(app, store):
     assert "expires_in" in data
     # Device flow must be cleaned up
     assert store.get_device_flow("success-code") is None
+
+
+def test_device_token_issued_audit_names_session(caplog, app, store):
+    """device_token_issued carries the session id, joining the polling client's IP and user agent
+    to the device_login event, which records the approving browser's."""
+    _make_device_poll_client(app)
+    sid, skey, session = _make_device_session(store)
+    store.set_device_flow("audit-code", {
+        "client_id":   DEVICE_CLIENT_ID,
+        "verified":    True,
+        "session_key": skey,
+        "interval":    0,
+        "last_poll_at": 0,
+    }, ttl=60)
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":   DEVICE_CLIENT_ID,
+                "grant_type":  DEVICE_GRANT,
+                "device_code": "audit-code",
+            })
+    assert resp.status_code == 200
+    issued = [r.msg for r in caplog.records
+              if isinstance(r.msg, dict) and r.msg.get("event") == "device_token_issued"]
+    assert len(issued) == 1
+    assert issued[0]["session_id"] == sid
+    assert issued[0]["client_id"] == DEVICE_CLIENT_ID
+
+
+def test_device_token_session_gone_returns_expired_token(caplog, app, store):
+    """A verified flow whose session has ended returns expired_token, not a server error."""
+    _make_device_poll_client(app)
+    sid, skey, session = _make_device_session(store)
+    store.delete_session(sid)
+    store.set_device_flow("lost-code", {
+        "client_id":   DEVICE_CLIENT_ID,
+        "verified":    True,
+        "session_key": skey,
+        "interval":    0,
+        "last_poll_at": 0,
+    }, ttl=60)
+    with caplog.at_level(logging.INFO):
+        with app.test_client() as c:
+            resp = c.post("/token", data={
+                "client_id":   DEVICE_CLIENT_ID,
+                "grant_type":  DEVICE_GRANT,
+                "device_code": "lost-code",
+            })
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "expired_token"
+    events = [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict) and "event" in r.msg]
+    assert "device_token_session_lost" in events
 
 
 def test_device_token_flow_deleted_on_success(app, store):

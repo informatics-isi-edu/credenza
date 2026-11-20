@@ -21,15 +21,20 @@ from urllib.parse import urlparse, parse_qs
 from credenza.rest import device as df
 from credenza.api.session.storage.session_store import SessionData, SessionType
 from credenza.rest.device import device_callback
+from credenza.api.session.augmentation.base_provider import EnrichmentResult
 from credenza.api.auth.client.client_registry import ClientRegistry, ClientRecord
 from credenza.api.common.rate_limit import FixedWindowJitterLimiter
 from credenza.rest.helpers import GrantType
 
 class StubDeviceClient:
-    def __init__(self, *, tokens=None, userinfo=None, scope="openid email profile"):
+    def __init__(self, *, tokens=None, userinfo=None, scope="openid email profile",
+                 userinfo_endpoint_data=None, userinfo_endpoint_exc=None):
         self.scope = scope
         self._tokens = tokens or {}
         self._userinfo = userinfo or {}
+        self._userinfo_endpoint_data = userinfo_endpoint_data
+        self._userinfo_endpoint_exc = userinfo_endpoint_exc
+        self.userinfo_fetch_calls = []
 
     def create_authorization_url(self, **kwargs):
         # must return (auth_url, auth_state, code_verifier)
@@ -46,6 +51,12 @@ class StubDeviceClient:
 
     def validate_id_token(self, id_token, nonce):
         return self._userinfo
+
+    def fetch_userinfo(self, access_token):
+        self.userinfo_fetch_calls.append(access_token)
+        if self._userinfo_endpoint_exc is not None:
+            raise self._userinfo_endpoint_exc
+        return self._userinfo_endpoint_data or {}
 
 def _make_device_registry(client_id="device-test-client", *,
                           public=True,
@@ -198,7 +209,7 @@ def test_device_callback_success(client, app, store, monkeypatch, frozen_time):
 
     provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
     monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
-    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
+    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: EnrichmentResult())
 
     resp = client.get("/device/callback", query_string={"code":"c","state":state})
     assert resp.status_code == 200
@@ -251,9 +262,9 @@ def test_device_callback_deferred_augmentation(app, base_session, monkeypatch):
         call_count["count"] += 1
         if call_count["count"] == 1:
             metadata["augmentation_deferred"] = True
-            return userinfo, {}
+            return userinfo, {}, None
         else:
-            return dummy_augmented_userinfo, dummy_additional_tokens
+            return dummy_augmented_userinfo, dummy_additional_tokens, EnrichmentResult(enriched=True)
     monkeypatch.setattr("credenza.rest.device.augment_session", mock_augment)
 
     update_mock = Mock()
@@ -392,3 +403,206 @@ def test_verify_device_ip_rate_limit_returns_429(app, store):
         r2 = c.get("/device/verify/BADCODE2")
     assert r2.status_code == 429
     assert r2.get_json()["error"] == "rate_limited"
+
+
+# ---------------------------------------------------------------------------
+# Userinfo endpoint fallback tests for device_callback
+# ---------------------------------------------------------------------------
+
+def _setup_fallback_device_flow(app, store, stub, monkeypatch, device_code="DCFALL"):
+    """Store a ready device flow and wire up the stub OIDC client and augmentation."""
+    store.set_device_flow(device_code, {
+        "realm": app.config["DEFAULT_REALM"],
+        "redirect_uri": f"{app.config['BASE_URL']}/device/callback",
+        "nonce": "N999",
+        "code_verifier": "CVFALL",
+        "refresh": False,
+    }, ttl=60)
+    monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client",
+                        lambda realm, native_client=True: stub)
+    provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
+    monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
+    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: EnrichmentResult())
+    return device_code
+
+
+def test_device_callback_acr_rejection(client, app, store, monkeypatch):
+    # IDP profile requires aal/2 and ial/2; ID token only asserts aal/1 -- login must be rejected.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {
+        "required_acr": ["https://example.com/aal/2", "https://example.com/ial/2"]
+    }
+    try:
+        stub = StubDeviceClient(
+            tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                    "scope": "openid", "refresh_expires_in": 0},
+            userinfo={"sub": "u1", "acr": "https://example.com/aal/1"},
+        )
+        device_code = _setup_fallback_device_flow(app, store, stub, monkeypatch, device_code="DCACR")
+        resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
+        assert resp.status_code == 403
+        assert store.get_device_flow(device_code).get("session_key") is None
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_device_callback_acr_passes_when_satisfied(client, app, store, monkeypatch):
+    # All required ACR URIs present -- login succeeds.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {
+        "required_acr": ["https://example.com/aal/2", "https://example.com/ial/2"]
+    }
+    try:
+        stub = StubDeviceClient(
+            tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                    "scope": "openid", "refresh_expires_in": 0},
+            userinfo={"sub": "u1", "acr": "https://example.com/aal/2 https://example.com/ial/2"},
+        )
+        device_code = _setup_fallback_device_flow(app, store, stub, monkeypatch, device_code="DCACRPASS")
+        events = []
+        monkeypatch.setattr(df, "audit_event", lambda e, **kw: events.append((e, kw)))
+        resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
+        assert resp.status_code == 200
+        # the satisfied assurance is recorded on the success event
+        login = next(kw for e, kw in events if e == "device_login")
+        assert login["acr"] == "https://example.com/aal/2 https://example.com/ial/2"
+        assert "expires_at" in login and "refresh_expires_at" in login
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_device_callback_userinfo_fallback_fills_missing_claims(client, app, store, monkeypatch):
+    # IDP profile requests email+profile; ID token is sparse; endpoint fills claims.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {"scopes": "openid email profile"}
+    try:
+        stub = StubDeviceClient(
+            tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                    "scope": "openid email profile", "refresh_expires_in": 0},
+            userinfo={"sub": "u1"},
+            userinfo_endpoint_data={"email": "u1@example.com", "name": "User One"},
+        )
+        device_code = _setup_fallback_device_flow(app, store, stub, monkeypatch)
+        resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
+        assert resp.status_code == 200
+        flow = store.get_device_flow(device_code)
+        _, session = store.get_session_by_session_key(flow["session_key"])
+        assert session.userinfo["email"] == "u1@example.com"
+        assert session.userinfo["name"] == "User One"
+        assert stub.userinfo_fetch_calls == ["acc"]
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_device_callback_userinfo_fallback_not_called_when_claims_present(client, app, store, monkeypatch):
+    # ID token already carries email and name -- endpoint must not be called.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {"scopes": "openid email profile"}
+    try:
+        stub = StubDeviceClient(
+            tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                    "scope": "openid email profile", "refresh_expires_in": 0},
+            userinfo={"sub": "u1", "email": "u1@example.com", "name": "User One",
+                      "preferred_username": "u1"},
+        )
+        device_code = _setup_fallback_device_flow(app, store, stub, monkeypatch)
+        resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
+        assert resp.status_code == 200
+        assert stub.userinfo_fetch_calls == []
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_device_callback_userinfo_fallback_not_called_with_skip_flag(client, app, store, monkeypatch):
+    # skip_userinfo_fallback: true suppresses the call even when claims are missing.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {
+        "scopes": "openid email profile",
+        "skip_userinfo_fallback": True,
+    }
+    try:
+        stub = StubDeviceClient(
+            tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                    "scope": "openid email profile", "refresh_expires_in": 0},
+            userinfo={"sub": "u1"},
+        )
+        device_code = _setup_fallback_device_flow(app, store, stub, monkeypatch)
+        resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
+        assert resp.status_code == 200
+        assert stub.userinfo_fetch_calls == []
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_device_callback_userinfo_fallback_failure_creates_degraded_session(client, app, store, monkeypatch):
+    # Endpoint raises; callback still succeeds and session is created without the missing claims.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {"scopes": "openid email profile"}
+    try:
+        stub = StubDeviceClient(
+            tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                    "scope": "openid email profile", "refresh_expires_in": 0},
+            userinfo={"sub": "u1"},
+            userinfo_endpoint_exc=RuntimeError("network error"),
+        )
+        device_code = _setup_fallback_device_flow(app, store, stub, monkeypatch)
+        resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
+        assert resp.status_code == 200
+        flow = store.get_device_flow(device_code)
+        _, session = store.get_session_by_session_key(flow["session_key"])
+        assert session is not None
+        assert session.userinfo.get("email") is None
+        assert stub.userinfo_fetch_calls == ["acc"]
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+# ---------------------------------------------------------------------------
+# Device session lifetime (realm session_max_lifetime, refresh=false following the upstream token)
+# ---------------------------------------------------------------------------
+
+def _device_login(client, app, store, monkeypatch, *, refresh, tokens, device_code):
+    stub = StubDeviceClient(tokens=tokens, userinfo={"sub": "u1", "iss": "https://issuer"})
+    _setup_fallback_device_flow(app, store, stub, monkeypatch, device_code=device_code)
+    flow = store.get_device_flow(device_code)
+    flow["refresh"] = refresh
+    store.set_device_flow(device_code, flow, ttl=60)
+    resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
+    assert resp.status_code == 200
+    _, session = store.get_session_by_session_key(store.get_device_flow(device_code)["session_key"])
+    return session
+
+
+def test_device_session_without_auto_refresh_ends_with_upstream_token(client, app, store, monkeypatch):
+    now = int(time.time())
+    app.config["OIDC_IDP_PROFILES"]["test"] = {}
+    try:
+        session = _device_login(client, app, store, monkeypatch, refresh=False, device_code="DCNOREF",
+                                tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                                        "scope": "openid", "expires_at": now + 1800})
+        assert session.expires_at == now + 1800
+        assert session.session_ttl == 0, "must not slide on use"
+        assert session.absolute_expires_at > session.expires_at
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_device_session_with_auto_refresh_lasts_its_absolute_lifetime(client, app, store, monkeypatch):
+    now = int(time.time())
+    app.config["OIDC_IDP_PROFILES"]["test"] = {}
+    try:
+        session = _device_login(client, app, store, monkeypatch, refresh=True, device_code="DCREF",
+                                tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                                        "scope": "openid", "expires_at": now + 1800})
+        assert session.expires_at == session.absolute_expires_at
+        assert abs(session.absolute_expires_at - (now + 14 * 86400)) <= 2
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_realm_device_cap_bounds_device_sessions(client, app, store, monkeypatch):
+    now = int(time.time())
+    app.config["OIDC_IDP_PROFILES"]["test"] = {}
+    monkeypatch.setitem(app.config, "SESSION_MAX_LIFETIMES", {"test": {"device": 7 * 86400}})
+    try:
+        session = _device_login(client, app, store, monkeypatch, refresh=True, device_code="DCCAP",
+                                tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                                        "scope": "openid", "expires_at": now + 1800})
+        assert abs(session.absolute_expires_at - (now + 7 * 86400)) <= 2
+        assert session.expires_at == session.absolute_expires_at
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)

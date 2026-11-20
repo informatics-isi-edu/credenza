@@ -25,10 +25,11 @@
 
 TMP_ENV=$(mktemp /tmp/credenza.env.XXXXXX)
 TMP_OIDC=$(mktemp /tmp/oidc_idp_profiles.json.XXXXX)
+TMP_KEY=$(mktemp /tmp/encryption_key.json.XXXXXX)
 
 cleanup()
 {
-    rm -f "${TMP_ENV}" "${TMP_OIDC}"
+    rm -f "${TMP_ENV}" "${TMP_OIDC}" "${TMP_KEY}"
 }
 
 trap cleanup 0
@@ -85,8 +86,10 @@ case "$(cat /etc/redhat-release)" in
         ;;
 esac
 
+# Advisory only: nothing below needs HTTPS to be serving, and a failure here could be DNS,
+# httpd or the certificate. Note $(hostname) is not necessarily CREDENZA_BASE_URL.
 curl -s "https://$(hostname)/" > /dev/null \
-    || error Failed to validate connectivity to "https://$(hostname)/"
+    || echo "WARNING: could not reach https://$(hostname)/ -- verify DNS, httpd and TLS before using this deployment"
 
 [[ -f /etc/httpd/conf.d/wsgi.conf || -f /etc/httpd/conf.modules.d/10-wsgi-python3.conf ]] \
     || error Failed to detect mod_wsgi config prerequisite \(checked /etc/httpd/conf.d/wsgi.conf and /etc/httpd/conf.modules.d/10-wsgi-python3.conf\)
@@ -130,9 +133,13 @@ then
     error Failed to test for presence of credenza postgresql DB
 fi
 
-[[ $pgdbcnt -eq 1 ]] \
-    || su -c "createdb -O credenza credenza" - postgres \
-    || error Failed to create credenza postgresql DB
+if [[ $pgdbcnt -eq 1 ]]
+then
+    CREDENZA_DB_CREATED=false
+else
+    su -c "createdb -O credenza credenza" - postgres || error Failed to create credenza postgresql DB
+    CREDENZA_DB_CREATED=true
+fi
 
 # idempotently deploy default configs
 [[ -f /etc/httpd/conf.d/wsgi_credenza.conf ]] \
@@ -176,8 +183,49 @@ idempotent_semanage_add \
     httpd_sys_content_t \
     '/home/credenza/secrets/.*'
 
+# Session encryption key. Generate one only when this run also created the database, the one
+# state in which no encrypted session data can exist yet. If the database was already present,
+# a missing key file may mean the key was lost rather than never set, and generating a new one
+# would silently destroy every stored session, so warn and let credenza fail closed at startup
+# instead. An existing key file is never touched. This runs before restorecon so that a newly
+# generated key gets the SE-Linux label registered above.
+CREDENZA_ENV=/home/credenza/config/credenza.env
+CREDENZA_KEYFILE=/home/credenza/secrets/encryption_key.json
+
+# a '$' in the value means an unsubstituted "${CREDENZA_ENCRYPTION_KEY}" template, which
+# interpolates to the empty string at runtime and is not a usable key
+CREDENZA_KEY_CONFIGURED=false
+if [[ -n "$CREDENZA_ENCRYPTION_KEY" ]]
+then
+    CREDENZA_KEY_CONFIGURED=true
+elif grep -Eq '^CREDENZA_ENCRYPTION_KEY=.' "$CREDENZA_ENV" && ! grep -Eq '^CREDENZA_ENCRYPTION_KEY=.*[$]' "$CREDENZA_ENV"
+then
+    CREDENZA_KEY_CONFIGURED=true
+fi
+
+if grep -Eq '^CREDENZA_ENCRYPT_SESSION_DATA=true' "$CREDENZA_ENV" && [[ $CREDENZA_KEY_CONFIGURED = false ]]
+then
+    if [[ -r "$CREDENZA_KEYFILE" ]]
+    then
+        echo "Using existing session encryption key ${CREDENZA_KEYFILE}"
+    elif [[ $CREDENZA_DB_CREATED = true ]]
+    then
+        python3 -c 'import json, secrets; print(json.dumps({"encryption_key": secrets.token_urlsafe(24)}, indent=2))' > "${TMP_KEY}" \
+            || error Failed to generate a session encryption key
+        install -o credenza -g apache -m u=rw,go= -T "${TMP_KEY}" "${CREDENZA_KEYFILE}" \
+            || error Failed to deploy "${CREDENZA_KEYFILE}"
+        echo "Generated session encryption key ${CREDENZA_KEYFILE} -- back this up, losing it invalidates every stored session"
+    else
+        echo WARNING: session encryption is enabled but "${CREDENZA_KEYFILE}" must be populated by the admin
+    fi
+fi
+
 restorecon -rv /home/credenza/
 
-[[ -r /home/credenza/secrets/globus_client_secret.json ]] \
-    || echo WARNING: /home/credenza/secrets/globus_client_secret.json must be populated by the admin
-
+# Each realm in oidc_idp_profiles.json names a client_secret_file that is provisioned out
+# of band. The filenames vary by provider, so just check whether anything was provisioned
+# at all. encryption_key.json is excluded: this script may have generated it above.
+if [[ -z "$(find /home/credenza/secrets -maxdepth 1 -name '*.json' ! -name 'encryption_key.json' -print -quit 2>/dev/null)" ]]
+then
+    echo WARNING: no OIDC client secret files in /home/credenza/secrets -- the client_secret_file for each configured realm must be populated by the admin
+fi

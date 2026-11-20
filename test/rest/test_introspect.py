@@ -15,6 +15,7 @@
 #
 import time
 import pytest
+from dataclasses import replace
 from flask import Flask
 from werkzeug.exceptions import HTTPException
 
@@ -119,6 +120,7 @@ def app(store):
     a.config["SESSION_STORE"] = store
     a.config["CLIENT_REGISTRY"] = ClientRegistry(version="0", clients={})
     a.config["IDP_CLAIM_MAPS"] = {}
+    a.config["SESSION_AUGMENTATION_PROVIDERS"] = {}
     a.config["BASE_URL"] = "https://authn.example.com/authn"
     a.config["ENABLE_LEGACY_API"] = False
     a.register_blueprint(introspect_blueprint)
@@ -247,10 +249,88 @@ def test_introspect_iss_is_credenza_not_idp(app, client, live_token):
 
 
 def test_introspect_userinfo_claims_present(app, client, live_token):
-    """Userinfo fields from the session are included in the response."""
+    """Identity-model claims from the session are included in the response."""
     _set_registry(app, _make_public_client("rs"))
     body = client.post("/introspect", data={"client_id": "rs", "token": live_token}).get_json()
     assert body["email"] == "user42@example.com"
+
+
+@pytest.fixture
+def rich_token(store):
+    """A live session whose userinfo carries claims outside Credenza's identity model."""
+    now = int(time.time())
+    skey, _ = store.create_session(
+        session_id=store.generate_session_id(),
+        session_type=SessionType.USER,
+        access_token=store.generate_session_key(),
+        scopes="openid email profile",
+        realm="default",
+        userinfo={
+            "sub": "user42",
+            "iss": "https://idp.example.com",
+            "aud": ["idp-client-id"],
+            "name": "User Forty-Two",
+            "preferred_username": "user42",
+            "email": "user42@example.com",
+            "groups": ["g1"],
+            "roles": ["r1"],
+            "passport_jwt_v11": "eyJ.passport.jwt",
+            "txn": "TXN-1",
+            "department": "Research Computing",
+        },
+        allowed_resources=["https://rs.example.com"],
+        expires_at=now + 3600,
+        session_ttl=3600,
+    )
+    return skey
+
+
+def test_introspect_returns_identity_model_not_upstream_passthrough(app, client, rich_token):
+    """Upstream claims outside the identity model are not returned by default."""
+    _set_registry(app, _make_public_client("rs"))
+    body = client.post("/introspect", data={"client_id": "rs", "token": rich_token}).get_json()
+    assert body["active"] is True
+    assert body["preferred_username"] == "user42"
+    assert body["full_name"] == "User Forty-Two"
+    assert body["groups"] == ["g1"]
+    assert body["roles"] == ["r1"]
+    assert body["identities"] == {}
+    # the upstream issuer survives only inside id; iss and aud are Credenza's
+    assert body["id"] == "https://idp.example.com/user42"
+    assert body["iss"] == "https://authn.example.com/authn"
+    assert body["aud"] == ["https://rs.example.com"]
+    for claim in ("passport_jwt_v11", "txn", "department", "name"):
+        assert claim not in body
+
+
+def test_introspect_include_claims_adds_configured_claims(app, client, rich_token):
+    """introspection_include_claims adds the named claims; absent ones are omitted."""
+    rec = replace(_make_public_client("rs"), introspection_include_claims=["department", "txn", "absent"])
+    _set_registry(app, rec)
+    body = client.post("/introspect", data={"client_id": "rs", "token": rich_token}).get_json()
+    assert body["department"] == "Research Computing"
+    assert body["txn"] == "TXN-1"
+    assert "absent" not in body
+    assert "passport_jwt_v11" not in body
+
+
+def test_introspect_include_claims_resolved_through_claim_map(app, client, rich_token):
+    """Included claims resolve through the realm claim map, like the identity model."""
+    app.config["IDP_CLAIM_MAPS"] = {"default": {"org_unit": ["department"]}}
+    rec = replace(_make_public_client("rs"), introspection_include_claims=["org_unit"])
+    _set_registry(app, rec)
+    body = client.post("/introspect", data={"client_id": "rs", "token": rich_token}).get_json()
+    assert body["org_unit"] == "Research Computing"
+
+
+def test_client_record_rejects_reserved_include_claims():
+    with pytest.raises(ValueError, match="always emits"):
+        ClientRecord(client_id="rs", public=True, introspection_include_claims=["email", "txn"])
+
+
+def test_client_record_normalizes_include_claims():
+    rec = ClientRecord(client_id="rs", public=True, introspection_include_claims=[" txn ", "txn", "dept"])
+    assert rec.introspection_include_claims == ["dept", "txn"]
 
 
 # ---------------------------------------------------------------------------

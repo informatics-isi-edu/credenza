@@ -15,11 +15,12 @@
 #
 import logging
 from flask import Blueprint, request, jsonify, current_app
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
 from ..api.auth.client.client_registry import ClientRegistry
 from ..api.auth.client.adapters.adapter import ProofContext
 from ..api.common.claim_mapper import resolve_claim, get_claim_map_for_realm
 from ..api.common.util import get_effective_scopes, get_request_resource_args
+from .session import session_identity_claims
 from .helpers import (
     validate_client,
     adapter_authenticate,
@@ -119,13 +120,22 @@ def introspect_token():
             )
             return jsonify(_INACTIVE)
 
-    # Build response: start from session.userinfo (already normalized at session creation),
-    # then overlay RFC 7662 structural fields so the RS gets canonical values.
+    # Build response: Credenza's identity model (shared with GET /session), then any extra
+    # claims this client is configured to receive, then the RFC 7662 structural fields.
+    # Upstream userinfo is never passed through wholesale.
     base_url = current_app.config["BASE_URL"].rstrip("/")
     claim_map = get_claim_map_for_realm(session.realm, realm_maps=current_app.config.get("IDP_CLAIM_MAPS"))
     sub = resolve_claim(session.userinfo, claim_map, "sub", session.userinfo.get("sub"))
 
-    response = dict(session.userinfo)
+    response = session_identity_claims(session)
+    # The upstream issuer and audience are superseded by the RFC 7662 fields below; the
+    # upstream issuer remains visible in "id" ("<iss>/<sub>").
+    response.pop("iss", None)
+    response.pop("aud", None)
+    for claim in client_rec.introspection_include_claims:
+        value = resolve_claim(session.userinfo, claim_map, claim)
+        if value is not None:
+            response[claim] = value
     response.update({
         "active": True,
         "iss": base_url,
@@ -143,7 +153,7 @@ def introspect_token():
         client_id=client_rec.client_id,
         session_id=sid,
         realm=session.realm,
-        sub=sub,
+        **audit_identity(session.userinfo, session.realm),
         resources=session.allowed_resources,
     )
 

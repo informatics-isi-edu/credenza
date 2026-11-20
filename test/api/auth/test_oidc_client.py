@@ -20,7 +20,9 @@ import requests
 from types import SimpleNamespace
 from authlib.integrations.requests_client import OAuth2Session
 from authlib.jose import jwt
-from credenza.api.auth.oidc_client import OIDCClientFactory, OIDCClient, _claims_summary
+from credenza.api.auth.oidc_client import (
+    OIDCClientFactory, OIDCClient, _claims_summary, DEFAULT_IDP_HTTP_TIMEOUT,
+)
 
 # Shared profile fixtures
 @pytest.fixture
@@ -103,7 +105,7 @@ class DummySession:
         self._status = status_code
         self._exc = exc
 
-    def revoke_token(self, url, token, token_type_hint):
+    def revoke_token(self, url, token, token_type_hint, **kwargs):
         if self._exc:
             raise self._exc
         return SimpleNamespace(status_code=self._status)
@@ -222,6 +224,34 @@ def test_manual_endpoints(monkeypatch, dummy_profile, profile_file):
     assert oc.authorize_url == "https://issuer/auth"
     assert oc.introspect_url == "https://issuer/instrospect"
     assert oc.revocation_url == "https://issuer/token/revoke"
+
+
+def test_token_calls_pass_an_http_timeout(monkeypatch, client):
+    # Refresh, dependent-token and revocation calls can run while a session lock is held,
+    # so each must carry a timeout rather than wait on the IdP indefinitely.
+    seen = []
+
+    class RecordingSession(DummySession):
+        def refresh_token(self, url, **kwargs):
+            seen.append(("refresh", kwargs.get("timeout")))
+            return {"access_token": "at2", "expires_in": 3600}
+
+        def fetch_token(self, url, **kwargs):
+            seen.append(("fetch", kwargs.get("timeout")))
+            return {"access_token": "at"}
+
+        def revoke_token(self, url, token, token_type_hint, **kwargs):
+            seen.append(("revoke", kwargs.get("timeout")))
+            return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(OIDCClient, "get_oauth_session", lambda self, **kw: RecordingSession())
+    client.revocation_url = "https://iss/revoke"
+    client.refresh_access_token("rt")
+    client.fetch_dependent_tokens("at", grant_type="urn:globus:auth:grant_type:dependent_token")
+    client.revoke_token("openid", "at")
+    assert seen == [("refresh", DEFAULT_IDP_HTTP_TIMEOUT), ("fetch", DEFAULT_IDP_HTTP_TIMEOUT),
+                    ("revoke", DEFAULT_IDP_HTTP_TIMEOUT)]
+    assert DEFAULT_IDP_HTTP_TIMEOUT == 15
 
 
 def test_revoke_token_success(monkeypatch, client):

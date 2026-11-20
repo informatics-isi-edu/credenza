@@ -17,13 +17,13 @@ import time
 import logging
 from typing import Dict, Optional, List, Any
 from flask import Blueprint, request, jsonify, abort, current_app
-from ..telemetry import audit_event
+from ..telemetry import audit_event, audit_identity
 from ..api.session.storage.session_store import SessionStore, SessionType
 from ..api.auth.client.client_registry import ClientRegistry, ClientRecord, DEFAULT_CLIENT_AUTH_MAX_SESSION_TTL
 from ..api.auth.client.adapters.adapter import ProofContext, AdapterResult
 from ..api.common.errors import OAuthError
 from ..api.common.claim_mapper import merge_additional_claims, get_claim_map_for_realm
-from ..api.common.util import revoke_tokens, normalize_str_list, get_effective_scopes, MAX_SCOPES, MAX_RESOURCES
+from ..api.common.util import end_session, normalize_str_list, get_effective_scopes, MAX_SCOPES, MAX_RESOURCES
 from ..api.common.crypto import verify_pkce
 from .helpers import (
     validate_client,
@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 DERIVED_SESSION_MAX_TTL = 1800  # 30-minute hard cap for derived (exchanged) sessions
 SUBJECT_TOKEN_TYPE_ACCESS = "urn:ietf:params:oauth:token-type:access_token"
+MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS = 86400  # server-wide ceiling on client_rec.absolute_session_lifetime_seconds
+LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS = 1209600  # 14 days; matches the offline_access refresh-token convention
 
 token_blueprint = Blueprint("token", __name__)
 
@@ -155,12 +157,8 @@ def revoke_token():
                     request_id=get_request_id(), client_id=client_id)
         return current_app.response_class(status=200)
 
-    # revoke any dependent tokens
-    if session.is_primary():
-        revoke_tokens(sid, session)
-
-    # delete the session
-    store.delete_session(sid)
+    # revoke any dependent tokens (primary sessions only) and delete the session
+    end_session(sid, session, revoke=session.is_primary())
 
     audit_event(
         "token_revoked",
@@ -168,7 +166,7 @@ def revoke_token():
         session_id=sid,
         client_id=client_id,
         realm=session.realm,
-        sub=session.userinfo.get("sub"),
+        **audit_identity(session.userinfo, session.realm),
         session_type=str(session.session_type),
     )
 
@@ -225,6 +223,28 @@ def _handle_client_credentials_grant(proof_ctx: ProofContext,
     # Clamp the requested TTL to the client's max_session_ttl_seconds.
     ttl = validate_and_clamp_ttl(proof_ctx=proof_ctx, client_rec=client_rec, subject=sub)
 
+    # Clamp the client's configured absolute lifetime to a server-wide ceiling. Unset
+    # (None) resolves to the ceiling itself via clamp_ttl(), preserving today's default
+    # behavior for any client that doesn't explicitly configure this field.
+    absolute_ceiling = current_app.config.get("MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS",
+                                              MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS)
+    absolute_ttl = clamp_ttl(absolute_ceiling, client_rec.absolute_session_lifetime_seconds)
+
+    # Non-blocking signal for review: flag configurations granting an unusually long
+    # M2M session lifetime, without stopping the issuance itself.
+    long_lifetime_threshold = current_app.config.get("LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS",
+                                                      LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS)
+    if absolute_ttl > long_lifetime_threshold:
+        audit_event(
+            "token_issued_long_absolute_lifetime",
+            request_id=get_request_id(),
+            realm=client_rec.realm,
+            client_id=client_id,
+            **audit_identity({"sub": sub}, client_rec.realm),
+            absolute_ttl=absolute_ttl,
+            threshold=long_lifetime_threshold,
+        )
+
     # Build the userinfo dict: start from the subject, merge client and adapter additional claims.
     userinfo = merge_userinfo({"sub": sub}, client_rec, adapter_additional_claims)
 
@@ -239,19 +259,21 @@ def _handle_client_credentials_grant(proof_ctx: ProofContext,
         allowed_resources=resources,
         expires_at=int(time.time()) + ttl,
         session_ttl=ttl,
+        absolute_session_lifetime_secs=absolute_ttl,
         metadata=metadata
     )
 
     audit_event(
         "token_issued",
         request_id=get_request_id(),
-        session=sid,
+        session_id=sid,
         realm=client_rec.realm,
         client_id=client_id,
-        sub=sub,
+        **audit_identity(userinfo, client_rec.realm),
         resources=resources,
         scopes=scopes,
-        ttl=ttl
+        ttl=ttl,
+        absolute_ttl=absolute_ttl
     )
 
     return jsonify({"access_token": skey,
@@ -306,18 +328,23 @@ def _handle_authorization_code_grant(proof_ctx: ProofContext,
                     request_id=get_request_id(), client_id=client_id)
         abort(400, description=OAuthError.INVALID_GRANT)
 
+    # The session created during /callback. The failures below name it, so that a failed
+    # redemption (which also spends the code) appears on that session's audit trail.
+    session_id = payload.get("session_id")
+
     # client_id must match what was recorded at /authorize
     if payload.get("client_id") != client_id:
         audit_event("token_authz_code_client_mismatch",
                     request_id=get_request_id(),
                     client_id=client_id,
+                    session_id=session_id,
                     code_client_id=payload.get("client_id"))
         abort(400, description=OAuthError.INVALID_GRANT)
 
     # redirect_uri must match exactly
     if payload.get("redirect_uri") != redirect_uri:
         audit_event("token_authz_code_redirect_uri_mismatch",
-                    request_id=get_request_id(), client_id=client_id)
+                    request_id=get_request_id(), client_id=client_id, session_id=session_id)
         abort(400, description=OAuthError.INVALID_GRANT)
 
     # PKCE verification (required when challenge was stored)
@@ -326,20 +353,18 @@ def _handle_authorization_code_grant(proof_ctx: ProofContext,
     if code_challenge:
         if not code_verifier:
             audit_event("token_authz_code_missing_verifier",
-                        request_id=get_request_id(), client_id=client_id)
+                        request_id=get_request_id(), client_id=client_id, session_id=session_id)
             abort(400, description=OAuthError.INVALID_REQUEST)
         if not verify_pkce(code_challenge, code_verifier, code_challenge_method):
             audit_event("token_authz_code_pkce_failed",
-                        request_id=get_request_id(), client_id=client_id)
+                        request_id=get_request_id(), client_id=client_id, session_id=session_id)
             abort(400, description=OAuthError.INVALID_GRANT)
     elif client_rec.public and code_verifier:
         # verifier supplied but no challenge was stored -- unexpected for public client
         audit_event("token_authz_code_unexpected_verifier",
-                    request_id=get_request_id(), client_id=client_id)
+                    request_id=get_request_id(), client_id=client_id, session_id=session_id)
         abort(400, description=OAuthError.INVALID_REQUEST)
 
-    # Retrieve the session created during /callback
-    session_id = payload.get("session_id")
     if not session_id:
         audit_event("token_authz_code_missing_session_id",
                     request_id=get_request_id(), client_id=client_id)
@@ -369,7 +394,7 @@ def _handle_authorization_code_grant(proof_ctx: ProofContext,
         session_id=session_id,
         client_id=client_id,
         realm=payload.get("realm"),
-        sub=session.userinfo.get("sub"),
+        **audit_identity(session.userinfo, session.realm),
         resources=payload.get("resources", []),
         scope=payload.get("scope", ""),
         expires_in=expires_in,
@@ -453,13 +478,12 @@ def _handle_device_code_grant(proof_ctx: ProofContext,
 
     # Retrieve the session created during device callback
     session_key = flow["session_key"]
-    session_info = store.get_active_session_by_session_key(session_key)
-    if session_info is None:
+    sid, session = store.get_active_session_by_session_key(session_key)
+    if session is None:
         audit_event("device_token_session_lost",
                     request_id=get_request_id(), client_id=client_id)
         return jsonify({"error": "expired_token"}), 400
 
-    _, session = session_info
     store.delete_device_flow(device_code)
 
     expires_in = max(0, session.expires_at - int(time.time()))
@@ -467,9 +491,10 @@ def _handle_device_code_grant(proof_ctx: ProofContext,
     audit_event(
         "device_token_issued",
         request_id=get_request_id(),
+        session_id=sid,
         client_id=client_id,
         realm=session.realm,
-        sub=session.userinfo.get("sub"),
+        **audit_identity(session.userinfo, session.realm),
         expires_in=expires_in,
     )
 
@@ -539,14 +564,14 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
     # No transitive exchange: DERIVED sessions cannot be re-exchanged
     if session.is_derived():
         audit_event("token_exchange_transitive_denied",
-                    request_id=get_request_id(), client_id=client_id, sid=sid)
+                    request_id=get_request_id(), client_id=client_id, session_id=sid)
         abort(403, description=OAuthError.ACCESS_DENIED)
 
     # Default-deny: require an explicit allowed_token_exchange_targets list
     allowed_targets = normalize_str_list(client_rec.allowed_token_exchange_targets or [])
     if not allowed_targets:
         audit_event("token_exchange_no_targets_configured",
-                    request_id=get_request_id(), client_id=client_id, sid=sid)
+                    request_id=get_request_id(), client_id=client_id, session_id=sid)
         abort(403, description=OAuthError.ACCESS_DENIED)
 
     # Resource policy: permitted = intersection of client allowed exchange targets and client allowed resources.
@@ -569,14 +594,14 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
 
     if not final_resources:
         audit_event("token_exchange_no_resources",
-                    request_id=get_request_id(), client_id=client_id, sid=sid)
+                    request_id=get_request_id(), client_id=client_id, session_id=sid)
         abort(403, description=OAuthError.ACCESS_DENIED)
 
     disallowed_resources = set(final_resources) - permitted_resource_set
     if disallowed_resources:
         audit_event("token_exchange_resource_denied",
                     request_id=get_request_id(), client_id=client_id,
-                    sid=sid, disallowed=sorted(disallowed_resources))
+                    session_id=sid, disallowed=sorted(disallowed_resources))
         abort(403, description=OAuthError.ACCESS_DENIED)
 
     # Scope policy: permitted = subject scopes (intersection of client allowed_scopes if configured)
@@ -591,7 +616,7 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
     if disallowed_scopes:
         audit_event("token_exchange_scope_escalation",
                     request_id=get_request_id(), client_id=client_id,
-                    sid=sid, disallowed_scopes=sorted(disallowed_scopes))
+                    session_id=sid, disallowed_scopes=sorted(disallowed_scopes))
         abort(403, description=OAuthError.INSUFFICIENT_SCOPE)
 
     # TTL: capped at DERIVED_SESSION_MAX_TTL (configurable) and client max_session_ttl_seconds
@@ -600,7 +625,6 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
     ttl = min(max_ttl, client_max)
 
     userinfo = dict(session.userinfo)
-    sub = userinfo.get("sub")
     scope_str = " ".join(sorted(final_scopes))
 
     new_sid = store.generate_session_id()
@@ -624,7 +648,7 @@ def _handle_token_exchange_grant(proof_ctx: ProofContext,
         client_id=client_id,
         base_session_id=sid,
         realm=session.realm,
-        sub=sub,
+        **audit_identity(userinfo, session.realm),
         resources=final_resources,
         scopes=final_scopes,
         ttl=ttl,

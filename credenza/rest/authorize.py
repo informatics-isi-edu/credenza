@@ -16,7 +16,7 @@
 import time
 import logging
 from secrets import token_urlsafe
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from flask import Blueprint, request, redirect, abort, current_app
 from .helpers import perf_logged, get_request_id
 from ..telemetry import audit_event
@@ -27,6 +27,45 @@ from ..api.common.util import normalize_str_list
 logger = logging.getLogger(__name__)
 
 authorize_blueprint = Blueprint("authorize", __name__)
+
+# Loopback hosts eligible for the RFC 8252 sec. 7.3 port-flexible match.
+# The IP literals are preferred by the RFC; "localhost" is NOT RECOMMENDED but
+# accepted here because common native clients (e.g. Claude Code) use it.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback_http(parts):
+    """True if a urlsplit() result is an http loopback redirect URI."""
+    return parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS
+
+
+def redirect_uri_allowed(requested, allowed_uris):
+    """
+    Match a requested redirect_uri against a client's registered list.
+
+    Exact string match per RFC 6749 sec. 3.1.2.3, plus the RFC 8252 sec. 7.3
+    loopback exception: for http loopback redirects the authorization server
+    MUST allow any port, so a requested loopback URI matches a registered
+    loopback URI with the same scheme, host, and path regardless of port.
+
+    The exception relaxes the port only -- a loopback redirect still must be
+    registered with a matching scheme/host/path, preserving default-deny. Host
+    tokens are compared as-is, so a registered "localhost" entry does not match
+    a requested "127.0.0.1" (and vice versa). Gated by LOOPBACK_REDIRECT_ANY_PORT.
+    """
+    allowed = allowed_uris or []
+    if requested in allowed:
+        return True
+    if not current_app.config.get("LOOPBACK_REDIRECT_ANY_PORT", True):
+        return False
+    req = urlsplit(requested)
+    if not _is_loopback_http(req):
+        return False
+    for candidate in allowed:
+        cand = urlsplit(candidate)
+        if _is_loopback_http(cand) and cand.hostname == req.hostname and cand.path == req.path:
+            return True
+    return False
 
 
 @authorize_blueprint.route("/authorize", methods=["GET"])
@@ -60,7 +99,7 @@ def authorize():
     redirect_uri = (request.args.get("redirect_uri") or "").strip()
     if not redirect_uri:
         abort(400, description="missing redirect_uri")
-    if redirect_uri not in (client_rec.allowed_redirect_uris or []):
+    if not redirect_uri_allowed(redirect_uri, client_rec.allowed_redirect_uris):
         audit_event("authorize_invalid_redirect_uri",
                     client_id=client_id,
                     redirect_uri=redirect_uri,

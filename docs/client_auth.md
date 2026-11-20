@@ -62,6 +62,20 @@ RFC 7662. The calling resource server must be a registered client. If it declare
 `allowed_introspection_resources`, only tokens carrying a matching resource will
 be returned as active.
 
+An active response carries a fixed set of claims and nothing else from the upstream IdP:
+
+- RFC 7662 fields: `active`, `iss` (Credenza's `BASE_URL`), `sub`, `aud` (the token's bound
+  resources), `exp`, `iat`, `token_type`, `scope`.
+- Credenza's identity model, the same one `GET /session` renders, with each claim resolved
+  through the realm's claim map: `preferred_username`, `full_name`, `email`, `email_verified`,
+  `id` (`<upstream iss>/<sub>`), `userid` (when present), `groups`, `roles`, `identities`.
+- Any extra claims named in the calling client's `introspection_include_claims`. These are also
+  resolved through the claim map, and omitted when the session has no value for them.
+
+Claims outside these sets are never returned, however the session came to hold them. Examples are
+NIH RAS's `passport_jwt_v11` and `txn`, and an M2M client's `additional_claims` keys that the
+identity model does not map.
+
 ---
 
 ## 3. Token validation model
@@ -76,8 +90,9 @@ A client-issued access token is opaque. Resource servers validate it by calling
 - checks expiry
 - enforces resource intersection if `resource` param is provided or if the calling
   client declares `allowed_introspection_resources`
-- returns a RFC 7662 response including `active`, `sub`, `aud`, `scope`, `exp`, and
-  any additional claims stored at issuance
+- returns a RFC 7662 response including `active`, `sub`, `aud`, `scope` and `exp`, plus
+  Credenza's identity model and any claims the calling client lists in
+  `introspection_include_claims` (see "Introspect token" above)
 
 This model provides:
 
@@ -156,8 +171,11 @@ the JSON object key.
 
 #### Additional claims
 
-- `additional_claims` -- arbitrary key/value pairs stored in `session.userinfo` and
-  returned via introspection (e.g., `name`, `email`, `username`, `roles`)
+- `additional_claims` -- arbitrary key/value pairs stored in `session.userinfo` (e.g., `name`,
+  `email`, `username`, `roles`). Introspection returns them through the identity model: `name`
+  appears as `full_name`, `username` as `preferred_username`, and `email` and `roles` as
+  themselves. Any other key reaches a resource server only if that resource server's client
+  entry lists it in `introspection_include_claims`.
 
 #### Session lifetime
 
@@ -170,6 +188,10 @@ the JSON object key.
 - `allowed_introspection_resources` -- if set, this client may only introspect tokens
   whose `allowed_resources` intersects this list; restricts a resource server to
   introspecting only tokens issued for its own resources
+- `introspection_include_claims` -- extra claim names this client receives in introspection
+  responses, beyond the identity model. Each name is resolved through the session realm's claim
+  map. A name the identity model or RFC 7662 already covers (`email`, `roles`, `iss`, ...) is
+  rejected at registry load.
 
 #### Token exchange
 

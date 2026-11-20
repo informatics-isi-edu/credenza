@@ -8,7 +8,14 @@ Redirect 302 /.well-known/oauth-authorization-server/authn /authn/.well-known/oa
 
 WSGIPythonOptimize 1
 WSGIDaemonProcess @DAEMONUSER@ processes=1 threads=4 user=@DAEMONUSER@ maximum-requests=2000
-WSGIScriptAlias /authn @PYLIBDIR@/credenza/credenza_wsgi.py process-group=@DAEMONUSER@
+
+# Naming both process-group and application-group makes mod_wsgi import the application when the
+# daemon process starts, instead of on the first request to it. Credenza's background refresh
+# worker is a thread started at import, so without this it does not run after an Apache restart or
+# a process recycle (maximum-requests) until some request reaches /authn, and device sessions with
+# automatic refresh go unrefreshed in the meantime. See the WSGIScriptAlias documentation:
+# https://modwsgi.readthedocs.io/en/master/configuration-directives/WSGIScriptAlias.html
+WSGIScriptAlias /authn @PYLIBDIR@/credenza/credenza_wsgi.py process-group=@DAEMONUSER@ application-group=%{GLOBAL}
 WSGIPassAuthorization On
 
 WSGISocketPrefix @WSGISOCKETPREFIX@

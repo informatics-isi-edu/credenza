@@ -413,3 +413,101 @@ def test_callback_regular_flow_unchanged(client, store):
     assert resp.status_code == 302
     assert resp.headers["Location"].endswith("/dashboard")
     assert "credenza-test" in resp.headers.get("Set-Cookie", "")
+
+
+# ===========================================================================
+# redirect_uri_allowed -- RFC 8252 sec. 7.3 loopback port exception
+# ===========================================================================
+
+@pytest.fixture
+def app_ctx(app):
+    """App context so redirect_uri_allowed can read current_app.config."""
+    with app.app_context():
+        yield app
+
+
+def test_redirect_exact_match(app_ctx):
+    assert az.redirect_uri_allowed("https://client.example/cb",
+                                   ["https://client.example/cb"]) is True
+
+
+def test_redirect_no_match_rejected(app_ctx):
+    assert az.redirect_uri_allowed("https://evil.example/cb",
+                                   ["https://client.example/cb"]) is False
+
+
+def test_redirect_loopback_port_floats(app_ctx):
+    # Registered with one port; request arrives on a different (ephemeral) port.
+    assert az.redirect_uri_allowed("http://localhost:49321/callback",
+                                   ["http://localhost:8080/callback"]) is True
+
+
+def test_redirect_loopback_config_without_port(app_ctx):
+    # Registry entry omits the port entirely; any loopback port still matches.
+    assert az.redirect_uri_allowed("http://localhost:8080/callback",
+                                   ["http://localhost/callback"]) is True
+
+
+def test_redirect_loopback_ipv4_literal(app_ctx):
+    assert az.redirect_uri_allowed("http://127.0.0.1:5555/callback",
+                                   ["http://127.0.0.1:8080/callback"]) is True
+
+
+def test_redirect_loopback_ipv6_literal(app_ctx):
+    assert az.redirect_uri_allowed("http://[::1]:5555/callback",
+                                   ["http://[::1]:8080/callback"]) is True
+
+
+def test_redirect_loopback_path_mismatch_rejected(app_ctx):
+    assert az.redirect_uri_allowed("http://localhost:49321/evil",
+                                   ["http://localhost:8080/callback"]) is False
+
+
+def test_redirect_loopback_host_token_not_aliased(app_ctx):
+    # Registered "localhost" must not match requested "127.0.0.1"; RFC keeps them distinct.
+    assert az.redirect_uri_allowed("http://127.0.0.1:8080/callback",
+                                   ["http://localhost:8080/callback"]) is False
+
+
+def test_redirect_loopback_https_scheme_rejected(app_ctx):
+    # The exception is http-only; an https loopback gets no port flexibility.
+    assert az.redirect_uri_allowed("https://localhost:49321/callback",
+                                   ["https://localhost:8080/callback"]) is False
+
+
+def test_redirect_non_loopback_port_still_exact(app_ctx):
+    # Non-loopback hosts get no port flexibility -- exact match still required.
+    assert az.redirect_uri_allowed("https://client.example:9999/cb",
+                                   ["https://client.example/cb"]) is False
+
+
+def test_redirect_flag_off_reverts_to_exact(app):
+    with app.app_context():
+        app.config["LOOPBACK_REDIRECT_ANY_PORT"] = False
+        # Port mismatch now rejected.
+        assert az.redirect_uri_allowed("http://localhost:49321/callback",
+                                       ["http://localhost:8080/callback"]) is False
+        # Exact match still accepted.
+        assert az.redirect_uri_allowed("http://localhost:8080/callback",
+                                       ["http://localhost:8080/callback"]) is True
+
+
+def test_authorize_loopback_port_accepted(client):
+    """/authorize accepts a loopback redirect on a different port than registered."""
+    rec = _make_client_rec(allowed_redirect_uris=["http://localhost:8080/callback"])
+    reg = ClientRegistry(version="1", clients={"test-client": rec})
+    client.application.config["CLIENT_REGISTRY"] = reg
+    p = _base_params(redirect_uri="http://localhost:49321/callback")
+    resp = client.get("/authorize", query_string=p)
+    assert resp.status_code == 302
+    assert "idp.example/auth" in resp.headers["Location"]
+
+
+def test_authorize_loopback_path_mismatch_rejected(client):
+    """/authorize still rejects a loopback redirect whose path is not registered."""
+    rec = _make_client_rec(allowed_redirect_uris=["http://localhost:8080/callback"])
+    reg = ClientRegistry(version="1", clients={"test-client": rec})
+    client.application.config["CLIENT_REGISTRY"] = reg
+    p = _base_params(redirect_uri="http://localhost:49321/evil")
+    resp = client.get("/authorize", query_string=p)
+    assert resp.status_code == 400

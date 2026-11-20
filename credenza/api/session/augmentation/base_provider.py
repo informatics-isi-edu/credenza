@@ -15,10 +15,35 @@
 #
 import time
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from flask import current_app
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class EnrichmentResult:
+    """Outcome of one enrich_userinfo() call.
+
+    enriched: at least one source contributed data to userinfo.
+    failed_sources: names of the sources that were attempted and failed (e.g. a named role query
+        that timed out). An empty tuple means every attempted source succeeded, so a caller can
+        tell "the user holds nothing" from "the lookup failed".
+    """
+    enriched: bool = False
+    failed_sources: Tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return not self.failed_sources
+
+    def merge(self, other: "EnrichmentResult") -> "EnrichmentResult":
+        """Combine with the result of a composed (super()) enrichment."""
+        return EnrichmentResult(enriched=self.enriched or other.enriched,
+                                failed_sources=tuple(other.failed_sources) + tuple(self.failed_sources))
+
 
 class SessionAugmentationProvider(ABC):
     """
@@ -27,7 +52,33 @@ class SessionAugmentationProvider(ABC):
       - fetch_dependent_tokens (some providers, e.g. Globus, allow clients to retrieve dependent tokens via token endpoints)
       - enrich_userinfo (add groups, roles, claims, etc. to userinfo from other sources)
       (additional as needed in future)
+
+    Each instance serves exactly one realm, fixed at construction. Subclasses
+    that define __init__ must accept the realm and pass it to super().__init__().
+    Providers must use self.realm (or the profile/params properties) for anything
+    realm-specific, never DEFAULT_REALM or get_realm(), which name the default
+    realm rather than this provider's.
     """
+
+    def __init__(self, realm: str):
+        if not realm or not isinstance(realm, str):
+            raise ValueError("Session augmentation provider requires a realm name")
+        self._realm = realm
+
+    @property
+    def realm(self) -> str:
+        """The realm whose profile configures this provider."""
+        return self._realm
+
+    @property
+    def profile(self) -> dict:
+        """This provider's realm profile from OIDC_IDP_PROFILES."""
+        return current_app.config["OIDC_IDP_PROFILES"].get(self._realm, {})
+
+    @property
+    def params(self) -> dict:
+        """This provider's session_augmentation_params."""
+        return self.profile.get("session_augmentation_params", {})
 
     @abstractmethod
     def fetch_dependent_tokens(
@@ -44,8 +95,13 @@ class SessionAugmentationProvider(ABC):
         """Post-process or filter additional or dependent tokens."""
 
     @abstractmethod
-    def enrich_userinfo(self, userinfo: dict, additional_tokens: dict) -> bool:
-        """Augment userinfo with groups, roles, extra claims, etc."""
+    def enrich_userinfo(self, userinfo: dict, additional_tokens: dict) -> EnrichmentResult:
+        """Augment userinfo in place with groups, roles, extra claims, etc.
+
+        Returns an EnrichmentResult naming any source that failed. Providers are shared across
+        threads (one instance per realm), so per-call outcomes must be returned, never kept on
+        the instance.
+        """
 
 
 class DefaultSessionAugmentationProvider(SessionAugmentationProvider):
@@ -80,5 +136,15 @@ class DefaultSessionAugmentationProvider(SessionAugmentationProvider):
 
         return additional_tokens
 
-    def enrich_userinfo(self, userinfo, additional_tokens):
-        return False
+    def enrich_userinfo(self, userinfo, additional_tokens) -> EnrichmentResult:
+        return EnrichmentResult()
+
+    def build_identities(self, userinfo: dict) -> dict:
+        """Derive canonical linked identities from userinfo at render time.
+
+        This is a pure transform of claims already present in userinfo (no I/O),
+        so it is computed on demand rather than persisted. Returns a dict keyed
+        by canonical identity id "<iss>/<sub>" whose values hold per-identity
+        detail. The default provider has no identity claims to surface.
+        """
+        return {}

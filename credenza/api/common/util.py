@@ -16,17 +16,23 @@
 from __future__ import annotations
 import time
 import base64
+import json
 import logging
 import requests
 from datetime import datetime, timezone
 from requests.adapters import HTTPAdapter
 from typing import Iterable, Optional, Set, Tuple, List, Dict, Union
-from flask import current_app, request, abort
+import copy
+from flask import current_app, request, abort, g, has_app_context
 from urllib3.util import Retry
 from urllib.parse import urlparse
 from requests import HTTPError, Timeout, ConnectionError
 from ..session.storage.session_store import SessionData
-from ...telemetry import audit_event
+from ..session.storage.session_lock import session_lock
+from ..auth.oidc_client import DEFAULT_IDP_HTTP_TIMEOUT
+from ..session.augmentation.base_provider import EnrichmentResult
+from ...telemetry import audit_event, audit_identity
+from ...telemetry.audit.attributes import audit_session_attributes, select_session_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +72,30 @@ def get_current_session(dont_abort:bool = False) -> Tuple[Optional[str], Optiona
     return (None, None) if dont_abort else abort(404)
 
 
+def check_acr(userinfo: dict, required_acr: List[str]) -> List[str]:
+    """Check that the acr claim contains all required assurance URIs.
+
+    Returns the list of missing URIs -- empty means all requirements met.
+    """
+    acr_values = set((userinfo.get("acr") or "").split())
+    return [v for v in required_acr if v not in acr_values]
+
+
+def extract_jwt_txn(token: str) -> Optional[str]:
+    """Extract the txn claim from a JWT without signature verification.
+
+    Returns the txn string if present, None otherwise. Never raises -- tokens
+    that are opaque, malformed, or simply lack a txn claim return None silently.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims.get("txn") or None
+    except Exception:
+        return None
+
+
 def get_realm(realm=None) -> str:
     if realm and realm in current_app.config["OIDC_IDP_PROFILES"].keys():
         return realm
@@ -88,19 +118,69 @@ def get_augmentation_provider_params(realm=None):
     return profile.get("session_augmentation_params", {})
 
 
-def augment_session(tokens, realm, userinfo, metadata):
+# Per-realm session lifetime caps. A realm's IdP profile may declare
+#
+#     "session_max_lifetime": {"user": <seconds>, "device": <seconds>}
+#
+# "user" caps the absolute lifetime of interactive (browser) sessions; "device" caps device-flow
+# sessions, which are also bounded by the upstream refresh token's lifetime. Either value may be
+# omitted, which keeps the built-in behavior for that kind of session. The caps are fixed when a
+# session is created and measured from its creation time.
+SESSION_KINDS = ("user", "device")
+
+
+def parse_session_max_lifetime(profiles: Optional[dict]) -> Dict[str, Dict[str, int]]:
+    """Validate every realm's "session_max_lifetime"; returns {realm: {kind: seconds}}.
+
+    Raises ValueError on a malformed block, so a misconfigured cap fails startup instead of
+    silently leaving sessions uncapped.
+    """
+    caps = {}
+    for realm, profile in (profiles or {}).items():
+        spec = (profile or {}).get("session_max_lifetime")
+        if spec is None:
+            continue
+        if not isinstance(spec, dict):
+            raise ValueError(f"session_max_lifetime for realm '{realm}' must be an object")
+        unknown = set(spec) - set(SESSION_KINDS)
+        if unknown:
+            raise ValueError(f"session_max_lifetime for realm '{realm}' has unknown keys {sorted(unknown)}; "
+                             f"expected {list(SESSION_KINDS)}")
+        for kind, seconds in spec.items():
+            if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds < 1:
+                raise ValueError(f"session_max_lifetime.{kind} for realm '{realm}' must be a positive "
+                                 f"integer number of seconds")
+        if spec:
+            caps[realm] = dict(spec)
+    return caps
+
+
+def realm_max_lifetime(realm, kind: str) -> Optional[int]:
+    """The realm's configured cap in seconds for "user" or "device" sessions, or None if unset."""
+    if not has_app_context():
+        return None
+    return (current_app.config.get("SESSION_MAX_LIFETIMES") or {}).get(realm, {}).get(kind)
+
+
+def augment_session(tokens, realm, userinfo, metadata) -> Tuple[dict, dict, Optional[EnrichmentResult]]:
+    """Run the realm's augmentation provider over userinfo.
+
+    Returns (userinfo, additional_tokens, result). result is the provider's EnrichmentResult, or
+    None when the realm defers augmentation and this call only marked it deferred; the caller
+    calls again once the session exists and uses that call's result.
+    """
     provider = get_augmentation_provider(realm)
     provider_params = get_augmentation_provider_params(realm)
     defer_augmentation = provider_params.get("defer_augmentation", False)
     if defer_augmentation and not metadata.get("augmentation_deferred", False):
         metadata.update({"augmentation_deferred": defer_augmentation})
-        return userinfo, {}
+        return userinfo, {}, None
 
     # look for additional tokens in the response
     additional_tokens = provider.process_additional_tokens(tokens, int(time.time()))
     # possibly get additional groups using external tokens or other means
-    provider.enrich_userinfo(userinfo, additional_tokens)
-    return userinfo, additional_tokens
+    result = provider.enrich_userinfo(userinfo, additional_tokens)
+    return userinfo, additional_tokens, result
 
 
 def get_effective_scopes(session: SessionData) -> list:
@@ -120,10 +200,50 @@ def get_tokens_by_scope(session: SessionData) -> dict:
     return tokens
 
 
+# OAuth error codes that mean the refresh grant is permanently dead -- retrying
+# will never succeed, so the session should be evicted on the first occurrence
+# rather than waiting out the consecutive-failure counter.
+TERMINAL_REFRESH_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+# Margin, in seconds, added to a delete's wait for an in-flight refresh (see delete_lock_wait).
+DELETE_LOCK_WAIT_MARGIN = 5
+
+# Seconds a short critical section (a session extension, or merging re-augmented claims) waits for a
+# session lock before giving up and leaving the stored session as it is.
+SHORT_LOCK_WAIT = 2
+
+
+def _record_refresh_failure(session, exc) -> None:
+    """Track a failed upstream refresh on the session metadata.
+
+    Increments a consecutive-failure counter and records the last error so the
+    refresh worker can decide to give up and evict (see run_refresh_worker).
+    `last_refresh_error_terminal` flags hard OAuth errors that warrant immediate
+    eviction.
+    """
+    err_code = getattr(exc, "error", None)
+    if not isinstance(err_code, str):
+        err_code = None
+    sys_meta = session.session_metadata.system
+    sys_meta["refresh_failure_count"] = sys_meta.get("refresh_failure_count", 0) + 1
+    sys_meta["last_refresh_failure_at"] = int(time.time())
+    sys_meta["last_refresh_error"] = (err_code or str(exc))[:200]
+    sys_meta["last_refresh_error_terminal"] = err_code in TERMINAL_REFRESH_ERRORS
+
+
+def _clear_refresh_failures(session) -> None:
+    """Reset the consecutive-failure tracking after a successful refresh."""
+    sys_meta = session.session_metadata.system
+    if sys_meta.get("refresh_failure_count"):
+        sys_meta["refresh_failure_count"] = 0
+        sys_meta.pop("last_refresh_failure_at", None)
+        sys_meta.pop("last_refresh_error", None)
+        sys_meta.pop("last_refresh_error_terminal", None)
+
+
 def refresh_access_token(sid, session):
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    identity = audit_identity(session.userinfo, realm)
     client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=session.is_device())
     updated = False
 
@@ -137,10 +257,13 @@ def refresh_access_token(sid, session):
         try:
             refreshed = client.refresh_access_token(refresh_token=session.refresh_token)
         except Exception as e:
+            _record_refresh_failure(session, e)
             logger.warning(
-                f"Access token refresh failed for session {sid} for user {user} {sub} on realm {realm}: {e}")
+                f"Access token refresh failed for session {sid} for {identity['identity']} on realm {realm}: {e}")
             audit_event("access_token_refresh_failed",
-                        session_id=sid, user=user, sub=sub, realm=realm, error=str(e))
+                        session_id=sid, **identity, realm=realm, error=str(e),
+                        failure_count=session.session_metadata.system.get("refresh_failure_count"),
+                        terminal=session.session_metadata.system.get("last_refresh_error_terminal", False))
             return updated
 
         # update tokens and metadata
@@ -150,20 +273,35 @@ def refresh_access_token(sid, session):
         session.session_metadata.system["access_token_expires_at"] = refreshed["expires_at"]
         refresh_expires_in = refreshed.get("refresh_expires_in")
         if refresh_expires_in:  # 0 means "no expiry" for offline tokens; skip to preserve existing cap
-            session.absolute_expires_at = now + refresh_expires_in
+            new_absolute = now + refresh_expires_in
+            # never past the realm's device-session cap, measured from session creation
+            device_cap = realm_max_lifetime(realm, "device") if session.is_device() else None
+            if device_cap:
+                new_absolute = min(new_absolute, session.created_at + device_cap)
+            session.absolute_expires_at = new_absolute
             session.session_metadata.system["refresh_token_expires_at"] = session.absolute_expires_at
 
-        logger.debug(f"Access token refresh for session {sid} for user {user} ({sub}) on realm {realm} complete")
-        audit_event("access_token_refreshed", session_id=sid, user=user, sub=sub, realm=realm)
+        # A device session without automatic refresh lasts only as long as its upstream access token;
+        # a refresh it asked for extends it to the new token's expiry, never past its absolute lifetime.
+        if session.is_device() and not session.session_metadata.system.get("allow_automatic_refresh"):
+            new_expiry = int(refreshed["expires_at"])
+            if session.absolute_expires_at:
+                new_expiry = min(new_expiry, int(session.absolute_expires_at))
+            session.expires_at = max(session.expires_at, new_expiry)
+
+        _clear_refresh_failures(session)
+        logger.debug(f"Access token refresh for session {sid} for {identity['identity']} on realm {realm} complete")
+        txn = extract_jwt_txn(refreshed["access_token"])
+        audit_event("access_token_refreshed", session_id=sid, **identity, realm=realm,
+                    **({"txn": txn} if txn else {}))
         updated = True
 
     return updated
 
 
 def refresh_additional_tokens(sid, session):
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    identity = audit_identity(session.userinfo, realm)
     tokens = session.additional_tokens or {}
     client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(session.realm, native_client=session.is_device())
 
@@ -180,18 +318,18 @@ def refresh_additional_tokens(sid, session):
         if now < expires_at - expiry_threshold:
             # current_time_dt = datetime.fromtimestamp(now).isoformat()
             # expires_at_threshold_dt = datetime.fromtimestamp(expires_at - expiry_threshold).isoformat()
-            # logger.debug(f"Additional token refresh skipped for [sid={sid}, user={user}, sub={sub}, scope={scope}] "
+            # logger.debug(f"Additional token refresh skipped for [sid={sid}, identity={identity['identity']}, scope={scope}] "
             #              f"with current time {current_time_dt} not exceeding expiry threshold {expires_at_threshold_dt}")
             continue
 
         try:
             refreshed = client.refresh_access_token(refresh_token)
-            logger.debug(f"Additional token refresh successful for sid={sid}, user={user}, sub={sub}, scope={scope}")
+            logger.debug(f"Additional token refresh successful for sid={sid}, identity={identity['identity']}, scope={scope}")
         except Exception as e:
             tokens.pop(scope, None)
             logger.warning(f"Token refresh failed for scope={scope}: {e}")
             audit_event("additional_token_refresh_failed",
-                        sid=sid, user=user, sub=sub, scope=scope, realm=realm, error=str(e))
+                        session_id=sid, **identity, scope=scope, realm=realm, error=str(e))
             continue
 
         tokens[scope].update({
@@ -203,12 +341,14 @@ def refresh_additional_tokens(sid, session):
         })
         updated = True
 
+        txn = extract_jwt_txn(refreshed["access_token"])
         audit_event("additional_token_refresh_success",
-                    sid=sid,
-                    user=user,
-                    sub=sub,
+                    session_id=sid,
+                    **identity,
+                    realm=realm,
                     scope=scope,
-                    expires_at=datetime.fromtimestamp(refreshed["expires_at"], timezone.utc).isoformat())
+                    expires_at=datetime.fromtimestamp(refreshed["expires_at"], timezone.utc).isoformat(),
+                    **({"txn": txn} if txn else {}))
     session.additional_tokens = tokens
 
     return updated
@@ -218,9 +358,13 @@ def revoke_tokens(sid, session):
     if session.is_service():
         return
 
-    sub = session.userinfo.get("sub")
-    user = session.userinfo.get("email")
     realm = session.realm
+    _profile = current_app.config.get("OIDC_IDP_PROFILES", {}).get(realm, {})
+    if _profile.get("skip_token_revocation"):
+        logger.debug(f"Skipping token revocation for realm={realm} (skip_token_revocation=true)")
+        return
+
+    identity = audit_identity(session.userinfo, realm)
     client = current_app.config["OIDC_CLIENT_FACTORY"].get_client(realm, native_client=session.is_device())
     try:
         # try to revoke all tokens associated with the session
@@ -229,13 +373,100 @@ def revoke_tokens(sid, session):
         logger.debug(f"Revoking access tokens and refresh tokens (if present) for scopes: [{scopes}]")
         for k, v in tokens.items():
             client.revoke_token(k, v["access_token"], token_type_hint="access_token")
-            audit_event("access_token_revoked", sid=sid, user=user, sub=sub, realm=realm, scope=k)
+            audit_event("access_token_revoked", session_id=sid, **identity, realm=realm, scope=k)
             refresh_token = v.get("refresh_token")
             if refresh_token:
                 client.revoke_token(k, refresh_token, token_type_hint="refresh_token")
-                audit_event("refresh_token_revoked", sid=sid, user=user, sub=sub, realm=realm, scope=k)
+                audit_event("refresh_token_revoked", session_id=sid, **identity, realm=realm, scope=k)
     except Exception as e:
         logger.warning(f"Exception during token revocation: {e}")
+
+
+def reaugment_session(sid, realm, lock_timeout: float = SHORT_LOCK_WAIT) -> Optional[SessionData]:
+    """Re-run the realm's augmentation for an existing session and persist the result.
+
+    An augmentation provider may call a resource server with the user's own session key, and that
+    server may resolve the key with PUT /session, which takes this session's lock. So the provider
+    runs on a copy of the session's claims with no lock held, and the lock is taken only to merge
+    the result into a freshly read session and write it. Writes a session_attributes_updated event
+    (trigger "refresh") when the realm selects attributes and they changed or a source failed.
+
+    Returns the written session, or None if the session is gone or the lock was not had within
+    lock_timeout seconds (the stored session is then left as it was).
+    """
+    store = current_app.config["SESSION_STORE"]
+    session = store.get_session_data(sid)
+    session_key = store.get_session_key_for_session_id(sid) if session else None
+    if not session or not session_key:
+        return None
+
+    before, _ = select_session_attributes(session.userinfo, realm)
+    userinfo = copy.deepcopy(session.userinfo)
+    provider = get_augmentation_provider(realm)
+    # providers that query as the user read the session key from g
+    had_key, previous_key = hasattr(g, "session_key"), getattr(g, "session_key", None)
+    g.session_key = session_key
+    try:
+        enrichment = provider.enrich_userinfo(userinfo, session.additional_tokens)
+    finally:
+        if had_key:
+            g.session_key = previous_key
+        else:
+            g.pop("session_key", None)
+
+    with session_lock(sid, timeout=lock_timeout) as locked:
+        if not locked:
+            logger.info(f"Session lock for {sid} busy; re-augmented claims not saved this time")
+            return None
+        fresh = store.get_session_data(sid)
+        if not fresh:
+            return None
+        fresh.userinfo = userinfo
+        _, written = store.update_session(sid, fresh)
+    if written is not None:
+        audit_session_attributes(sid, userinfo, realm, trigger="refresh", enrichment=enrichment, before=before)
+    return written
+
+
+def delete_lock_wait(realm) -> float:
+    """Seconds a delete waits for an in-flight refresh of a session in this realm.
+
+    Derived from the realm's IdP http_timeout so the two cannot drift apart: requests applies the
+    timeout to the connect and to each read separately, so one token call can take about twice
+    http_timeout, plus a small margin for the store reads and writes. A refresh that renews several
+    dependent tokens one after another can take longer; a delete that stops waiting early is still
+    safe, because update_session will not write the deleted session back.
+    """
+    profile = current_app.config.get("OIDC_IDP_PROFILES", {}).get(realm, {})
+    return 2 * profile.get("http_timeout", DEFAULT_IDP_HTTP_TIMEOUT) + DELETE_LOCK_WAIT_MARGIN
+
+
+def end_session(sid, session: SessionData, revoke: bool = True) -> SessionData:
+    """Revoke a session's upstream tokens (when revoke is true) and delete it.
+
+    For device sessions, which the background worker refreshes, this holds the session lock so a
+    refresh already in flight finishes first, then re-reads the session so the tokens revoked are
+    the current ones rather than a copy read before the refresh rotated them. If the lock cannot
+    be had within delete_lock_wait() seconds the session is deleted anyway: a logout must not
+    fail, and update_session refuses to write a deleted session back. Returns the session as it
+    was when deleted.
+    """
+    store = current_app.config["SESSION_STORE"]
+    if not session.is_device():
+        if revoke:
+            revoke_tokens(sid, session)
+        store.delete_session(sid)
+        return session
+
+    timeout = delete_lock_wait(session.realm)
+    with session_lock(sid, timeout=timeout) as locked:
+        if not locked:
+            logger.warning(f"Session lock for {sid} not acquired within {timeout}s; deleting session anyway")
+        current = store.get_session_data(sid) or session
+        if revoke:
+            revoke_tokens(sid, current)
+        store.delete_session(sid)
+        return current
 
 
 def parse_basic_auth(header_value: str) -> Optional[Dict[str, str]]:
@@ -395,9 +626,12 @@ def enrich_userinfo_from_endpoint(
         Enriched userinfo dict.
     """
     missing_before = [c for c in fallback_claims if not userinfo.get(c)]
+    txn = extract_jwt_txn(access_token)
 
     try:
         endpoint_data = client.fetch_userinfo(access_token)
+        audit_event("userinfo_fetched", realm=realm, **audit_identity(userinfo, realm),
+                    **({"txn": txn} if txn else {}))
     except Exception as exc:
         logger.warning(
             "userinfo fallback failed for realm=%s sub=%s missing=%s: %s",
@@ -406,7 +640,7 @@ def enrich_userinfo_from_endpoint(
         audit_event(
             "userinfo_fallback_failed",
             realm=realm,
-            sub=sub,
+            **audit_identity(userinfo, realm),
             missing_claims=missing_before,
             error=str(exc),
         )
@@ -432,19 +666,13 @@ def enrich_userinfo_from_endpoint(
         audit_event(
             "userinfo_fallback_incomplete",
             realm=realm,
-            sub=sub,
+            **audit_identity(userinfo, realm),
             missing_claims=missing_after,
         )
     else:
-        logger.info(
+        logger.debug(
             "userinfo fallback filled claims for realm=%s sub=%s filled=%s",
-            realm, sub, missing_before,
-        )
-        audit_event(
-            "userinfo_fallback_filled",
-            realm=realm,
-            sub=sub,
-            filled_claims=filled,
+            realm, sub, filled,
         )
 
     return userinfo

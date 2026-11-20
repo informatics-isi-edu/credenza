@@ -24,6 +24,27 @@ from credenza.rest.session import session_blueprint
 from credenza.api.session.storage import session_store as ss
 from credenza.api.session.storage.session_store import SessionType
 from credenza.api.common.util import get_effective_scopes
+from credenza.telemetry.audit import attributes as aa
+from credenza.api.session.augmentation.base_provider import EnrichmentResult
+
+
+# Canonical identities are built at render time via the realm's augmentation
+# provider. Provider canonicalization is covered by the provider unit tests; the
+# renderer tests stub the lookup to a fixed map to isolate rendering behavior.
+FIXED_IDENTITIES = {
+    "https://issuer/i1": {
+        "sub": "i1", "iss": "https://issuer", "username": "i1@example.edu",
+        "name": "Identity One", "email": "i1@example.edu", "provider": "Example University",
+    }
+}
+
+
+class _StubIdentityProvider:
+    def __init__(self, identities):
+        self._identities = identities
+
+    def build_identities(self, userinfo):
+        return self._identities
 
 
 @pytest.fixture
@@ -143,9 +164,13 @@ def test_put_session_with_refresh_access_token(client,
 
     # Stub get_current_session -> (sid, sess)
     monkeypatch.setattr(sm,"get_current_session", lambda: (sid, sess))
+    # device PUTs re-read the session under its lock; serve the stubbed one
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
 
     # Stub out map_session
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     # Configure our dummy OIDC client factory in Flask config
     class DummyClient:
@@ -198,6 +223,65 @@ def test_put_session_with_refresh_access_token(client,
     assert updated.expires_at == pytest.approx(expected_expires, abs=1)
 
 
+def test_put_session_refresh_records_changed_session_attributes(client, app, store, device_session,
+                                                                frozen_time, monkeypatch, audit_calls):
+    # An upstream refresh that changes the selected attributes writes a session_attributes_updated event.
+    sid = "S1"
+    now = frozen_time
+    sess = copy.deepcopy(device_session)
+    sess.session_metadata.system.update({
+        "access_token_expires_at": now - 1,
+        "refresh_token_expires_at": now + 600,
+    })
+    sess.refresh_token = "old_refresh_token"
+    sess.userinfo["roles"] = ["tag:x,2026:grant/1-OLD"]
+    monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    # device PUTs re-read the session under its lock; serve the stubbed one
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+    monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
+
+    class DummyClient:
+        def refresh_access_token(self, refresh_token):
+            return {"access_token": "new", "refresh_token": "new_rt", "id_token": "new_id",
+                    "expires_at": now + 3600, "refresh_expires_in": 7200}
+
+    class DummyFactory:
+        def get_client(self, realm, native_client=False):
+            return DummyClient()
+
+    class RoleProvider:
+        def enrich_userinfo(self, userinfo, additional_tokens):
+            userinfo["roles"] = ["tag:x,2026:grant/1-NEW"]
+            return EnrichmentResult(enriched=True)
+
+        def build_identities(self, userinfo):
+            return {}
+
+    monkeypatch.setattr(sm, "get_augmentation_provider", lambda realm: RoleProvider())
+    monkeypatch.setattr(um, "get_augmentation_provider", lambda realm: RoleProvider())
+    events = []
+    monkeypatch.setattr(aa, "audit_event", lambda e, **kw: events.append((e, kw)))
+    app.config["OIDC_CLIENT_FACTORY"] = DummyFactory()
+    app.config["TOKEN_EXPIRY_THRESHOLD"] = 300
+    app.config["AUDIT_ATTRIBUTE_SELECTORS"] = {sess.realm: aa.parse_audit_attributes(
+        [{"field": "permissions", "claim": "roles",
+          "match": r"^tag:x,2026:(grant/.+)$", "emit": r"\1"}], sess.realm)}
+    try:
+        resp = client.put("/session?refresh_upstream=true")
+        assert resp.status_code == 200
+    finally:
+        app.config["AUDIT_ATTRIBUTE_SELECTORS"] = {}
+
+    (event, kw), = events
+    assert event == "session_attributes_updated"
+    assert kw["trigger"] == "refresh"
+    assert kw["session_id"] == sid
+    assert kw["added"] == {"permissions": ["grant/1-NEW"]}
+    assert kw["removed"] == {"permissions": ["grant/1-OLD"]}
+
+
 def test_put_session_with_refresh_access_token_failure(client,
                                                        app,
                                                        store,
@@ -221,9 +305,13 @@ def test_put_session_with_refresh_access_token_failure(client,
 
     # Patch get_current_session
     monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    # device PUTs re-read the session under its lock; serve the stubbed one
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
 
     # Patch map_session
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     # Configure dummy client that fails
     class DummyFailClient:
@@ -291,8 +379,14 @@ def test_put_session_additional_tokens_refresh(client,
 
     # Stub get_current_session so GET/PUT /session uses our SID and session
     monkeypatch.setattr(sm, "get_current_session", lambda: (sid, sess))
+    # device PUTs re-read the session under its lock; serve the stubbed one
+    monkeypatch.setattr(store, "get_session_data", lambda s: sess)
+    # this test covers dependent-token refresh; re-augmentation on refresh_upstream is tested separately
+    monkeypatch.setattr(sm, "reaugment_session", lambda sid, realm: None)
 
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     # Capture calls to update_session, and make it return (session_key, session_data)
     updated_calls = []
@@ -370,6 +464,16 @@ def test_put_session_additional_tokens_refresh(client,
 #     assert resp.status_code == 400
 
 
+def test_put_returns_404_when_session_was_deleted_mid_request(client, store, fake_current_session):
+    # get_current_session hands this request a copy; a concurrent logout then deletes the session.
+    # update_session must refuse to write the copy back, and the request reports the session gone.
+    sid, _ = fake_current_session
+    store.delete_session(sid)
+    resp = client.put("/session")
+    assert resp.status_code == 404
+    assert store.get_session_data(sid) is None
+
+
 def test_delete_session_legacy(client, app, monkeypatch):
     monkeypatch.setattr(sm,"revoke_tokens", lambda sid, session: None)
     app.config["ENABLE_LEGACY_API"] = True
@@ -388,13 +492,15 @@ def test_delete_session_normal(client, app, monkeypatch):
     assert app.config["COOKIE_NAME"] in cookie and "Expires=Thu, 01 Jan 1970" in cookie
 
 
-def test_make_session_response_non_legacy(app, store, base_session):
+def test_make_session_response_non_legacy(app, store, base_session, monkeypatch):
     # Arrange deterministic timestamps
     base_session.created_at = 1000000
     base_session.updated_at = 1000500
     base_session.expires_at = 1001000
 
     app.config["ENABLE_LEGACY_API"] = False
+    monkeypatch.setattr(sm, "get_augmentation_provider",
+                        lambda realm: _StubIdentityProvider(FIXED_IDENTITIES))
 
     with app.app_context():
         resp = sm.make_session_response("sid123", base_session)
@@ -411,6 +517,10 @@ def test_make_session_response_non_legacy(app, store, base_session):
     assert resp["groups"] == base_session.userinfo["groups"]
     assert resp["roles"] == base_session.userinfo["roles"]
 
+    # Modern response exposes the full canonical identities map (built at
+    # render time by the realm's augmentation provider).
+    assert resp["identities"] == FIXED_IDENTITIES
+
     # Scopes and metadata
     assert resp["scopes"] == get_effective_scopes(base_session)
     assert resp["metadata"] == base_session.session_metadata.to_dict()
@@ -424,15 +534,20 @@ def test_make_session_response_non_legacy(app, store, base_session):
 
     assert resp["seconds_remaining"] == store.get_ttl("sid123")
 
+    # the session id joins the caller's view of the session to the audit log
+    assert resp["session_id"] == "sid123"
+
 
 @pytest.mark.usefixtures("app", "store", "base_session")
-def test_make_session_response_legacy(app, store, base_session):
+def test_make_session_response_legacy(app, store, base_session, monkeypatch):
     # Arrange deterministic timestamps
     base_session.created_at = 1000000
     base_session.updated_at = 1000500
     base_session.expires_at = 1001000
 
     app.config["ENABLE_LEGACY_API"] = True
+    monkeypatch.setattr(sm, "get_augmentation_provider",
+                        lambda realm: _StubIdentityProvider(FIXED_IDENTITIES))
 
     with app.app_context():
         resp = sm.make_session_response("sid123", base_session)
@@ -447,9 +562,10 @@ def test_make_session_response_legacy(app, store, base_session):
     assert client_info["full_name"] == base_session.userinfo["name"]
     assert client_info["email"] == base_session.userinfo["email"]
 
-    # Identities from identity_set
-    expected_idents = [f"{issuer}/{ident['sub']}" for ident in base_session.userinfo["identity_set"]]
-    assert resp["client"]["identities"] == expected_idents
+    # Legacy default: a flat list of identity-id strings (the keys of the
+    # canonical identities map), preserving the existing webauthn contract.
+    assert resp["client"]["identities"] == list(FIXED_IDENTITIES.keys())
+    assert "https://issuer/i1" in resp["client"]["identities"]
 
     # 'attributes' array contains client then groups
     attrs = resp["attributes"]
@@ -466,6 +582,24 @@ def test_make_session_response_legacy(app, store, base_session):
     assert abs(expires_dt.timestamp() - base_session.expires_at) < 1
 
     assert resp["seconds_remaining"] == store.get_ttl("sid123")
+
+    # 'tracking' carries the session id so webauthn2 request logs join to the audit log
+    assert resp["tracking"] == "sid123"
+
+
+@pytest.mark.usefixtures("app", "store", "base_session")
+def test_make_session_response_legacy_identity_detail(app, store, base_session, monkeypatch):
+    # With LEGACY_IDENTITY_DETAIL enabled, the legacy response carries the full
+    # canonical identities map rather than just the id strings.
+    app.config["ENABLE_LEGACY_API"] = True
+    app.config["LEGACY_IDENTITY_DETAIL"] = True
+    monkeypatch.setattr(sm, "get_augmentation_provider",
+                        lambda realm: _StubIdentityProvider(FIXED_IDENTITIES))
+
+    with app.app_context():
+        resp = sm.make_session_response("sid123", base_session)
+
+    assert resp["client"]["identities"] == FIXED_IDENTITIES
 
 
 def test_get_session_service_missing_resource_403(monkeypatch, client, base_session):
@@ -535,6 +669,8 @@ def test_put_session_derived_with_matching_resource_200(monkeypatch, client, bas
 
     monkeypatch.setattr(sm, "get_current_session", lambda: ("derived-put-ok", base_session))
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
     monkeypatch.setattr(store, "update_session", lambda sid, sess: ("dummy-map-key", sess))
     stub = {"ok": True}
     monkeypatch.setattr(sm, "make_session_response", lambda _sid, _sess: stub)
@@ -565,6 +701,8 @@ def test_put_session_service_match_200(monkeypatch, client, base_session, store)
 
     # Stub map_session so the backend doesn't receive None values
     monkeypatch.setattr(store, "map_session", lambda session_key, session_id, ttl: "dummy-map-key")
+    # the session is stubbed rather than created, so give it the key mapping a real one has
+    monkeypatch.setattr(store, "get_session_key_for_session_id", lambda s: "dummy-session-key")
 
     # Optionally stub update_session to avoid touching real persistence paths
     monkeypatch.setattr(store, "update_session", lambda sid, sess: ("dummy-map-key", sess))

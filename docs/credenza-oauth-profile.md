@@ -161,6 +161,9 @@ Implements:
 -   Opaque token validation
 -   Audience validation via `allowed_resources` intersection
 -   Per-client resource gating via `allowed_introspection_resources`
+-   A fixed response model: RFC 7662 fields plus Credenza's identity model (shared with
+    `GET /session`), extended per client by `introspection_include_claims`. Upstream IdP
+    claims are never passed through wholesale.
 -   Standard `active` response semantics
 -   Client authentication required
 

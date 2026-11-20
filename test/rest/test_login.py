@@ -16,6 +16,7 @@
 import pytest
 import time
 import uuid
+from datetime import datetime
 from flask import g
 from unittest.mock import Mock
 from urllib.parse import urlparse, parse_qs, unquote
@@ -25,6 +26,8 @@ from credenza.api.auth.oidc_client import OIDCClient
 from credenza.api.session.storage.session_store import SessionData, SessionType
 from credenza.rest.login import callback
 import credenza.api.common.util as _util
+from credenza.telemetry.audit import attributes as aa
+from credenza.api.session.augmentation.base_provider import EnrichmentResult
 
 class StubOIDCClient:
     def __init__(self, *, tokens, userinfo, scope="openid email profile",
@@ -185,7 +188,7 @@ def test_callback_success(client, app, store, monkeypatch, frozen_time):
 
     provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
     monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
-    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
+    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: EnrichmentResult())
 
     resp = client.get("/callback", query_string={"code": code, "state": state})
     assert resp.status_code == 302
@@ -203,7 +206,7 @@ def test_logout_no_session(client, monkeypatch):
     assert urlparse(resp.headers["Location"]).path == "/"
 
 def test_logout_normal(client, app, store, monkeypatch, fake_current_session):
-    monkeypatch.setattr(lf, "revoke_tokens", lambda sid, session: None)
+    monkeypatch.setattr(_util, "revoke_tokens", lambda sid, session: None)
     monkeypatch.setattr(lf, "get_current_session", lambda dont_abort=True: fake_current_session)
     resp = client.get("/logout")
     assert resp.status_code in (302, 303)
@@ -213,7 +216,7 @@ def test_logout_normal(client, app, store, monkeypatch, fake_current_session):
 def test_logout_uses_client_logout_and_profile(client, app, store, monkeypatch, fake_current_session):
     sid = "sid"
     monkeypatch.setattr(lf, "get_current_session", lambda dont_abort=True: fake_current_session)
-    monkeypatch.setattr(lf, "revoke_tokens", lambda sid, session: None)
+    monkeypatch.setattr(_util, "revoke_tokens", lambda sid, session: None)
     store.create_session(sid,
                          session_type=SessionType.USER,
                          access_token="at",
@@ -281,9 +284,9 @@ def test_callback_deferred_augmentation(app, base_session, monkeypatch):
         call_count["count"] += 1
         if call_count["count"] == 1:
             metadata["augmentation_deferred"] = True
-            return userinfo, {}
+            return userinfo, {}, None
         else:
-            return {"sub": "123", "email": "u@example.com", "groups": ["g1"]}, {"foo": "bar"}
+            return {"sub": "123", "email": "u@example.com", "groups": ["g1"]}, {"foo": "bar"}, EnrichmentResult(enriched=True)
 
     monkeypatch.setattr("credenza.rest.login.augment_session", mock_augment)
     monkeypatch.setattr("credenza.api.common.util.get_augmentation_provider_params",
@@ -370,7 +373,7 @@ def _setup_fallback_callback(app, store, stub, monkeypatch):
     monkeypatch.setattr(app.config["OIDC_CLIENT_FACTORY"], "get_client", lambda _realm: stub)
     provider = app.config["SESSION_AUGMENTATION_PROVIDERS"].get("test")
     monkeypatch.setattr(provider, "process_additional_tokens", lambda t, now: {})
-    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: None)
+    monkeypatch.setattr(provider, "enrich_userinfo", lambda ui, ext: EnrichmentResult())
     return state
 
 
@@ -455,6 +458,60 @@ def test_callback_userinfo_fallback_uses_scope_expected_claims_override(client, 
         assert session.userinfo.get("identity_set") == [{"sub": "u1"}]
     finally:
         app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_callback_login_audit_records_acr(client, app, store, monkeypatch):
+    # The satisfied assurance (acr) is recorded on the successful login event.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {
+        "skip_userinfo_fallback": True,
+        "required_acr": ["https://example.com/aal/2", "https://example.com/ial/2"],
+    }
+    try:
+        acr = "https://example.com/aal/2 https://example.com/ial/2"
+        stub = StubOIDCClient(
+            tokens={"id_token": "id", "access_token": "acc", "scope": "openid"},
+            userinfo={"sub": "u1", "iss": "https://issuer", "aud": ["cid"], "acr": acr},
+        )
+        state = _setup_fallback_callback(app, store, stub, monkeypatch)
+        events = []
+        monkeypatch.setattr(lf, "audit_event", lambda e, **kw: events.append((e, kw)))
+        resp = client.get("/callback", query_string={"code": "c", "state": state})
+        assert resp.status_code == 302
+        login = next(kw for e, kw in events if e == "login")
+        assert login["acr"] == acr
+        # expiry bounds let an investigator tell when a timed-out session ended
+        _, session = store.get_session_by_session_key(
+            resp.headers["Set-Cookie"].split(";")[0].split("=", 1)[1])
+        assert datetime.fromisoformat(login["expires_at"]).timestamp() == session.expires_at
+        assert datetime.fromisoformat(login["absolute_expires_at"]).timestamp() == session.absolute_expires_at
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_callback_writes_session_attributes_event(client, app, store, monkeypatch):
+    # A realm with audit_attributes gets a session_attributes_updated event once augmentation has run.
+    app.config["OIDC_IDP_PROFILES"]["test"] = {"skip_userinfo_fallback": True}
+    app.config["AUDIT_ATTRIBUTE_SELECTORS"] = {"test": aa.parse_audit_attributes(
+        [{"field": "user_roles", "claim": "roles", "match": r"^tag:x,2026:(.+)$", "emit": r"\1"}], "test")}
+    try:
+        stub = StubOIDCClient(
+            tokens={"id_token": "id", "access_token": "acc", "scope": "openid"},
+            userinfo={"sub": "u1", "iss": "https://issuer", "aud": ["cid"],
+                      "roles": ["tag:x,2026:role/Member", "unrelated"]},
+        )
+        state = _setup_fallback_callback(app, store, stub, monkeypatch)
+        events = []
+        monkeypatch.setattr(aa, "audit_event", lambda e, **kw: events.append((e, kw)))
+        resp = client.get("/callback", query_string={"code": "c", "state": state})
+        assert resp.status_code == 302
+        (event, kw), = events
+        assert event == "session_attributes_updated"
+        assert kw["trigger"] == "login"
+        assert kw["attributes"] == {"user_roles": ["role/Member"]}
+        assert kw["complete"] is True
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+        app.config["AUDIT_ATTRIBUTE_SELECTORS"] = {}
 
 
 def test_callback_userinfo_fallback_failure_creates_degraded_session(client, app, store, monkeypatch):
