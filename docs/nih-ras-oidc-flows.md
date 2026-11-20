@@ -541,9 +541,18 @@ nonce are cleared from the record.
 > assert a refresh-token lifetime -- its token response carries **no** refresh-token expiry
 > field at all (only the 30-minute access-token `expires_in`/`expires_at`) -- so Credenza
 > applies the `MAX_REFRESH_TOKEN_LIFETIME` default (14 days) as the absolute session
-> lifetime. The real RAS refresh expiry is therefore server-side and opaque to Credenza.
+> lifetime, shortened to the realm's `session_max_lifetime.device` when that is set. The real
+> RAS refresh expiry is therefore server-side and opaque to Credenza.
 > (The browser flow in Sec. 3 does **not** pass `access_type=offline`, so interactive USER
-> sessions are not issued a refresh token and follow the interactive TTL policy.)
+> sessions are not issued a refresh token. They slide on an idle TTL up to an absolute
+> lifetime of 24 hours, or the realm's `session_max_lifetime.user` when that is set.)
+>
+> **Sessions without automatic refresh.** A DEVICE session started without `refresh`
+> (deriva-py `login` without `--refresh`) still receives and stores the refresh token, so the
+> client can refresh on demand, but the session lasts only as long as the RAS access token
+> (about 30 minutes). It does not slide on use. An explicit `PUT /session?refresh_upstream=true`
+> renews the token and extends the session to the new token's expiry, never past the absolute
+> lifetime. Long-running work, such as large uploads, should log in with `--refresh`.
 >
 > _This refresh-token behavior is confirmed against RAS **staging** (`stsstg.nih.gov`);
 > production (`sts.nih.gov`) behavior should be validated before relying on it there._
@@ -568,12 +577,14 @@ every 30 minutes for RAS). Other DEVICE sessions pick them up on an explicit
 `PUT /session?refresh_upstream=true`, which a batch or ETL client can send before a bulk task, or
 at their next login.
 
-In legacy mode every `PUT /session` refreshes the session's tokens when they are due, as it did
-before the `refresh_upstream` parameter existed, but only an explicit `refresh_upstream=true` re-runs
-augmentation. The ERMrest role queries go to ERMrest with the user's own session key, and on a
-cache miss for that key ERMrest's session proxy sends `PUT /session` for the same session. If
-every `PUT` re-ran augmentation, that proxy `PUT` would re-run the role queries from inside the
-outer one. Augmentation always runs with the session lock released, and its result is merged into
+In legacy mode a `PUT /session` on a session with automatic refresh refreshes its tokens when they
+are due, as `PUT` did before the `refresh_upstream` parameter existed. A session without automatic
+refresh is not refreshed by these `PUT`s, so it still ends with its upstream token; setting
+`CREDENZA_LEGACY_DEVICE_REFRESH_ON_USE=true` restores the older behavior in which they refresh and
+extend it while it is in use. Only an explicit `refresh_upstream=true` re-runs augmentation.
+The ERMrest role queries go to ERMrest with the user's own session key, and on a cache miss for
+that key ERMrest's session proxy sends `PUT /session` for the same session. If every `PUT` re-ran
+augmentation, that proxy `PUT` would re-run the role queries from inside the outer one. Augmentation always runs with the session lock released, and its result is merged into
 a freshly read session under the lock.
 
 ### 4.4 Step 3 -- `POST /token` (`grant_type=urn:ietf:params:oauth:grant-type:device_code`)
@@ -882,7 +893,7 @@ None of these is implemented.
   `GET /session` (Sec. 3.6). Every DERIVA consumer must migrate before A1 can drop it.
 - **ADR-0011 (step-up role assumption).** Roles marked `Manual_Assume` are excluded from the
   login-time role queries (Sec. 2). Under the proposal they would be held only after a time-boxed
-  step-up through a forced RAS re-authentication. This depends on RAS honouring `prompt=login`
+  step-up through a forced RAS re-authentication. This depends on RAS honoring `prompt=login`
   / `max_age=0`, which has not been verified.
 - **ADR-0007 (refreshable derived sessions).** Changes how RAS device-session lifetime is capped
   (Sec. 4.3).

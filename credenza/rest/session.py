@@ -62,13 +62,13 @@ def get_session():
         explicit_upstream = strtobool(str(request.args.get("refresh_upstream", False)))
     except ValueError:
         explicit_upstream = False
-    # Legacy consumers (webauthn2 session proxies) cannot pass refresh_upstream, so in legacy mode
-    # every PUT refreshes upstream tokens when they are due, as PUT did before the parameter existed.
-    # Augmentation re-runs only on an explicit refresh_upstream=true. The ERMrest role provider
-    # queries ERMrest with the user's own session key, and on a cache miss for that key ERMrest's
-    # session proxy sends PUT /session for this same session; re-running augmentation on every PUT
-    # would have that proxy PUT re-run the role queries from inside this one.
-    upstream = explicit_upstream or bool(current_app.config.get("ENABLE_LEGACY_API", False))
+    # Legacy session-proxy clients do not pass refresh_upstream, so in legacy mode a PUT refreshes
+    # upstream tokens when they are due, as PUT did before the parameter existed (see
+    # _upstream_refresh_requested for which sessions). Augmentation re-runs only on an explicit
+    # refresh_upstream=true. An augmentation provider may call a resource server with the user's
+    # own session key, and that server may resolve the key by sending PUT /session for this same
+    # session; re-running augmentation on every PUT would then re-enter the provider from inside
+    # this request.
 
     sid, session = get_current_session()
     store = current_app.config["SESSION_STORE"]
@@ -163,9 +163,11 @@ def get_session():
                 session = store.get_session_data(sid)
                 if session is None:
                     abort(404, "session not found")
+                upstream = _upstream_refresh_requested(session, explicit_upstream)
                 _extend_session(sid, session, upstream, now, identity, realm, store)
         else:
-            _extend_session(sid, session, upstream, now, identity, realm, store)
+            _extend_session(sid, session, _upstream_refresh_requested(session, explicit_upstream),
+                            now, identity, realm, store)
 
         if explicit_upstream and session.can_refresh_upstream():
             # Outside the lock: augmentation may call back into this endpoint for the same session.
@@ -173,6 +175,24 @@ def get_session():
 
     response = make_session_response(sid, session)
     return make_json_response(response)
+
+
+def _upstream_refresh_requested(session: SessionData, explicit_upstream: bool) -> bool:
+    """Whether this PUT should refresh the session's upstream tokens (when they are due).
+
+    An explicit refresh_upstream=true always asks for it. In legacy mode a plain PUT asks for it
+    too, but only for sessions with automatic refresh: a device session logged in without
+    automatic refresh is refreshed only when its client asks, so it ends with its upstream access
+    token. LEGACY_DEVICE_REFRESH_ON_USE=true restores the older behavior, in which session-proxy
+    PUTs refresh such sessions as well and so keep them alive while in use.
+    """
+    if explicit_upstream:
+        return True
+    if not current_app.config.get("ENABLE_LEGACY_API", False):
+        return False
+    if session.session_metadata.system.get("allow_automatic_refresh"):
+        return True
+    return bool(current_app.config.get("LEGACY_DEVICE_REFRESH_ON_USE", False))
 
 
 def _extend_session(sid, session: SessionData, upstream: bool, now: int, identity: dict, realm, store):
@@ -343,10 +363,10 @@ def make_session_response(sid, session: SessionData):
         response["expires"] = datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat()
         response["seconds_remaining"] = store.get_ttl(sid)
 
-        # DERIVA resource servers (ERMrest, hatrac) copy "tracking" into the "track" field of every
-        # request log record (via webauthn2 today, deriva-server-common after migration), which joins those records to this session's Credenza audit events
-        # (and through the login event to the IdP transaction id). The session id is not a
-        # credential: it is not derived from the session key and no endpoint accepts it.
+        # Resource servers can copy "tracking" into their request log records, which joins those
+        # records to this session's Credenza audit events (and through the login event to the IdP
+        # transaction id). The session id is not a credential: it is not derived from the session
+        # key and no endpoint accepts it.
         response["tracking"] = sid
     else:
         response.update(session_identity_claims(session, canonical_identities))

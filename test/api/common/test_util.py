@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import time
 import pytest
 import copy
 import base64
@@ -20,6 +21,7 @@ from flask import Flask
 from werkzeug.http import dump_cookie
 from werkzeug.exceptions import HTTPException, NotFound
 from credenza.api.common import util
+from credenza.rest import session as sm
 from credenza.api.session.augmentation.globus_provider import GlobusSessionAugmentationProvider
 from credenza.api.session.storage.session_store import SessionData, SessionMetadata, SessionType
 from credenza.api.common.util import get_tokens_by_scope, parse_basic_auth, collapse_str_list, validate_resource_string
@@ -746,3 +748,162 @@ def test_scope_coverage_empty_clients_no_warnings():
     warnings = check_client_scope_coverage(["openid", "email"], {})
     assert warnings == []
 
+
+# --- session lifetime: configuration --------------------------------------------------------------------------------
+
+def test_parse_accepts_user_and_device_caps_and_skips_unset_realms():
+    caps = util.parse_session_max_lifetime({
+        "ras": {"session_max_lifetime": {"user": 43200, "device": 604800}},
+        "globus": {},
+        "partial": {"session_max_lifetime": {"user": 3600}},
+    })
+    assert caps == {"ras": {"user": 43200, "device": 604800}, "partial": {"user": 3600}}
+
+
+@pytest.mark.parametrize("spec, message", [
+    ([3600], "must be an object"),
+    ({"browser": 3600}, "unknown keys"),
+    ({"user": 0}, "positive integer"),
+    ({"device": "7d"}, "positive integer"),
+    ({"user": True}, "positive integer"),
+])
+def test_parse_rejects_malformed_caps(spec, message):
+    with pytest.raises(ValueError, match=message):
+        util.parse_session_max_lifetime({"ras": {"session_max_lifetime": spec}})
+
+
+def test_realm_max_lifetime_reads_app_config(app):
+    app.config["SESSION_MAX_LIFETIMES"] = {"ras": {"user": 43200}}
+    with app.app_context():
+        assert util.realm_max_lifetime("ras", "user") == 43200
+        assert util.realm_max_lifetime("ras", "device") is None
+        assert util.realm_max_lifetime("other", "user") is None
+
+
+# --- session lifetime: device sessions without automatic refresh ----------------------------------------------------
+
+class TokenEndpoint:
+    def __init__(self, expires_in=1800, refresh_expires_in=None):
+        self.calls = 0
+        self.expires_in = expires_in
+        self.refresh_expires_in = refresh_expires_in
+
+    def refresh_access_token(self, refresh_token):
+        self.calls += 1
+        token = {"access_token": f"at-{self.calls}", "refresh_token": f"rt-{self.calls}",
+                 "expires_at": int(time.time()) + self.expires_in}
+        if self.refresh_expires_in:
+            token["refresh_expires_in"] = self.refresh_expires_in
+        return token
+
+
+class Factory:
+    def __init__(self, client):
+        self.client = client
+
+    def get_client(self, realm, **kwargs):
+        return self.client
+
+
+@pytest.fixture
+def endpoint(app):
+    client = TokenEndpoint()
+    app.config["OIDC_CLIENT_FACTORY"] = Factory(client)
+    app.config["OIDC_IDP_PROFILES"] = {"test": {"skip_token_revocation": True}}
+    return client
+
+
+@pytest.fixture
+def web(app):
+    if "session" not in app.blueprints:
+        app.register_blueprint(sm.session_blueprint)
+    return app.test_client()
+
+
+def _device_session(store, *, auto_refresh, token_due, token_left=1800):
+    """A device session shaped as the device flow creates it."""
+    now = int(time.time())
+    token_expires_at = now - 1 if token_due else now + token_left
+    sid = store.generate_session_id()
+    skey, _ = store.create_session(
+        session_id=sid,
+        session_type=SessionType.DEVICE,
+        access_token="old-at",
+        refresh_token="rt-0",
+        userinfo={"iss": "https://issuer", "sub": "u1"},
+        realm="test",
+        metadata={"allow_automatic_refresh": auto_refresh, "access_token_expires_at": token_expires_at},
+        expires_at=now + 7 * 86400 if auto_refresh else max(token_expires_at, now + 60),
+        session_ttl=None if auto_refresh else 0,
+        absolute_session_lifetime_secs=7 * 86400,
+    )
+    return sid, skey
+
+
+def _bearer(skey):
+    return {"Authorization": f"Bearer {skey}"}
+
+
+def test_plain_put_does_not_extend_a_session_without_auto_refresh(app, store, endpoint, web):
+    sid, skey = _device_session(store, auto_refresh=False, token_due=False)
+    before = store.get_session_data(sid).expires_at
+    assert web.put("/session", headers=_bearer(skey)).status_code == 200
+    assert store.get_session_data(sid).expires_at == before
+    assert endpoint.calls == 0
+
+
+def test_explicit_refresh_extends_a_session_without_auto_refresh(app, store, endpoint, web, monkeypatch):
+    monkeypatch.setattr(sm, "reaugment_session", lambda sid, realm: None)
+    sid, skey = _device_session(store, auto_refresh=False, token_due=True)
+    resp = web.put("/session?refresh_upstream=true", headers=_bearer(skey))
+    assert resp.status_code == 200
+    session = store.get_session_data(sid)
+    assert endpoint.calls == 1
+    assert session.expires_at == session.session_metadata.system["access_token_expires_at"]
+
+
+def test_legacy_put_does_not_refresh_a_session_without_auto_refresh(app, store, endpoint, web):
+    app.config["ENABLE_LEGACY_API"] = True
+    sid, skey = _device_session(store, auto_refresh=False, token_due=True)
+    before = store.get_session_data(sid).expires_at
+    assert web.put("/session", headers=_bearer(skey)).status_code == 200
+    assert endpoint.calls == 0
+    assert store.get_session_data(sid).expires_at == before
+
+
+def test_legacy_refresh_on_use_opt_in_refreshes_and_extends(app, store, endpoint, web):
+    app.config["ENABLE_LEGACY_API"] = True
+    app.config["LEGACY_DEVICE_REFRESH_ON_USE"] = True
+    sid, skey = _device_session(store, auto_refresh=False, token_due=True)
+    assert web.put("/session", headers=_bearer(skey)).status_code == 200
+    session = store.get_session_data(sid)
+    assert endpoint.calls == 1
+    assert session.expires_at == session.session_metadata.system["access_token_expires_at"]
+
+
+def test_legacy_put_still_refreshes_auto_refresh_sessions(app, store, endpoint, web):
+    app.config["ENABLE_LEGACY_API"] = True
+    sid, skey = _device_session(store, auto_refresh=True, token_due=True)
+    assert web.put("/session", headers=_bearer(skey)).status_code == 200
+    assert endpoint.calls == 1
+
+
+def test_refresh_never_extends_past_the_absolute_lifetime(app, store):
+    endpoint = TokenEndpoint(expires_in=30 * 86400)
+    app.config["OIDC_CLIENT_FACTORY"] = Factory(endpoint)
+    sid, _ = _device_session(store, auto_refresh=False, token_due=True)
+    session = store.get_session_data(sid)
+    with app.app_context():
+        assert util.refresh_access_token(sid, session)
+    assert session.expires_at == session.absolute_expires_at
+
+
+def test_idp_refresh_lifetime_is_held_to_the_realm_device_cap(app, store):
+    endpoint = TokenEndpoint(refresh_expires_in=30 * 86400)
+    app.config["OIDC_CLIENT_FACTORY"] = Factory(endpoint)
+    app.config["SESSION_MAX_LIFETIMES"] = {"test": {"device": 7 * 86400}}
+    sid, _ = _device_session(store, auto_refresh=True, token_due=True)
+    session = store.get_session_data(sid)
+    with app.app_context():
+        assert util.refresh_access_token(sid, session)
+    assert session.absolute_expires_at == session.created_at + 7 * 86400

@@ -10,8 +10,7 @@
       ],
       "allowed_resources": [
         "urn:deriva:rest:service:all"
-      ],
-      "max_session_ttl_seconds": 7200
+      ]
     },
 
     "deriva-mcp": {

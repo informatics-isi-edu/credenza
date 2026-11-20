@@ -34,6 +34,7 @@ from ..api.common.util import (
     get_missing_scope_claims,
     extract_jwt_txn,
     check_acr,
+    realm_max_lifetime,
     strtobool
 )
 
@@ -289,19 +290,33 @@ def device_callback():
                         failed_requirements=failed_acr)
             abort(403, description="Insufficient authentication assurance level")
 
-    # Determine refresh expiration
+    # Determine the session's lifetime. The absolute lifetime is the upstream refresh token's
+    # lifetime (0 or None from the IdP means "not stated", so fall back to MAX_REFRESH_TOKEN_LIFETIME
+    # days), never longer than the realm's device-session cap.
     now = int(time.time())
     absolute_session_lifetime_secs = tokens.get("refresh_expires_in")
-    # 0 generally indicates "no expiry" (dubious) and None isn't helpful, so fall back to the configured value or default
     if not absolute_session_lifetime_secs:
-        # default to 14 days if not configured
         absolute_session_lifetime_secs = current_app.config.get("MAX_REFRESH_TOKEN_LIFETIME", 14) * 86400
-        absolute_expires_at = now + absolute_session_lifetime_secs
-    else:
-        absolute_expires_at = now + absolute_session_lifetime_secs
+    device_cap = realm_max_lifetime(realm, "device")
+    if device_cap:
+        absolute_session_lifetime_secs = min(absolute_session_lifetime_secs, device_cap)
+    absolute_expires_at = now + absolute_session_lifetime_secs
+
+    # With automatic refresh the worker keeps the upstream tokens alive, so the session lasts its
+    # absolute lifetime. Without it, the session lasts only as long as the upstream access token:
+    # it does not slide on use (session_ttl 0), and only an upstream refresh the client asks for
+    # extends it (see refresh_access_token), never past the absolute lifetime.
+    auto_refresh = bool(flow.get("refresh", False))
+    session_ttl = None
+    expires_at = absolute_expires_at
+    if not auto_refresh:
+        session_ttl = 0
+        token_expires_at = _upstream_token_expires_at(tokens, now)
+        if token_expires_at:
+            expires_at = min(token_expires_at, absolute_expires_at)
 
     metadata = {
-        "allow_automatic_refresh":  flow.get("refresh", False),
+        "allow_automatic_refresh":  auto_refresh,
         "offline_access_granted":   offline_granted,
         "access_token_expires_at":  tokens.get("expires_at"),
         "refresh_token_expires_at": absolute_expires_at
@@ -323,8 +338,9 @@ def device_callback():
         allowed_resources=flow.get("allowed_resources",[]),
         metadata=metadata,
         additional_tokens=additional_tokens,
-        expires_at=absolute_expires_at,
-        absolute_session_lifetime_secs = absolute_session_lifetime_secs
+        expires_at=expires_at,
+        session_ttl=session_ttl,
+        absolute_session_lifetime_secs=absolute_session_lifetime_secs
     )
 
     flow.update({"verified": True, "session_key": session_key, "nonce": None, "code_verifier": None})
@@ -355,6 +371,15 @@ def device_callback():
     audit_session_attributes(session_id, userinfo, realm, trigger="device_login", enrichment=enrichment)
 
     return render_template_string(SUCCESS_HTML)
+
+
+def _upstream_token_expires_at(tokens: dict, now: int):
+    """Absolute expiry of the upstream access token in a token response, or None if not stated."""
+    if tokens.get("expires_at"):
+        return int(tokens["expires_at"])
+    if tokens.get("expires_in"):
+        return now + int(tokens["expires_in"])
+    return None
 
 
 SUCCESS_HTML = \

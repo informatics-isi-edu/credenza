@@ -52,7 +52,7 @@ def audit_identity(userinfo, realm=None):
 
     `sub` is only unique within its issuer, so `iss` is always recorded with it. `identity`
     is "<iss>/<sub>", formed exactly as GET /session forms the client id, which is also the
-    id ERMrest records for the client (ERMrest_client.ID, RCB/RMB). Service sessions have no
+    id resource servers see for the client. Service sessions have no
     issuer, so their identity is the bare sub. No personal information is included.
     """
     userinfo = userinfo or {}

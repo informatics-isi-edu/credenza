@@ -30,7 +30,7 @@ from .api.auth.oidc_client import OIDCClientFactory
 from .api.session.storage.session_store import SessionStore
 from .api.session.storage.backends.base import create_storage_backend
 from .api.common.claim_mapper import build_realm_claim_maps
-from .api.common.util import check_client_scope_coverage
+from .api.common.util import check_client_scope_coverage, parse_session_max_lifetime
 from .api.common.rate_limit import FixedWindowJitterLimiter
 from .api.common.crypto import AESGCMCodec
 from .api.common.crypto import register_default_hashers
@@ -73,6 +73,7 @@ def load_config(app):
         "CREDENZA_LEGACY_DEFAULT_RESOURCE": "urn:deriva:rest:service:all",
         "CREDENZA_DERIVED_SESSION_MAX_TTL": "1800",
         "CREDENZA_MAX_ABSOLUTE_SESSION_LIFETIME_SECONDS": "86400",
+        "CREDENZA_LEGACY_DEVICE_REFRESH_ON_USE": "false",
         "CREDENZA_LONG_ABSOLUTE_LIFETIME_AUDIT_THRESHOLD_SECONDS": "1209600",
     }
 
@@ -185,6 +186,9 @@ def load_config(app):
 
     # Per-realm audit attribute selectors (ADR-0012); a malformed block fails startup
     app.config["AUDIT_ATTRIBUTE_SELECTORS"] = build_realm_attribute_selectors(app.config["OIDC_IDP_PROFILES"])
+
+    # Per-realm session lifetime caps; a malformed block fails startup
+    app.config["SESSION_MAX_LIFETIMES"] = parse_session_max_lifetime(app.config["OIDC_IDP_PROFILES"])
 
     # Load secrets hashers
     register_default_hashers()

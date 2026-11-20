@@ -202,10 +202,16 @@ Flow:
 2. Load stored device-flow context using `state` as `device_code`.
 3. Exchange `code` for tokens using the configured OIDC _native_ client (native_client=True).
 4. Validate the ID token against the stored `nonce`.
-5. Compute `refresh_expires_at`:
+5. Compute the session's absolute lifetime:
    - If provider returns `refresh_expires_in` and it’s non-zero, use it.
    - Else fall back to `MAX_REFRESH_TOKEN_LIFETIME` (default 14 days) * 86400 seconds.
-6. Create a user session in the store (expires_at = refresh_expires_at).
+   - Never longer than the realm's `session_max_lifetime.device`, when that is set.
+6. Create a device session in the store:
+   - with `refresh` set, it lasts its absolute lifetime (the worker keeps the upstream tokens
+     alive);
+   - without `refresh`, it lasts only as long as the upstream access token, does not slide on
+     use, and is extended only by an explicit `PUT /authn/session?refresh_upstream=true`, never
+     past its absolute lifetime.
 7. If augmentation is configured and **deferred augmentation** is enabled, do a second augmentation pass and update the session.
 8. Mark the device flow as verified, stash `session_key`, and clear nonce/verifier.
 

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from requests.adapters import HTTPAdapter
 from typing import Iterable, Optional, Set, Tuple, List, Dict, Union
 import copy
-from flask import current_app, request, abort, g
+from flask import current_app, request, abort, g, has_app_context
 from urllib3.util import Retry
 from urllib.parse import urlparse
 from requests import HTTPError, Timeout, ConnectionError
@@ -116,6 +116,50 @@ def get_augmentation_provider(realm=None):
 def get_augmentation_provider_params(realm=None):
     profile = current_app.config["OIDC_IDP_PROFILES"].get(get_realm(realm), {})
     return profile.get("session_augmentation_params", {})
+
+
+# Per-realm session lifetime caps. A realm's IdP profile may declare
+#
+#     "session_max_lifetime": {"user": <seconds>, "device": <seconds>}
+#
+# "user" caps the absolute lifetime of interactive (browser) sessions; "device" caps device-flow
+# sessions, which are also bounded by the upstream refresh token's lifetime. Either value may be
+# omitted, which keeps the built-in behavior for that kind of session. The caps are fixed when a
+# session is created and measured from its creation time.
+SESSION_KINDS = ("user", "device")
+
+
+def parse_session_max_lifetime(profiles: Optional[dict]) -> Dict[str, Dict[str, int]]:
+    """Validate every realm's "session_max_lifetime"; returns {realm: {kind: seconds}}.
+
+    Raises ValueError on a malformed block, so a misconfigured cap fails startup instead of
+    silently leaving sessions uncapped.
+    """
+    caps = {}
+    for realm, profile in (profiles or {}).items():
+        spec = (profile or {}).get("session_max_lifetime")
+        if spec is None:
+            continue
+        if not isinstance(spec, dict):
+            raise ValueError(f"session_max_lifetime for realm '{realm}' must be an object")
+        unknown = set(spec) - set(SESSION_KINDS)
+        if unknown:
+            raise ValueError(f"session_max_lifetime for realm '{realm}' has unknown keys {sorted(unknown)}; "
+                             f"expected {list(SESSION_KINDS)}")
+        for kind, seconds in spec.items():
+            if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds < 1:
+                raise ValueError(f"session_max_lifetime.{kind} for realm '{realm}' must be a positive "
+                                 f"integer number of seconds")
+        if spec:
+            caps[realm] = dict(spec)
+    return caps
+
+
+def realm_max_lifetime(realm, kind: str) -> Optional[int]:
+    """The realm's configured cap in seconds for "user" or "device" sessions, or None if unset."""
+    if not has_app_context():
+        return None
+    return (current_app.config.get("SESSION_MAX_LIFETIMES") or {}).get(realm, {}).get(kind)
 
 
 def augment_session(tokens, realm, userinfo, metadata) -> Tuple[dict, dict, Optional[EnrichmentResult]]:
@@ -229,8 +273,21 @@ def refresh_access_token(sid, session):
         session.session_metadata.system["access_token_expires_at"] = refreshed["expires_at"]
         refresh_expires_in = refreshed.get("refresh_expires_in")
         if refresh_expires_in:  # 0 means "no expiry" for offline tokens; skip to preserve existing cap
-            session.absolute_expires_at = now + refresh_expires_in
+            new_absolute = now + refresh_expires_in
+            # never past the realm's device-session cap, measured from session creation
+            device_cap = realm_max_lifetime(realm, "device") if session.is_device() else None
+            if device_cap:
+                new_absolute = min(new_absolute, session.created_at + device_cap)
+            session.absolute_expires_at = new_absolute
             session.session_metadata.system["refresh_token_expires_at"] = session.absolute_expires_at
+
+        # A device session without automatic refresh lasts only as long as its upstream access token;
+        # a refresh it asked for extends it to the new token's expiry, never past its absolute lifetime.
+        if session.is_device() and not session.session_metadata.system.get("allow_automatic_refresh"):
+            new_expiry = int(refreshed["expires_at"])
+            if session.absolute_expires_at:
+                new_expiry = min(new_expiry, int(session.absolute_expires_at))
+            session.expires_at = max(session.expires_at, new_expiry)
 
         _clear_refresh_failures(session)
         logger.debug(f"Access token refresh for session {sid} for {identity['identity']} on realm {realm} complete")
@@ -328,8 +385,8 @@ def revoke_tokens(sid, session):
 def reaugment_session(sid, realm, lock_timeout: float = SHORT_LOCK_WAIT) -> Optional[SessionData]:
     """Re-run the realm's augmentation for an existing session and persist the result.
 
-    Augmentation can call a resource server as the user (the ERMrest role provider does), and that
-    server looks the session up with PUT /session, which takes this session's lock. So the provider
+    An augmentation provider may call a resource server with the user's own session key, and that
+    server may resolve the key with PUT /session, which takes this session's lock. So the provider
     runs on a copy of the session's claims with no lock held, and the lock is taken only to merge
     the result into a freshly read session and write it. Writes a session_attributes_updated event
     (trigger "refresh") when the realm selects attributes and they changed or a source failed.

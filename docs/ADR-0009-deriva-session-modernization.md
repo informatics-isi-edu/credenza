@@ -186,7 +186,9 @@ The migration must keep the ACL-relevant id strings unchanged where continuity i
    ermrest/hatrac, then Chaise and deriva-py, each reading modern keys.
 4. **Phase 3 -- Legacy block + shim retirement.** Once all consumers are migrated: stop emitting
    the legacy block, delete the Axis-1 branch, and remove `/preauth` and the legacy `/logout` /
-   `DELETE /session` quirks.
+   `DELETE /session` quirks. Also remove the transitional `CREDENZA_LEGACY_DEVICE_REFRESH_ON_USE`
+   setting, which lets legacy session-proxy `PUT`s refresh device sessions started without
+   automatic refresh.
 5. **Phase 4 (must-do, runs in parallel) -- Axis 4 retirement.** Treated as required, not best-effort,
    because of the brokering-property violation (decision #6). Expedite the `deriva-globus-auth-utils`
    -> `deriva-credenza-auth-utils` client migration; once clients have moved, remove `/discovery`,
@@ -228,7 +230,8 @@ today:
 
 1. **Session lookup is a write.** Resource servers (ERMrest, hatrac) identify a caller through the
    webauthn2 session proxy, which sends `PUT /authn/session`. That both returns the session and
-   extends it, and in legacy mode also refreshes upstream tokens when due. The most frequent
+   extends it, and in legacy mode also refreshes the upstream tokens of automatically refreshed
+   device sessions when due. The most frequent
    request Credenza serves is therefore a read-modify-write on the session record. That is why
    device-session `PUT`s need a per-session lock, a 2-second wait cap and a no-write fallback.
 2. **Authorization data lives in the resource server that needs it.** Role and access-grant
@@ -240,7 +243,7 @@ today:
 3. **Authorization is a snapshot frozen into the session.** Principals are copied into the session
    at login and on refresh, so revoking a grant takes effect only when the snapshot is recomputed:
    about 30 minutes for automatically refreshed device sessions, and not until the session ends
-   for browser sessions (up to 24 hours).
+   for browser sessions (up to 24 hours, or the realm's `session_max_lifetime.user`).
 4. **The legacy document shape is the contract.** The `client` / `attributes` block, the flattened
    identities list and the `webauthn` cookie name all exist for compatibility.
 
@@ -273,8 +276,10 @@ If lookups stop extending sessions, something else must.
 
 - **Browser sessions:** Chaise extends its own session from user activity, rate-limited (the
   cookie login flow is kept, per decision #1).
-- **Device sessions:** drop sliding expiry in favour of a fixed absolute lifetime plus the
-  worker's refresh cycle, so nothing needs to extend them on use.
+- **Device sessions:** already do not slide. A session with automatic refresh expires at its
+  absolute lifetime and the worker keeps its tokens alive; one without ends with its upstream
+  access token unless the client sends `refresh_upstream=true`. Nothing needs to extend them on
+  use, apart from the transitional `CREDENZA_LEGACY_DEVICE_REFRESH_ON_USE` setting.
 - Effect: with A and B together, the per-session lock is needed only around refresh and delete,
   both of which are infrequent.
 - Open: whether any consumer relies on a session staying alive purely because a resource server

@@ -549,3 +549,60 @@ def test_device_callback_userinfo_fallback_failure_creates_degraded_session(clie
         assert stub.userinfo_fetch_calls == ["acc"]
     finally:
         app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+# ---------------------------------------------------------------------------
+# Device session lifetime (realm session_max_lifetime, refresh=false following the upstream token)
+# ---------------------------------------------------------------------------
+
+def _device_login(client, app, store, monkeypatch, *, refresh, tokens, device_code):
+    stub = StubDeviceClient(tokens=tokens, userinfo={"sub": "u1", "iss": "https://issuer"})
+    _setup_fallback_device_flow(app, store, stub, monkeypatch, device_code=device_code)
+    flow = store.get_device_flow(device_code)
+    flow["refresh"] = refresh
+    store.set_device_flow(device_code, flow, ttl=60)
+    resp = client.get("/device/callback", query_string={"code": "c", "state": device_code})
+    assert resp.status_code == 200
+    _, session = store.get_session_by_session_key(store.get_device_flow(device_code)["session_key"])
+    return session
+
+
+def test_device_session_without_auto_refresh_ends_with_upstream_token(client, app, store, monkeypatch):
+    now = int(time.time())
+    app.config["OIDC_IDP_PROFILES"]["test"] = {}
+    try:
+        session = _device_login(client, app, store, monkeypatch, refresh=False, device_code="DCNOREF",
+                                tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                                        "scope": "openid", "expires_at": now + 1800})
+        assert session.expires_at == now + 1800
+        assert session.session_ttl == 0, "must not slide on use"
+        assert session.absolute_expires_at > session.expires_at
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_device_session_with_auto_refresh_lasts_its_absolute_lifetime(client, app, store, monkeypatch):
+    now = int(time.time())
+    app.config["OIDC_IDP_PROFILES"]["test"] = {}
+    try:
+        session = _device_login(client, app, store, monkeypatch, refresh=True, device_code="DCREF",
+                                tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                                        "scope": "openid", "expires_at": now + 1800})
+        assert session.expires_at == session.absolute_expires_at
+        assert abs(session.absolute_expires_at - (now + 14 * 86400)) <= 2
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)
+
+
+def test_realm_device_cap_bounds_device_sessions(client, app, store, monkeypatch):
+    now = int(time.time())
+    app.config["OIDC_IDP_PROFILES"]["test"] = {}
+    monkeypatch.setitem(app.config, "SESSION_MAX_LIFETIMES", {"test": {"device": 7 * 86400}})
+    try:
+        session = _device_login(client, app, store, monkeypatch, refresh=True, device_code="DCCAP",
+                                tokens={"id_token": "id", "access_token": "acc", "refresh_token": "rt",
+                                        "scope": "openid", "expires_at": now + 1800})
+        assert abs(session.absolute_expires_at - (now + 7 * 86400)) <= 2
+        assert session.expires_at == session.absolute_expires_at
+    finally:
+        app.config["OIDC_IDP_PROFILES"].pop("test", None)

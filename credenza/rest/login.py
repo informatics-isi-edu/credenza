@@ -35,6 +35,7 @@ from ..api.common.util import (
     extract_jwt_txn,
     check_acr,
     end_session,
+    realm_max_lifetime,
     safe_referrer,
     is_transient_request_error
 )
@@ -218,6 +219,7 @@ def callback():
             additional_tokens=additional_tokens,
             allowed_resources=authn_request_ctx.get("oauth_resources") if is_oauth_flow else None,
             session_ttl=authn_request_ctx.get("oauth_session_ttl") if is_oauth_flow else None,
+            absolute_session_lifetime_secs=realm_max_lifetime(realm, "user"),
         )
 
         sub = userinfo.get("sub")
